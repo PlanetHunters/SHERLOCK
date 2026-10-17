@@ -27,16 +27,21 @@ class TestsEllcExposureIntegration(unittest.TestCase):
         weights = np.ones(integration_points) / (integration_points - 1)
         weights[[0, -1]] *= 0.5
 
-        for model in (ellc.lc, ellc.fluxes, ellc.rv):
+        models = (
+            (ellc.lc, model_parameters),
+            (ellc.fluxes, model_parameters),
+            (ellc.rv, model_parameters | {"a": 10, "q": 0.5}),
+        )
+        for model, parameters in models:
             with self.subTest(model=model.__name__):
                 actual = model(
                     times,
                     t_exp=exposure_time,
                     n_int=integration_points,
-                    **model_parameters,
+                    **parameters,
                 )
                 expected = [
-                    model(times + offset, **model_parameters)
+                    model(times + offset, **parameters)
                     for offset in offsets
                 ]
                 if isinstance(actual, tuple):
