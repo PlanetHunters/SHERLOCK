@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Replace the vendored GTLS submodule with the pinned `gputls==0.6.1` PyPI
+  dependency; CuPy remains a CUDA-specific optional installation requirement.
+
 ## 1.6.0 — 2026-10-18
 
 ### Added

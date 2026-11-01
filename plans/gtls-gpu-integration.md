@@ -1,5 +1,11 @@
 # GTLS GPU Integration Plan
 
+> Historical design notes for the SHERLOCK 1.6.0 vendored integration. Issue
+> [#118](https://github.com/franpoz/SHERLOCK/issues/118) supersedes its vendoring
+> recommendation: SHERLOCK now depends on the published `gputls==0.6.1`
+> distribution. The API observations below originated from the 0.5.1 source and
+> must be revalidated against PyPI 0.6.1 before relying on them.
+
 ## Goal
 
 When SHERLOCK is run in GPU mode (`SEARCH_ENGINE: gpu`), use GTLS (`gputls`) as
@@ -38,15 +44,14 @@ non-search code until the GTLS path is proven equivalent.
 
 ### GTLS API and behavior
 
-SHERLOCK vendors GTLS from its `sherlockpipe/gtls` Git submodule, pinned at
-commit `74e449c325792a763dde4fbffab98039c5e8c111` (GTLS version `0.5.1`) from
-`https://github.com/martindevora/GTLS`. The package build maps the submodule's
-`src/gputls` package into SHERLOCK's wheel and source distribution. There is no
-separate PyPI `gputls` dependency.
+SHERLOCK 1.6.0 originally vendored GTLS from
+`sherlockpipe/gtls`, pinned at commit `74e449c325792a763dde4fbffab98039c5e8c111`
+(version `0.5.1`) from `https://github.com/martindevora/GTLS`. This packaging
+was replaced under issue #118 by the PyPI dependency `gputls==0.6.1`.
 
-All API, result-schema, CUDA-kernel, and runtime observations below must be
-checked against the pinned submodule commit, not against an independently
-installed `gputls` wheel.
+All API, result-schema, CUDA-kernel, and runtime observations below describe the
+old pinned 0.5.1 submodule snapshot. Recheck them against the installed PyPI
+0.6.1 distribution before using them as current compatibility claims.
 
 1. Public usage is `from gputls import gtls`, then
    `gtls(t=time, y=flux).power(...)`.
@@ -69,11 +74,11 @@ installed `gputls` wheel.
 6. GTLS depth is returned as a flux-depth value (`1 - transitMean`), while
    its transit-time/depth statistics use GTLS-specific duration and epoch
    conventions. These must be normalized and verified, not copied blindly.
-7. GTLS's `pyproject.toml` declares NumPy, Numba, tqdm, batman-package, and
-   pynvml, but intentionally leaves CuPy to the user. SHERLOCK declares those
-   vendored runtime dependencies itself; CUDA version, CuPy wheel, NVIDIA
-   driver, and VRAM remain deployment requirements.
-8. GTLS uses compiled CUDA kernels, NVML memory inspection, and explicit GPU
+7. GTLS 0.6.1 declares NumPy, Numba, tqdm, and batman-package, with CuPy
+   available through CUDA-specific extras or a user-selected compatible wheel.
+   CUDA version, CuPy wheel, NVIDIA driver, and VRAM remain deployment
+   requirements.
+8. GTLS uses compiled CUDA kernels and explicit GPU
    device selection. It can use multiple GPUs through subprocesses, but
    SHERLOCK should initially target one GPU per SHERLOCK process.
 

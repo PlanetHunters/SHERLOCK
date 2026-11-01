@@ -87,12 +87,11 @@ You can run SHERLOCK PIPEline as a standalone package by using:
 
 ### GPU setup
 
-Requires an NVIDIA GPU and CUDA 13 driver.
-SHERLOCK bundles GTLS 0.5.1 from the pinned `sherlockpipe/gtls` submodule;
-the GPU setup only needs the compatible CuPy and CUDA runtime packages.
-When upgrading an environment from an earlier SHERLOCK release that installed
-standalone `gputls` from PyPI, uninstall that package before upgrading SHERLOCK:
-the bundled code uses the same `gputls` import name.
+Requires an NVIDIA GPU, a compatible CUDA driver/runtime, and a CuPy build that
+matches the local CUDA installation. SHERLOCK installs `gputls==0.6.1` from
+PyPI; CuPy remains a separately selected GPU-specific dependency. The base
+SHERLOCK dependency set does not install CuPy, and the GTLS module is imported
+only when `SEARCH_ENGINE: 'gpu'` is selected.
 
 ```bash
 conda activate sherlock311
