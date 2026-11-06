@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -108,3 +110,25 @@ def test_period_indexed_labels_preserve_evaluated_candidate_identity():
     }
     with pytest.raises(ValueError, match="aligned"):
         ExoMoonLeastSquares.spectrum_candidates([2.0], [[0.1, -1.0], [0.2, -2.0]], [0.3])
+
+
+def test_search_phase_reference_is_planet_t0_when_first_epoch_is_dropped(monkeypatch):
+    emls = ExoMoonLeastSquares.__new__(ExoMoonLeastSquares)
+    emls.planet_t0 = 0.0
+    emls.bary_t0s = [10.0, 20.0]
+    emls.time = np.array([9.9, 10.0, 10.1, 19.9, 20.0, 20.1])
+    emls.flux = np.ones(6)
+    emls.flux_err = np.full(6, 1e-3)
+    received = []
+
+    def capture(time, flux, flux_err, planet_t0, *args):
+        received.append(planet_t0)
+        raise StopIteration
+
+    monkeypatch.setattr(ExoMoonLeastSquares, 'compute_moon_transit_scenarios', staticmethod(capture))
+    search_input = SimpleNamespace(moon_alpha=0.0, moon_period=1.0, half_moon_orbit_transit_duration=0.1,
+                                   half_moon_max_orbit_transit_duration=0.2, half_moon_transit_duration=0.05)
+    with pytest.raises(StopIteration):
+        emls.search(search_input)
+
+    assert received == [0.0]

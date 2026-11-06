@@ -69,9 +69,28 @@ class InjectionTruthEvent:
     coverage: str
 
 
+class PlanetModelError(ValueError):
+    """No trustworthy shared planet model exists, so EMLS must not continue."""
+
+
+class TransitFitError(RuntimeError):
+    """A transit fit was rejected, with the structured status of the rejection."""
+
+    def __init__(self, status, message):
+        super().__init__(f"Invalid transit fit [{status}]: {message}")
+        self.status = status
+
+
 class ExoMoonLeastSquares:
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
+    # Hard fit bounds on a/R*, in units of the supplied uncertainty.
+    A_OVER_RSTAR_BOUND_SIGMA = 3.0
+    # Folded residual bins beyond this significance are flagged for review.
+    FOLD_RESIDUAL_FLAG_SIGMA = 5.0
+    FOLD_RESIDUAL_BINS = 12
+    # An epoch expected above this SNR cannot miss its transit through noise.
+    EPHEMERIS_TIMING_MAX_SNR = 8.0
 
     def __init__(self, object_dir, cpus, star_mass, star_radius, ab, planet_radius, planet_radius_err,
                  planet_mass, planet_period,
@@ -83,7 +102,7 @@ class ExoMoonLeastSquares:
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0,
-                  exposure_times_seconds=None):
+                  exposure_times_seconds=None, planet_a_over_rstar_err: float = 0.0):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -152,7 +171,13 @@ class ExoMoonLeastSquares:
         subtract_mode : str, optional
             Planet subtraction mode: 'subtract' (remove model) or 'mask'
             (cut in-transit points). Default 'subtract'.
+        planet_a_over_rstar_err : float, optional
+            Uncertainty of a/R*. The shared fit may move a/R* within
+            A_OVER_RSTAR_BOUND_SIGMA of it. Default 0 keeps a/R* fixed.
         """
+        if not np.isfinite(planet_a_over_rstar_err) or planet_a_over_rstar_err < 0:
+            raise ValueError("planet_a_over_rstar_err must be finite and nonnegative")
+        self.planet_a_over_rstar_err = planet_a_over_rstar_err
         self.object_dir = object_dir
         self.cpus = cpus
         self.star_mass = star_mass
@@ -267,7 +292,7 @@ class ExoMoonLeastSquares:
     @staticmethod
     def catalog_planet_geometry(catalog, star_mass, star_radius, planet_period,
                                 planet_radius, planet_impact_param, planet_ecc=0.15,
-                                planet_arg_periastron=0.0):
+                                planet_arg_periastron=0.0, star_mass_err=0.0, star_radius_err=0.0):
         """Validate catalog geometry before executing catalog/network work."""
         if catalog not in ('tois', 'kois'):
             raise ValueError("Catalog must be 'tois' or 'kois'")
@@ -282,6 +307,11 @@ class ExoMoonLeastSquares:
 
         planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
         a_over_rstar = (planet_semimajor_axis * AU_TO_RSUN) / star_radius
+        if not (np.isfinite(star_mass_err) and np.isfinite(star_radius_err)
+                and star_mass_err >= 0 and star_radius_err >= 0):
+            raise ValueError("Stellar mass and radius uncertainties must be finite and nonnegative")
+        # a ~ M^(1/3) at fixed period, so a/R* scales as M^(1/3) / R.
+        a_over_rstar_err = a_over_rstar * np.hypot(star_mass_err / (3 * star_mass), star_radius_err / star_radius)
         if catalog == 'kois':
             planet_inc = ExoMoonLeastSquares.inclination_from_impact_parameter(
                 a_over_rstar, planet_impact_param, planet_ecc, planet_arg_periastron)
@@ -293,6 +323,7 @@ class ExoMoonLeastSquares:
                 a_over_rstar, planet_inc, planet_ecc, planet_arg_periastron)
         return {
             'planet_semimajor_axis': planet_semimajor_axis,
+            'planet_a_over_rstar_err': a_over_rstar_err,
             'planet_inc': planet_inc,
             'planet_inc_err': planet_inc_err,
             'planet_impact_param': planet_impact_param,
@@ -598,6 +629,16 @@ class ExoMoonLeastSquares:
                 start = x0.copy()
                 start[0] = fraction
                 starts.append(start)
+        inc_index = fields.index('inc') if 'inc' in fields else None
+        inc_is_fitted = inc_index is not None and active[inc_index]
+        if inc_is_fitted and guess[inc_index] >= bounds[inc_index, 1]:
+            # The flux gradient vanishes at inc=90 (b ~ cos(inc)), so a start
+            # on that bound cannot leave it even for a non-central transit.
+            inc_x_index = int(np.sum(active[:inc_index]))
+            for fraction in (0.25, 0.75):
+                start = x0.copy()
+                start[inc_x_index] = fraction
+                starts.append(start)
         candidates = []
         for start in starts:
             if not np.any(active):
@@ -609,7 +650,10 @@ class ExoMoonLeastSquares:
             except Exception:
                 continue
             value = objective(res.x)
-            if res.success and np.isfinite(value) and np.all(np.isfinite(res.x)):
+            # Status 0 is the evaluation limit, not a failure: correlated
+            # parameters such as a and inc can walk a long, shallow valley.
+            # The validity checks below still apply to the best candidate.
+            if (res.success or res.status == 0) and np.isfinite(value) and np.all(np.isfinite(res.x)):
                 candidates.append((value, unpack(res.x), res.nfev, res.message))
         if not candidates:
             return TransitFitResult(None, None, False, 'optimizer_failure',
@@ -653,6 +697,10 @@ class ExoMoonLeastSquares:
         x_best = ((theta - bounds[:, 0]) / scale)[active]
         active_bounds = np.isclose(x_best, 0, atol=np.sqrt(np.finfo(float).eps)) | np.isclose(
             x_best, 1, atol=np.sqrt(np.finfo(float).eps))
+        if inc_is_fitted and bounds[inc_index, 1] >= 90:
+            # inc=90 is the physical central-transit limit, not a prior edge.
+            inc_x_index = int(np.sum(active[:inc_index]))
+            active_bounds[inc_x_index] &= x_best[inc_x_index] < 0.5
         if np.any(active_bounds):
             return TransitFitResult(None, None, False, 'active_bound',
                                     'Optimized transit is pinned to a fitted parameter bound.', nfev, value,
@@ -669,7 +717,7 @@ class ExoMoonLeastSquares:
             time, flux, flux_err, guess, bounds, transit_params, fields, expected_duration,
             exposure_times_seconds)
         if not result.success:
-            raise RuntimeError(f"Invalid transit fit [{result.status}]: {result.message}")
+            raise TransitFitError(result.status, result.message)
         return result.theta, result.model
 
     @staticmethod
@@ -698,22 +746,32 @@ class ExoMoonLeastSquares:
             transit_params, ['t0', 'rp'], exposure_times_seconds=exposure_times_seconds)
 
     @staticmethod
-    def _profile_local_baseline(time, flux, flux_err, center, duration):
+    def _profile_local_baseline(time, flux, flux_err, center, duration, protected_half_window=0.0,
+                                evaluate_time=None):
         """Profile a conservative local line from protected, two-sided OOT data.
 
         The planet and any potentially overlapping moon are excluded from the
         baseline fit. A linear nuisance is used only when each side has at
         least three OOT samples; otherwise the unit baseline is retained.
+
+        Parameters
+        ----------
+        protected_half_window : float, optional
+            Half-width in days around center kept out of the fit, in addition
+            to 1.5 durations. Use it to cover every possible moon position.
+        evaluate_time : array_like or None, optional
+            Times at which to return the baseline. Default is time.
         """
         time, flux, flux_err = ExoMoonLeastSquares._validate_light_curve(time, flux, flux_err)
+        evaluate_time = time if evaluate_time is None else np.asarray(evaluate_time, dtype=float)
         if not np.isfinite(duration) or duration <= 0:
-            return np.ones_like(flux), {'status': 'disabled_invalid_duration'}
+            return np.ones_like(evaluate_time), {'status': 'disabled_invalid_duration'}
         offset = (time - center) / duration
-        protected = np.abs(time - center) < 1.5 * duration
+        protected = np.abs(time - center) < max(1.5 * duration, protected_half_window)
         left = (~protected) & (offset < 0)
         right = (~protected) & (offset > 0)
         if np.sum(left) < 3 or np.sum(right) < 3:
-            return np.ones_like(flux), {
+            return np.ones_like(evaluate_time), {
                 'status': 'disabled_insufficient_two_sided_oot',
                 'oot_left': int(np.sum(left)), 'oot_right': int(np.sum(right)),
             }
@@ -722,11 +780,11 @@ class ExoMoonLeastSquares:
         weights = 1.0 / flux_err[oot] ** 2
         normal = design.T @ (weights[:, None] * design)
         if not np.all(np.isfinite(normal)) or np.linalg.cond(normal) > 1e10:
-            return np.ones_like(flux), {'status': 'disabled_ill_conditioned'}
+            return np.ones_like(evaluate_time), {'status': 'disabled_ill_conditioned'}
         coefficients = np.linalg.solve(normal, design.T @ (weights * flux[oot]))
-        baseline = coefficients[0] + coefficients[1] * offset
+        baseline = coefficients[0] + coefficients[1] * (evaluate_time - center) / duration
         if not np.all(np.isfinite(baseline)) or np.any(baseline <= 0):
-            return np.ones_like(flux), {'status': 'disabled_nonpositive_baseline'}
+            return np.ones_like(evaluate_time), {'status': 'disabled_nonpositive_baseline'}
         covariance = np.linalg.inv(normal)
         return baseline, {
             'status': 'profiled_linear_oot', 'intercept': float(coefficients[0]),
@@ -735,6 +793,81 @@ class ExoMoonLeastSquares:
             'slope_uncertainty': float(np.sqrt(covariance[1, 1])),
             'oot_left': int(np.sum(left)), 'oot_right': int(np.sum(right)),
         }
+
+    def moon_orbit_half_window(self):
+        """Half-width in days around a transit where a Hill-bound moon can transit."""
+        planet_mass = np.max(self.planet_mass_grid) * M_earth_to_M_sun
+        max_period = self.au_to_period(
+            planet_mass, self.compute_hill_radius(self.star_mass, planet_mass, self.planet_semimajor_axis,
+                                                  self.planet_ecc)) * 0.5
+        moon_semimajor_axis = self.compute_semimajor_axis(planet_mass, max_period)
+        return self.compute_transit_duration(self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN,
+                                             self.planet_period, moon_semimajor_axis * AU_TO_RSUN,
+                                             self.planet_impact_param) / 2
+
+    def _fit_epoch_t0(self, time, flux, flux_err, t0_guess, ephemeris_t0, duration_window, params, exposure_times):
+        """Fit one epoch's timing, or use the ephemeris for a too-shallow transit.
+
+        Returns (theta, model, timing_source) with timing_source 'fitted' or
+        'ephemeris'. An epoch that should be detectable but shows no transit
+        is a real anomaly, so its rejection is re-raised.
+        """
+        try:
+            theta, model = ExoMoonLeastSquares.fit_single_t0(
+                time, flux, flux_err, t0_guess, duration_window, params, exposure_times)
+            return theta, model, 'fitted'
+        except TransitFitError as exc:
+            if exc.status != 'no_improvement':
+                raise
+            rejection = exc
+        model, expected_snr = self._expected_transit(time, flux_err, ephemeris_t0, params, exposure_times)
+        if expected_snr >= self.EPHEMERIS_TIMING_MAX_SNR:
+            raise rejection
+        return np.asarray([ephemeris_t0]), model, 'ephemeris'
+
+    @staticmethod
+    def _expected_transit(time, flux_err, t0, params, exposure_times):
+        """Return the transit model at t0 and the SNR it would have in this data."""
+        expected = copy.deepcopy(params)
+        expected.t0 = 0.0
+        model = ExoMoonLeastSquares._transit_model(expected, time - t0, exposure_times)
+        return model, np.sqrt(np.sum(((1 - model) / flux_err) ** 2))
+
+    def _fold_timing_offset(self, time, flux, flux_err, t0, duration_window, params, exposure_times):
+        """Return the epoch's timing offset, so TTVs do not smear the folded shape.
+
+        Weak epochs stay at the ephemeris: aligning them would fit their noise
+        and sharpen the fold artificially.
+        """
+        _, expected_snr = self._expected_transit(time, flux_err, t0, params, exposure_times)
+        if expected_snr < self.EPHEMERIS_TIMING_MAX_SNR:
+            return 0.0
+        try:
+            theta, _ = ExoMoonLeastSquares.fit_single_t0(
+                time, flux, flux_err, t0, duration_window, params, exposure_times)
+        except TransitFitError:
+            return 0.0
+        return theta[0] - t0
+
+    @staticmethod
+    def _fold_residual_diagnostic(time, flux, flux_err, model, t0, duration):
+        """Report the most significant binned in-transit residual of a folded fit.
+
+        A flag rather than a rejection: moons and spots also leave residuals.
+        """
+        edges = np.linspace(t0 - 0.6 * duration, t0 + 0.6 * duration,
+                            ExoMoonLeastSquares.FOLD_RESIDUAL_BINS + 1)
+        bins = np.digitize(time, edges) - 1
+        weights = 1.0 / flux_err ** 2
+        significances = []
+        for index in range(ExoMoonLeastSquares.FOLD_RESIDUAL_BINS):
+            in_bin = bins == index
+            if np.sum(in_bin) > 3:
+                weight = np.sum(weights[in_bin])
+                significances.append(np.sum(weights[in_bin] * (flux[in_bin] - model[in_bin])) / np.sqrt(weight))
+        max_abs_sigma = float(np.max(np.abs(significances))) if significances else 0.0
+        status = 'structured' if max_abs_sigma > ExoMoonLeastSquares.FOLD_RESIDUAL_FLAG_SIGMA else 'ok'
+        return {'status': status, 'max_abs_sigma': max_abs_sigma, 'bins': len(significances)}
 
     @staticmethod
     def signal_transfer_metrics(injected_signal, residual_difference, flux_err):
@@ -942,7 +1075,10 @@ class ExoMoonLeastSquares:
             mask = np.abs(time - t0) < duration_window
             if len(time[mask]) < self.min_cadences_per_t0:
                 continue
-            fold_time.append(time[mask] - t0)
+            epoch_exposures = None if exposure_times_seconds is None else exposure_times_seconds[mask]
+            timing_offset = 0.0 if self.skip_fold_fit else self._fold_timing_offset(
+                time[mask], flux[mask], flux_err[mask], t0, duration_window, params, epoch_exposures)
+            fold_time.append(time[mask] - t0 - timing_offset)
             fold_flux.append(flux[mask])
             if flux_err is not None:
                 fold_flux_err.append(flux_err[mask])
@@ -958,11 +1094,10 @@ class ExoMoonLeastSquares:
                                    if exposure_times_seconds is not None else None)
             fold_t0 = 0.0
             fold_guess = [fold_t0, params.a, self.planet_inc, params.rp]
+            a_margin = self.A_OVER_RSTAR_BOUND_SIGMA * self.planet_a_over_rstar_err
             fold_bounds = [(fold_time.min(), fold_time.max()),
-                           # No semimajor-axis uncertainty is part of the
-                           # public EMLS input contract. Keep its catalog
-                           # value fixed rather than inventing a +/-2% prior.
-                           (fold_guess[1], fold_guess[1]),
+                           # Fixed unless the caller supplies an uncertainty.
+                           (max(fold_guess[1] - a_margin, 1.0), fold_guess[1] + a_margin),
                              (max(fold_guess[2] - self.planet_inc_err, 0),
                               min(fold_guess[2] + self.planet_inc_err, 90)),
                             (max(1e-5, fold_guess[3] - self.planet_radius_err / star_radius_rearth),
@@ -985,9 +1120,10 @@ class ExoMoonLeastSquares:
                 params.inc = fold_theta[2]
                 params.rp = fold_theta[3]
             else:
-                fold_theta = np.asarray(fold_guess, dtype=float)
-                logging.warning("Shared planet fit rejected [%s]: %s; using catalog geometry for local fit validation.",
-                                shared_fit.status, shared_fit.message)
+                reason = f"Shared planet fit rejected [{shared_fit.status}]: {shared_fit.message}"
+                self.subtraction_status = {'status': 'shared_fit_failed', 'reason': reason,
+                                           'retained_epochs': 0, 'rejected_epochs': len(self.bary_t0s)}
+                raise PlanetModelError(reason)
         else:
             self.shared_fit_status = TransitFitResult(None, None, False, 'skipped',
                                                        'Shared fold fit disabled by configuration.', 0,
@@ -1007,6 +1143,12 @@ class ExoMoonLeastSquares:
             # Do not discard observed context if the fitted physical duration
             # is shorter, but guarantee two T14s for the local timing fits.
             duration_window = max(duration_window, self.planet_duration * 2)
+            self.shared_fit_residual = self._fold_residual_diagnostic(
+                fold_time, fold_flux, fold_flux_err, shared_fit.model, fold_t0_val, self.planet_duration)
+            if self.shared_fit_residual['status'] == 'structured':
+                logging.warning("Folded planet residual reaches %.1f sigma: the shared model may be biased, or the "
+                                "residual may be astrophysical. Review before trusting moon results.",
+                                self.shared_fit_residual['max_abs_sigma'])
             if plot:
                 # Build initial-guess model
                 params_guess = batman.TransitParams()
@@ -1049,6 +1191,8 @@ class ExoMoonLeastSquares:
                                    'retained_epochs': 0, 'rejected_epochs': 0}
         accepted_t0s = []
         rejected_t0s = []
+        moon_half_window = self.moon_orbit_half_window()
+        baseline_half_window = max(duration_window, min(2 * moon_half_window, self.planet_period / 2))
         for t0 in self.bary_t0s:
             params = copy.deepcopy(self.shared_planet_params)
             mask = np.abs(time - t0) < duration_window
@@ -1062,14 +1206,18 @@ class ExoMoonLeastSquares:
                 # First estimate timing from the shared shape.  The baseline is
                 # then profiled only on protected OOT points and timing is
                 # refined once on the normalized data.
-                initial_theta, _ = ExoMoonLeastSquares.fit_single_t0(
-                    local_time, local_flux, local_err, t0, duration_window, params, local_exposure)
+                initial_theta, _, _ = self._fit_epoch_t0(
+                    local_time, local_flux, local_err, t0, t0, duration_window, params, local_exposure)
+                # The line comes from beyond every possible moon position, so
+                # it can use data outside the local fit window.
+                baseline_mask = np.abs(time - t0) < baseline_half_window
                 baseline, baseline_diagnostic = self._profile_local_baseline(
-                    local_time, local_flux, local_err, initial_theta[0], self.planet_duration)
+                    time[baseline_mask], flux[baseline_mask], flux_err[baseline_mask], initial_theta[0],
+                    self.planet_duration, moon_half_window, local_time)
                 normalized_flux = local_flux / baseline
                 normalized_err = local_err / baseline
-                best_theta, best_model = ExoMoonLeastSquares.fit_single_t0(
-                    local_time, normalized_flux, normalized_err, initial_theta[0], duration_window,
+                best_theta, best_model, timing_source = self._fit_epoch_t0(
+                    local_time, normalized_flux, normalized_err, initial_theta[0], t0, duration_window,
                     params, local_exposure)
             except (ValueError, RuntimeError) as exc:
                 rejected_t0s.append(t0)
@@ -1089,7 +1237,8 @@ class ExoMoonLeastSquares:
             diagnostic = {
                 'epoch': t0, 'fitted_t0': best_t0, 'timing_offset_days': best_t0 - t0,
                 'accepted': True, 'reason': 'ok', 'rejection_reason': None,
-                'fit_converged': True, 'fit_status': 'ok',
+                'fit_converged': timing_source == 'fitted', 'fit_status': 'ok',
+                'timing_source': timing_source,
                 'baseline': baseline_diagnostic,
                 'residual_classification': 'unexplained_residual_not_rejected',
                 'shape_uncertainty': 'not_propagated_correlated_residuals_possible',
@@ -1164,10 +1313,15 @@ class ExoMoonLeastSquares:
                 x[keep] for x in (result_time, result_model, result_flux_err, result_indices))
         self.bary_t0s = accepted_t0s
         self.retained_cadence_indices = result_indices
+        ephemeris_epochs = sum(item.get('timing_source') == 'ephemeris' for item in self.epoch_diagnostics)
+        if ephemeris_epochs > 0:
+            logging.info("Used ephemeris timing for %d/%d transits too shallow to time individually",
+                         ephemeris_epochs, len(accepted_t0s))
         self.subtraction_status = {
             'status': 'ok' if accepted_t0s else 'no_usable_epochs',
             'reason': None if accepted_t0s else 'All epochs failed planet-model validation.',
             'retained_epochs': len(accepted_t0s), 'rejected_epochs': len(rejected_t0s),
+            'ephemeris_timing_epochs': ephemeris_epochs,
         }
         if not self.bary_t0s:
             logging.warning("No usable planetary epochs remain; returning synchronized non-search arrays.")
@@ -1393,7 +1547,7 @@ class ExoMoonLeastSquares:
         if not len(self.bary_t0s):
             raise ValueError("No usable planetary epochs for moon search")
         transit_scenarios = ExoMoonLeastSquares.compute_moon_transit_scenarios(self.time, self.flux, self.flux_err,
-                                                                               self.bary_t0s[0], search_input.moon_alpha,
+                                                                               self.planet_t0, search_input.moon_alpha,
                                                                 search_input.moon_period, self.bary_t0s,
                                                                                search_input.half_moon_orbit_transit_duration,
                                                                 search_input.half_moon_max_orbit_transit_duration,
@@ -2920,9 +3074,15 @@ if __name__ == '__main__':
             planet_ecc_err = 0.15
             planet_arg_periastron = 0
             catalog_impact = float(row["planet_impact"]) if catalog == "kois" else 0.0
+            star_info = lc_build.star_info
+            star_mass_err = 0.0 if None in (star_info.mass_min, star_info.mass_max) \
+                else (star_info.mass_max - star_info.mass_min) / 2
+            star_radius_err = 0.0 if None in (star_info.radius_min, star_info.radius_max) \
+                else (star_info.radius_max - star_info.radius_min) / 2
             geometry = ExoMoonLeastSquares.catalog_planet_geometry(
                 catalog, star_mass, star_radius, planet_period, planet_radius,
-                catalog_impact, planet_ecc, planet_arg_periastron)
+                catalog_impact, planet_ecc, planet_arg_periastron,
+                np.nan_to_num(star_mass_err), np.nan_to_num(star_radius_err))
             planet_semimajor_axis = geometry['planet_semimajor_axis']
             planet_inc = geometry['planet_inc']
             planet_inc_err = geometry['planet_inc_err']
@@ -2953,7 +3113,8 @@ if __name__ == '__main__':
                                        min_radius, max_radius, t0s, times, flux, flux_err, max_moon_density,
                                        period_grid_size=10000, radius_grid_size=20, subtract_mode='subtract', fit_rp_per_transit=False,
                                        min_transit_completeness=0.75, max_subtraction_rms_ratio=1.5,
-                                       exposure_times_seconds=cadence[0] if len(cadence) == 1 else None)
+                                       exposure_times_seconds=cadence[0] if len(cadence) == 1 else None,
+                                       planet_a_over_rstar_err=geometry['planet_a_over_rstar_err'])
             #emls.fit_single_transits(times, flux, flux_err)
             # emls.flux = emls.inject_moon(emls.time, emls.flux, emls.flux_err, emls.bary_t0s, planet_semimajor_axis,
             #                             planet_ecc, moon_radius, moon_period, moon_mass, plot=True, initial_alpha=moon_alpha,

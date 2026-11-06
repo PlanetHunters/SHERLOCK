@@ -126,3 +126,41 @@ def test_failed_local_fit_is_not_used_for_planet_subtraction():
     assert emls.epoch_diagnostics[0]['accepted'] is False
     assert 'no_improvement' in emls.epoch_diagnostics[0]['reason']
     np.testing.assert_array_equal(flux, np.ones_like(time))
+
+
+@pytest.mark.parametrize("impact_param", [0.3, 0.6])
+def test_inclination_started_at_ninety_recovers_non_central_transit(impact_param):
+    time = np.linspace(-0.7, 0.7, 801)
+    truth = _params(rp=0.08)
+    truth.inc = np.rad2deg(np.arccos(impact_param / truth.a))
+    guess_params = _params(rp=0.08)
+    guess_params.inc = 90.0
+
+    result = _result(time, _flux(time, truth), guess_params, [0.0, 90.0, 0.08],
+                     [(-0.2, 0.2), (87.0, 90.0), (0.05, 0.11)], ['t0', 'inc', 'rp'])
+
+    assert result.success
+    assert result.theta[1] == pytest.approx(truth.inc, abs=0.02)
+
+
+def test_central_transit_at_physical_inclination_limit_is_accepted():
+    time = np.linspace(-0.7, 0.7, 801)
+    truth = _params(rp=0.08)
+    truth.inc = 90.0
+
+    result = _result(time, _flux(time, truth), _params(rp=0.08), [0.0, 90.0, 0.08],
+                     [(-0.2, 0.2), (87.0, 90.0), (0.05, 0.11)], ['t0', 'inc', 'rp'])
+
+    assert result.success
+    assert result.theta[1] > 89.5
+
+
+def test_inclination_pinned_to_a_prior_edge_is_still_rejected():
+    time = np.linspace(-0.7, 0.7, 801)
+    truth = _params(rp=0.08)
+    truth.inc = 86.0
+
+    result = _result(time, _flux(time, truth), _params(rp=0.08), [0.0, 88.0, 0.08],
+                     [(-0.2, 0.2), (87.0, 90.0), (0.05, 0.11)], ['t0', 'inc', 'rp'])
+
+    assert result.status == 'active_bound'

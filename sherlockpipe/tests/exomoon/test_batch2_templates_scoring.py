@@ -133,6 +133,7 @@ def test_search_uses_gapped_physical_context_for_null_and_alternative():
     template_time = np.array([-0.1, 0.0, 0.1])
     template_flux = np.array([1.0, 0.96, 1.0])
     emls = object.__new__(ExoMoonLeastSquares)
+    emls.planet_t0 = 0.0
     emls.time = np.array([-0.28, -0.1, -0.03, 0.0, 0.08, 0.27])
     emls.flux = np.interp(emls.time, template_time, template_flux, left=1.0, right=1.0)
     emls.flux_err = np.array([0.03, 0.02, 0.01, 0.01, 0.02, 0.04])

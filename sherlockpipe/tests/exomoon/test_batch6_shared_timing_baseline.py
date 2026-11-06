@@ -70,9 +70,8 @@ def test_shared_shape_then_local_timing_recovers_no_ttv_and_known_ttv():
         time, flux, errors = _fixture(EPOCHS + offsets)
         emls, _ = _subtract(time, flux, errors)
 
-        # The shared fit is attempted first; B2 may conservatively retain the
-        # catalog shape when a grazing geometry reaches a supplied bound.
-        assert emls.shared_fit_status.status in ('ok', 'active_bound')
+        # Epochs are aligned before folding, so TTVs do not smear the shared fit.
+        assert emls.shared_fit_status.status == 'ok'
         assert hasattr(emls, 'shared_planet_params')
         np.testing.assert_allclose(emls.local_t0s, EPOCHS + offsets, atol=8e-4)
         np.testing.assert_allclose(emls.ttvs, -offsets, atol=8e-4)
