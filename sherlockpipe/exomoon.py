@@ -1,3 +1,4 @@
+import copy
 import itertools
 import logging
 import math
@@ -29,18 +30,26 @@ import pandas as pd
 from sherlockpipe.search.sherlock import Sherlock
 from os import path
 
-G = 6.674e-11  # m3 kg-1 s-2
-AU_TO_RSUN = 215.032
-Msolar_to_kg = 2.e30
-Mearth_to_kg = 5.972e24
+G = ac.G.value  # m3 kg-1 s-2
+AU_TO_M = ac.au.value
+AU_TO_RSUN = (ac.au / ac.R_sun).value
+Msolar_to_kg = ac.M_sun.value
+Mearth_to_kg = ac.M_earth.value
 M_earth_to_M_sun = Mearth_to_kg / Msolar_to_kg
-R_earth_to_R_sun = 0.009175
+R_earth_to_R_sun = (ac.R_earth / ac.R_sun).value
+EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  # g/cm3
+MIN_RP_OVER_RSTAR = 1e-5
 resources_dir = path.join(path.dirname(__file__))
+
+
+class NoUsableEpochsError(ValueError):
+    """No planet transit epoch is left to search for a moon."""
 
 
 class ExoMoonLeastSquares:
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
+    SPECTRUM_KERNEL = 31
     TEMPLATE_MIN_SAMPLES = 1000
 
     def __init__(self, object_dir, cpus, star_mass, star_radius, ab, planet_radius, planet_radius_err,
@@ -127,6 +136,10 @@ class ExoMoonLeastSquares:
         self.star_radius = star_radius
         self.ab = ab
         self.planet_radius = planet_radius
+        if not np.isfinite(planet_radius_err):
+            planet_radius_err = 0.1 * planet_radius
+            logging.warning("Planet radius error is not finite, using 10%% of the radius: %.3f R_earth",
+                            planet_radius_err)
         self.planet_radius_err = planet_radius_err
         self.planet_mass = planet_mass
         self.planet_period = planet_period
@@ -158,6 +171,9 @@ class ExoMoonLeastSquares:
                 self.bary_t0s.append(bary_t0)
         self.min_radius = min_radius
         self.max_radius = max_radius
+        if period_grid_size < ExoMoonLeastSquares.SPECTRUM_KERNEL:
+            raise ValueError(f"period_grid_size must be at least {ExoMoonLeastSquares.SPECTRUM_KERNEL}, "
+                             f"got {period_grid_size}")
         self.period_grid_size = period_grid_size
         self.radius_grid_size = radius_grid_size
         self.planet_mass_grid = [planet_mass]
@@ -184,7 +200,7 @@ class ExoMoonLeastSquares:
         period_seconds = minor_period * 24. * 3600.
         mass_kg = major_mass * Msolar_to_kg
         a1 = (G * mass_kg * period_seconds ** 2 / 4. / (np.pi ** 2)) ** (1. / 3.)
-        return a1 / 1.496e11
+        return a1 / AU_TO_M
 
     @staticmethod
     def compute_roche_period(moon_density):
@@ -201,6 +217,51 @@ class ExoMoonLeastSquares:
             Roche limit period in days.
         """
         return np.sqrt((3 * np.pi) / (G * moon_density * 1000)) * 2.44 ** (3 / 2) / 3600 / 24
+
+    @staticmethod
+    def compute_min_moon_period(moon_density, planet_mass, planet_radius, max_moon_radius):
+        """Return the shortest moon period that is outside both the Roche limit and the planet.
+
+        Parameters
+        ----------
+        moon_density : float
+            Moon density in g/cm^3.
+        planet_mass : float
+            Planet mass in Earth masses.
+        planet_radius : float
+            Planet radius in Earth radii.
+        max_moon_radius : float
+            Largest moon radius searched in Earth radii.
+
+        Returns
+        -------
+        float
+            Minimum moon period in days.
+        """
+        contact_au = (planet_radius + max_moon_radius) * R_earth_to_R_sun / AU_TO_RSUN
+        contact_period = ExoMoonLeastSquares.au_to_period(planet_mass * M_earth_to_M_sun, contact_au)
+        return max(ExoMoonLeastSquares.compute_roche_period(moon_density), contact_period)
+
+    @staticmethod
+    def compute_roche_radius(planet_radius, planet_mass, moon_density):
+        """Return the fluid Roche limit in the units of planet_radius.
+
+        Parameters
+        ----------
+        planet_radius : float
+            Planet radius in Earth radii.
+        planet_mass : float
+            Planet mass in Earth masses.
+        moon_density : float
+            Moon density in g/cm^3.
+
+        Returns
+        -------
+        float
+            Roche radius in Earth radii.
+        """
+        planet_density = EARTH_DENSITY * planet_mass / planet_radius ** 3
+        return 2.44 * planet_radius * (planet_density / moon_density) ** (1 / 3)
 
     @staticmethod
     def compute_hill_radius(major_mass, minor_mass, semimajor_axis, eccentricity=0):
@@ -221,8 +282,8 @@ class ExoMoonLeastSquares:
         :param au: the semi-major axis in astronomical units.
         :return: the period in days
         """
-        mass_kg = mass * 2.e30
-        a = au * 1.496e11
+        mass_kg = mass * Msolar_to_kg
+        a = au * AU_TO_M
         return ((a ** 3) * 4 * (np.pi ** 2) / G / mass_kg) ** (1. / 2.) / 3600 / 24
 
     @staticmethod
@@ -299,6 +360,8 @@ class ExoMoonLeastSquares:
         numpy.ndarray
             Array of period values.
         """
+        if min >= max:
+            raise ValueError(f"No valid moon period range: minimum {min} d is not below maximum {max} d")
         if "log" == mode:
             return np.logspace(math.log(min, 10), math.log(max, 10), samples, base=10)
         else:
@@ -358,8 +421,54 @@ class ExoMoonLeastSquares:
         return best_theta, best_model
 
     @staticmethod
+    def impact_parameter(a_over_rstar, inc, ecc, arg_periastron):
+        """Return the impact parameter at conjunction.
+
+        Parameters
+        ----------
+        a_over_rstar : float
+            Semimajor axis in stellar radii.
+        inc : float
+            Orbital inclination in degrees.
+        ecc : float
+            Orbital eccentricity.
+        arg_periastron : float
+            Argument of periastron in degrees.
+
+        Returns
+        -------
+        float
+            Impact parameter in stellar radii.
+        """
+        distance_factor = (1 - ecc ** 2) / (1 + ecc * np.sin(np.deg2rad(arg_periastron)))
+        return a_over_rstar * np.cos(np.deg2rad(inc)) * distance_factor
+
+    @staticmethod
+    def min_transit_inclination(a_over_rstar, rp_over_rstar, ecc, arg_periastron):
+        """Return the lowest inclination in degrees that still produces a transit.
+
+        Parameters
+        ----------
+        a_over_rstar : float
+            Semimajor axis in stellar radii.
+        rp_over_rstar : float
+            Planet radius in stellar radii.
+        ecc : float
+            Orbital eccentricity.
+        arg_periastron : float
+            Argument of periastron in degrees.
+
+        Returns
+        -------
+        float
+            Inclination in degrees.
+        """
+        distance_factor = (1 - ecc ** 2) / (1 + ecc * np.sin(np.deg2rad(arg_periastron)))
+        return np.rad2deg(np.arccos(np.clip((1 + rp_over_rstar) / (a_over_rstar * distance_factor), 0, 1)))
+
+    @staticmethod
     def fit_single_transit(time, flux, flux_err, guess_params, guess_params_bounds,
-                           transit_params: batman.TransitParams, expected_duration=None):
+                           transit_params: batman.TransitParams):
         """Fit a single transit to light curve data.
 
         Parameters
@@ -376,10 +485,6 @@ class ExoMoonLeastSquares:
             Bounds for each parameter.
         transit_params : batman.TransitParams
             BATMAN transit parameters object.
-        expected_duration : float or None, optional
-            Expected transit duration in days. If provided, models with
-            shorter duration are penalized to prevent the optimizer from
-            shrinking the transit to avoid noisy wings.
 
         Returns
         -------
@@ -425,20 +530,12 @@ class ExoMoonLeastSquares:
             """
             m = model(theta, time)
             res = (flux - m) / flux_err
-            # penaliza geometrías sin tránsito (b>1) para evitar modelo plano
-            # b = (a * cos i) / R*  con i en radianes:
-            _, a, inc, _ = theta
-            b = a * np.cos(np.deg2rad(inc))
+            # Penalise geometries without a transit, to avoid a flat model. Grazing transits reach b = 1 + rp.
+            _, a, inc, rp = theta
+            b = ExoMoonLeastSquares.impact_parameter(a, inc, transit_params.ecc, transit_params.w)
             penalty = 0.0
-            if b > 1.0:
-                penalty += 1e6 * (b - 1.0) ** 2  # empuja lejos del "no-tránsito"
-            if expected_duration is not None:
-                rp = theta[3]
-                dur_arg = np.sqrt(max(0, (1.0 + rp) ** 2 - b ** 2)) / a
-                dur_arg = np.clip(dur_arg, -1.0, 1.0)
-                model_duration = transit_params.per / np.pi * np.arcsin(dur_arg)
-                if model_duration < expected_duration:
-                    penalty += 1e4 * (expected_duration - model_duration) ** 2
+            if b > 1.0 + rp:
+                penalty += 1e6 * (b - 1.0 - rp) ** 2
             return 0.5 * np.sum(res ** 2) + penalty
         if len(time > 0):
             res = minimize(neg_loglike, guess_params, method='Powell', bounds=guess_params_bounds)
@@ -448,62 +545,6 @@ class ExoMoonLeastSquares:
             best_theta = guess_params
             best_model = model(guess_params, time)
         return best_theta, best_model
-
-    def fit_single_transits(self, time, flux, flux_err, plot=False):
-        """Fit all individual planet transits to refine T0 values.
-
-        Parameters
-        ----------
-        time : array_like
-            Time array in days.
-        flux : array_like
-            Normalized flux array.
-        flux_err : array_like
-            Flux uncertainty array.
-        plot : bool, optional
-            If True, generate transit fit plots, default False.
-        """
-        star_radius_rearth = LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun, u.R_earth)
-        planet_duration_plot = self.planet_duration * 2
-        params = batman.TransitParams()
-        params.per = self.planet_period
-        params.ecc = self.planet_ecc  # eccentricity
-        params.w = self.planet_arg_periastron  # longitude of periastron (deg)
-        params.rp = self.planet_radius / star_radius_rearth  # planet radius / stellar radius
-        params.a = self.planet_semimajor_axis / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun,
-                                                                                u.au)  # semi-major axis / stellar radius
-        params.inc = self.planet_inc  # orbital inclination [deg]
-        params.u = self.ab  # limb darkening coefficients
-        params.limb_dark = "quadratic"
-        for i, guess_t0 in enumerate(self.bary_t0s):
-            mask = np.abs(time - guess_t0) < self.planet_duration * 2
-            if self.is_skip_t0(time[mask]):
-                continue
-            params.t0 = guess_t0  # this will be updated for each transit
-            guess_params = [guess_t0, params.a, params.inc, params.rp]
-            guess_params_bounds = [(time.min(), time.max()),
-                      (guess_params[1] - guess_params[1] / 100, guess_params[1] + guess_params[1] / 100),
-                      (guess_params[2] - self.planet_inc_err, guess_params[2] + self.planet_inc_err),
-                                   (guess_params[3] - self.planet_radius_err / star_radius_rearth,
-                                    guess_params[3] + self.planet_radius_err / star_radius_rearth)]
-            best_theta, best_model = ExoMoonLeastSquares.fit_single_transit(time[mask], flux[mask], flux_err[mask],
-                                                                             guess_params, guess_params_bounds, params,
-                                                                             expected_duration=self.planet_duration)
-            best_t0 = best_theta[0]
-            if plot:
-                times_in_t0 = time[(time > best_t0 - planet_duration_plot) & (time < best_t0 + planet_duration_plot)]
-                if len(times_in_t0) > 20:
-                    fig_transit, axs = plt.subplots(1, 1, figsize=(12, 12))
-                    axs.scatter(time[mask],
-                                flux[mask],
-                                color='gray', alpha=1, rasterized=True, label="Flux")
-                    axs.plot(time[mask], best_model,
-                             color='red', alpha=1, rasterized=True, label="Flux")
-                    axs.set_title("Planet transit at t0=" + str(best_t0))
-                    axs.set_xlabel('Time')
-                    axs.set_ylabel('Flux')
-                    plt.savefig(self.object_dir + "/T0_" + str(round(best_t0, 3)) + ".png")
-                    plt.close(fig_transit)
 
     def subtract_planet_transit(self, time, flux, flux_err, mode='subtract', plot=False):
         """Subtract or mask the planet transit signal from the light curve.
@@ -562,13 +603,13 @@ class ExoMoonLeastSquares:
             fold_flux = np.concatenate(fold_flux)
             fold_flux_err = np.concatenate(fold_flux_err) if flux_err is not None else None
             fold_t0 = 0.0
-            min_inc = np.rad2deg(np.arccos(1 / params.a))
+            min_inc = ExoMoonLeastSquares.min_transit_inclination(params.a, params.rp, params.ecc, params.w)
             fold_guess = [fold_t0, params.a, self.planet_inc, params.rp]
             fold_bounds = [(fold_time.min(), fold_time.max()),
                            (fold_guess[1] * 0.98, fold_guess[1] * 1.02),
-                            (max(fold_guess[2] - self.planet_inc_err, 90 - min_inc),
+                            (min(fold_guess[2], max(fold_guess[2] - self.planet_inc_err, min_inc)),
                              min(fold_guess[2] + self.planet_inc_err, 90)),
-                           (fold_guess[3] - self.planet_radius_err / star_radius_rearth,
+                           (max(fold_guess[3] - self.planet_radius_err / star_radius_rearth, MIN_RP_OVER_RSTAR),
                             fold_guess[3] + self.planet_radius_err / star_radius_rearth)]
         if not self.skip_fold_fit:
             fold_theta, _ = ExoMoonLeastSquares.fit_single_transit(
@@ -618,8 +659,9 @@ class ExoMoonLeastSquares:
                 model_best = mb.light_curve(params_best)
                 fig_fold, ax_fold = plt.subplots(1, 1, figsize=(10, 6))
                 ax_fold.scatter(fold_time, fold_flux, color='gray', alpha=0.5, s=5)
-                ax_fold.plot(fold_time, model_guess, 'b--', alpha=0.7, label='Initial guess')
-                ax_fold.plot(fold_time, model_best, 'r-', alpha=1, label='Fold fit')
+                fold_order = np.argsort(fold_time)
+                ax_fold.plot(fold_time[fold_order], model_guess[fold_order], 'b--', alpha=0.7, label='Initial guess')
+                ax_fold.plot(fold_time[fold_order], model_best[fold_order], 'r-', alpha=1, label='Fold fit')
                 ax_fold.set_title(f"Phase-folded fit: rp={fold_guess[3]:.4f}->{fold_theta[3]:.4f}, depth={fold_guess[3]**2*1e6:.0f}->{fold_theta[3]**2*1e6:.0f} ppm")
                 ax_fold.set_xlabel('Time from T0 (days)')
                 ax_fold.set_ylabel('Flux')
@@ -633,17 +675,18 @@ class ExoMoonLeastSquares:
             mask = np.abs(time - t0) < duration_window
             intransit_indexes = np.argwhere(np.abs(time - t0) < duration_window).flatten()
             # Always fit t0 and compute TTV
-            params.t0 = t0
-            params.u = self.ab
+            epoch_params = copy.copy(params)
+            epoch_params.t0 = t0
+            epoch_params.u = self.ab
             if self.fit_rp_per_transit:
                 best_theta, best_model = ExoMoonLeastSquares.fit_single_t0_rp(
                     time[mask], flux[mask], flux_err[mask], t0, params.rp,
-                    self.planet_radius_err / star_radius_rearth, duration_window, params)
+                    self.planet_radius_err / star_radius_rearth, duration_window, epoch_params)
             else:
                 best_theta, best_model = ExoMoonLeastSquares.fit_single_t0(
-                    time[mask], flux[mask], flux_err[mask], t0, duration_window, params)
+                    time[mask], flux[mask], flux_err[mask], t0, duration_window, epoch_params)
             best_t0 = best_theta[0]
-            self.ttvs.append(t0 - best_t0)
+            self.ttvs.append(best_t0 - t0)
             ttv_t0s.append(t0)
             if mode == 'subtract':
                 result_model[intransit_indexes] = result_model[intransit_indexes] - (best_model - 1)
@@ -727,6 +770,7 @@ class ExoMoonLeastSquares:
                          len(rejected_t0s), len(self.bary_t0s))
             self.bary_t0s = [t0 for t0 in self.bary_t0s if t0 not in rejected_t0s]
             self.ttvs = [ttv for t0, ttv in zip(ttv_t0s, self.ttvs) if t0 not in rejected_t0s]
+            self.require_usable_epochs()
         plt.figure(figsize=(10, 6))
         plt.scatter(range(len(self.ttvs)), self.ttvs, marker='o')
         plt.xticks(range(len(self.ttvs)), [f"{t0:.4f}" for t0 in self.bary_t0s], rotation=45)
@@ -845,12 +889,12 @@ class ExoMoonLeastSquares:
 
         Returns
         -------
-        list or None
-            List of [moon_alpha, time, flux, flux_err] for each scenario,
-            or None if no valid scenarios are found.
+        list
+            List of [moon_alpha, time, flux, flux_err], one for each epoch
+            with data. Empty if no epoch has data.
         """
         #TODO need to take into account "prograde" or "retrograde" orbit
-        orbit_scenarios = None
+        orbit_scenarios = []
         for t0 in bary_t0s:
             max_moon_t0_tau = ExoMoonLeastSquares.compute_moon_ts(t0, half_moon_orbit_transit_duration, half_moon_transit_duration)
             moon_t0, moon_alpha = ExoMoonLeastSquares.compute_moon_t0(planet_t0, t0, moon_period, moon_initial_alpha, max_moon_t0_tau)
@@ -873,8 +917,6 @@ class ExoMoonLeastSquares:
             # axs.set_ylabel('Flux')
             # fig_transit.show()
             if len(time_moon_transit) > 0:
-                if orbit_scenarios is None:
-                    orbit_scenarios = [[moon_alpha, time_moon_transit, flux_moon_transit, flux_err_moon_transit]]
                 orbit_scenarios.append([moon_alpha, time_moon_transit, flux_moon_transit, flux_err_moon_transit])
         return orbit_scenarios
 
@@ -905,6 +947,10 @@ class ExoMoonLeastSquares:
                                                                                search_input.half_moon_orbit_transit_duration,
                                                                 search_input.half_moon_max_orbit_transit_duration,
                                                                                search_input.half_moon_transit_duration)
+        if len(transit_scenarios) == 0:
+            no_data = np.array([])
+            scores = (ExoMoonLeastSquares.MAX_RESIDUAL, ExoMoonLeastSquares.MAX_RESIDUAL, self.min_radius, np.nan)
+            return scores + (no_data, no_data, no_data, no_data, no_data) if return_lc else scores + (False,)
         scenario_time = []
         scenario_flux = []
         scenario_flux_err = []
@@ -1020,15 +1066,15 @@ class ExoMoonLeastSquares:
             j_left = (best_j - 1) % n_alpha
             j_right = (best_j + 1) % n_alpha
             a_center = alpha_grid[best_j]
-            a_local = np.array([
-                alpha_grid[j_left] - a_center,
-                0.0,
-                alpha_grid[j_right] - a_center,
-            ])
+            step_left = (alpha_grid[j_left] - a_center + np.pi) % (2.0 * np.pi) - np.pi
+            step_right = (alpha_grid[j_right] - a_center + np.pi) % (2.0 * np.pi) - np.pi
+            a_local = np.array([step_left, 0.0, step_right])
             r_local = np.array([r_col[j_left], r_col[best_j], r_col[j_right]])
+            # np.polyfit returns the highest power first: r = c[0]*a^2 + c[1]*a + c[2]
             coeffs = np.polyfit(a_local, r_local, 2)
-            # Parabola r = c2*a^2 + c1*a + c0, minimum at a = -c1 / (2*c2)
-            delta = -coeffs[1] / (2.0 * coeffs[2])
+            delta = 0.0
+            if coeffs[0] > 0:
+                delta = np.clip(-coeffs[1] / (2.0 * coeffs[0]), step_left, step_right)
             refined[col, 0] = (a_center + delta) % (2.0 * np.pi)
             refined[col, 1] = r_col[best_j]
         return refined
@@ -1037,7 +1083,7 @@ class ExoMoonLeastSquares:
     #@njit(fastmath=True, parallel=False)
     def calculate_residuals(it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err,
                             t0_flux_mean_value, datapoints, models, min_radius, max_radius,
-                            star_radius, radius_grid_size, ootr_weight=0.5):
+                            star_radius, radius_grid_size):
         """Calculate residuals between model and data for a transit scenario.
 
         Parameters
@@ -1069,8 +1115,6 @@ class ExoMoonLeastSquares:
             Stellar radius in solar radii.
         radius_grid_size : int
             Number of grid points for radius search.
-        ootr_weight : float, optional
-            Weight for out-of-transit residuals, default 0.5.
 
         Returns
         -------
@@ -1089,7 +1133,7 @@ class ExoMoonLeastSquares:
         oot_radius_residuals = np.sum(((oot_flux - 1) / oot_flux_err) ** 2)
         n_it = len(it_flux)
         model_baseline = np.ones(n_it)
-        residuals_baseline = np.sum(((it_flux - model_baseline) / it_flux_err) ** 2) + ootr_weight * oot_radius_residuals
+        residuals_baseline = np.sum(((it_flux - model_baseline) / it_flux_err) ** 2) + oot_radius_residuals
         min_depth = ((min_radius * R_earth_to_R_sun) ** 2) / star_radius ** 2
         best_radius = min_radius
         best_residual = ExoMoonLeastSquares.MAX_RESIDUAL
@@ -1332,7 +1376,6 @@ class ExoMoonLeastSquares:
             flux = flux - (1 - injected_flux_moon)
         if inject_planet:
             flux = flux - (1 - injected_flux_planet)
-        self.subtract_planet_transit(time, flux, flux_err)
         # for t0 in t0s:
         #     max_moon_t0_tau = ExoMoonLeastSquares.compute_moon_ts(t0, moon_orbit_transit_duration / 2, moon_transit_duration / 2)
         #     moon_t0, moon_phase = ExoMoonLeastSquares.compute_moon_t0(self.planet_t0, t0, moon_period, initial_alpha, max_moon_t0_tau)
@@ -1518,6 +1561,67 @@ class ExoMoonLeastSquares:
         axs.set_xlabel('Time')
         axs.set_ylabel('Flux')
 
+    @staticmethod
+    def find_period_alias(moon_period, planet_period, found_period, start_error):
+        """Find the alias of a moon period closest to a found period.
+
+        Parameters
+        ----------
+        moon_period : float
+            True moon period in days.
+        planet_period : float
+            Planet period in days.
+        found_period : float
+            Detected period in days.
+        start_error : float
+            Relative error an alias must beat.
+
+        Returns
+        -------
+        tuple
+            (alias_period, k, relative_error). alias_period and k are None if
+            no alias beats start_error, and relative_error is then start_error.
+        """
+        alias_period, alias_k, min_error = None, None, start_error
+        for k in range(-5, 6):
+            frequency = 1 / moon_period + k / planet_period
+            if frequency <= 0:
+                continue
+            error = abs(1 / frequency - found_period) / moon_period
+            if error < min_error:
+                alias_period, alias_k, min_error = 1 / frequency, k, error
+        return alias_period, alias_k, min_error
+
+    def require_usable_epochs(self):
+        """Stop with an explicit error when no transit epoch is left to search.
+
+        Raises
+        ------
+        NoUsableEpochsError
+            If there are no usable epochs.
+        """
+        if len(self.bary_t0s) == 0:
+            raise NoUsableEpochsError("No usable planet transit epochs, so there is nothing to search")
+
+    def moon_template_params(self):
+        """Return the batman parameters that define the moon transit templates.
+
+        Returns
+        -------
+        batman.TransitParams
+            Planet geometry with no radius set.
+        """
+        params = batman.TransitParams()
+        params.t0 = 10  # time of inferior conjunction
+        params.per = self.planet_period
+        params.a = self.planet_semimajor_axis * AU_TO_RSUN / self.star_radius  # in stellar radii
+        params.inc = self.planet_inc
+        params.ecc = self.planet_ecc
+        params.w = self.planet_arg_periastron
+        params.u = self.ab
+        params.limb_dark = "quadratic"
+        return params
+
     def run(self, plot=False, inject_params=None):
         """Run the full exomoon search over the parameter grid.
 
@@ -1530,6 +1634,7 @@ class ExoMoonLeastSquares:
             'moon_mass', injects a moon signal into the flux before the grid
             search to test injection-recovery. Default None (no injection).
         """
+        self.require_usable_epochs()
         planet_mass_grid = self.planet_mass_grid
         moon_inc_grid = self.moon_inc_grid
         moon_ecc_grid = self.moon_ecc_grid
@@ -1545,16 +1650,8 @@ class ExoMoonLeastSquares:
             logging.info("Injected moon: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
                          inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
             self.inject_flux_time = self.time.copy()
-        self.time, self.flux, _ = self.subtract_planet_transit(self.time, self.flux, self.flux_err, mode=self.subtract_mode, plot=plot)
-        ma = batman.TransitParams()
-        ma.t0 = 10  # time of inferior conjunction
-        ma.per = self.planet_period  # orbital period, use Earth as a reference
-        ma.a = self.planet_semimajor_axis * AU_TO_RSUN / self.star_radius  # semi-major axis (in units of stellar radii)
-        ma.inc = self.planet_inc  # orbital inclination (in degrees)
-        ma.ecc = self.planet_ecc  # eccentricity
-        ma.w = 0  # longitude of periastron (in degrees)
-        ma.u = self.ab  # limb darkening coefficients
-        ma.limb_dark = "quadratic"  # limb darkening model
+        self.time, self.flux, self.flux_err = self.subtract_planet_transit(self.time, self.flux, self.flux_err, mode=self.subtract_mode, plot=plot)
+        ma = self.moon_template_params()
         search_half_window = self.compute_transit_duration(self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN,
                                                            self.planet_period, self.max_radius * R_earth_to_R_sun,
                                                            self.planet_impact_param) / 2
@@ -1570,12 +1667,13 @@ class ExoMoonLeastSquares:
         #alpha_grid = [0.0]
         impact_params_grid = [self.planet_impact_param]
         for planet_mass in planet_mass_grid:
-            # CITE Édouard Roche (1849, Académie des Sciences de Montpellier) for rigid body
+            # CITE Édouard Roche (1849, Académie des Sciences de Montpellier). 2.44 is the fluid-body coefficient.
             # planet_volume_m3 = (4/3) * np.pi * ((LcbuilderHelper.convert_from_to(self.planet_radius, u.R_earth, u.m)) ** 3)
             # planet_mass_kg = LcbuilderHelper.convert_from_to(self.planet_mass, u.M_earth, u.kg)
             # planet_density = planet_mass_kg / planet_volume_m3
             # roche_lobe = 2.44 * self.planet_radius * (planet_density / self.max_moon_density) ** (1/3)
-            min_period = ExoMoonLeastSquares.compute_roche_period(self.max_moon_density)
+            min_period = ExoMoonLeastSquares.compute_min_moon_period(self.max_moon_density, planet_mass,
+                                                                     self.planet_radius, self.max_radius)
             if self.min_orbit_window > 0:
                 a_norm = self.planet_semimajor_axis * AU_TO_RSUN / self.star_radius
                 p_min_win = ExoMoonLeastSquares.min_period_for_orbit_duration(
@@ -1589,7 +1687,7 @@ class ExoMoonLeastSquares:
             logging.info(f"Hill Limit Period: {max_period}")
             period_grid = self.compute_moon_period_grid(min_period, max_period, samples=self.period_grid_size, mode="log")
             #period_grid = [2.5, 50]
-            moon_max_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun, max_period)
+            moon_max_semimajor_axis = self.compute_semimajor_axis(planet_mass * M_earth_to_M_sun, max_period)
             for moon_inc in moon_inc_grid:
                 for moon_ecc in moon_ecc_grid:
                     for moon_arg_periastron in moon_arg_periastron_grid:
@@ -1607,7 +1705,7 @@ class ExoMoonLeastSquares:
                                                                                             impact_param)
                             half_moon_max_orbit_transit_duration = moon_max_orbit_transit_duration / 2
                             for moon_period in period_grid:
-                                moon_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun,
+                                moon_semimajor_axis = self.compute_semimajor_axis(planet_mass * M_earth_to_M_sun,
                                                                                   moon_period)
                                 moon_orbit_transit_duration = self.compute_transit_duration(self.star_radius,
                                                                                             self.planet_semimajor_axis * AU_TO_RSUN,
@@ -1707,8 +1805,8 @@ class ExoMoonLeastSquares:
         axs[2].set_title("SNRs")
         axs[2].set_xlabel('P (days)')
         axs[2].set_ylabel('SNR')
-        kernel = 31
-        SR, power_raw, power, SDE_raw, SDE = ExoMoonLeastSquares.spectra(best_residuals_spectra, kernel)
+        kernel = ExoMoonLeastSquares.SPECTRUM_KERNEL
+        SR, power_raw, power, SDE_raw, SDE = ExoMoonLeastSquares.spectra(best_residuals_spectra, 1, kernel)
         axs[3].plot(period_grid, power, color='gray', alpha=1, rasterized=True, label="Flux Transit ")
         axs[3].set_title("SDE (residuals)")
         axs[3].set_xlabel('P (days)')
@@ -1777,11 +1875,10 @@ class ExoMoonLeastSquares:
             plt.savefig(self.object_dir + "/Residuals " + str(i) + ".png")
             plt.close(fig_transit)
         top_sde_args = np.flip(np.argsort(power))
-        best_residuals_by_sde = best_residuals_spectra[top_sde_args]
         for i, top_sde_index in enumerate(top_sde_args[0:5]):
             moon_period = period_grid[top_sde_index]
             moon_initial_alpha = refined_alpha_per_period[top_sde_index][0]
-            sde = best_residuals_by_sde[top_sde_index]
+            sde = power[top_sde_index]
             moon_max_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun, period_grid[-1])
             moon_transit_duration = self.compute_transit_duration(self.star_radius,
                                                                   self.planet_semimajor_axis * AU_TO_RSUN,
@@ -1916,15 +2013,8 @@ class ExoMoonLeastSquares:
         if inject_params is not None:
             period_err = abs(best_snr_period - inject_params['moon_period']) / inject_params['moon_period']
             alpha_err = abs(np.cos(best_snr_alpha) - np.cos(inject_params['initial_alpha']))
-            alias_period = None
-            alias_k = None
-            min_alias_err = period_err
-            for k in range(-5, 6):
-                p_alias = 1 / (1 / inject_params['moon_period'] + k / self.planet_period)
-                if p_alias > 0 and abs(p_alias - best_snr_period) < min_alias_err:
-                    min_alias_err = abs(p_alias - best_snr_period) / inject_params['moon_period']
-                    alias_period = p_alias
-                    alias_k = k
+            alias_period, alias_k, min_alias_err = ExoMoonLeastSquares.find_period_alias(
+                inject_params['moon_period'], self.planet_period, best_snr_period, period_err)
             logging.info("INJECTION RECOVERY (SNR): injected P=%.4f d, alpha=%.4f rad -> recovered P=%.4f d, alpha=%.4f rad (delta_P=%.2f%%, delta_cos-alpha=%.4f)",
                          inject_params['moon_period'], inject_params['initial_alpha'],
                          best_snr_period, best_snr_alpha, period_err * 100, alpha_err)
@@ -2070,6 +2160,90 @@ class SearchInput:
         self.half_moon_orbit_transit_duration = half_moon_orbit_transit_duration
         self.half_moon_max_orbit_transit_duration = half_moon_max_orbit_transit_duration
 
+def catalog_csv_path(catalog):
+    """Return the path of a local catalog table.
+
+    Parameters
+    ----------
+    catalog : str
+        Catalog name, such as "tois" or "kois".
+
+    Returns
+    -------
+    str
+        Path inside the SHERLOCK directory of the user.
+    """
+    return os.path.join(os.path.expanduser('~'), '.sherlockpipe', f"{catalog}.csv")
+
+
+def emls_output_dir(target_name, object_of_interest):
+    """Return the output directory of one planet.
+
+    Parameters
+    ----------
+    target_name : str
+        Name of the star.
+    object_of_interest : str
+        Identifier of the planet, which keeps planets of one star apart.
+
+    Returns
+    -------
+    str
+        Directory path.
+    """
+    return f"{target_name}_{object_of_interest}_EMLS/"
+
+
+def prepare_koi_table(tois_df):
+    """Add the columns the EMLS driver needs to a KOI table.
+
+    Parameters
+    ----------
+    tois_df : pandas.DataFrame
+        KOI table.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The table with the derived columns.
+    """
+    if "Predicted Mass (M_Earth)" not in tois_df.columns:
+        tois_df["Predicted Mass (M_Earth)"] = tois_df["Planet Radius (R_Earth)"] ** 1.5
+    if "Stellar Mass (M_Sun)" not in tois_df.columns:
+        g = 10 ** tois_df["Stellar log(g) (cm/s^2)"] / 100
+        r_m = tois_df["koi_srad"] * ac.R_sun.value
+        tois_df["Stellar Mass (M_Sun)"] = g * r_m ** 2 / (G * Msolar_to_kg)
+    if "Stellar Radius (R_Sun)" not in tois_df.columns:
+        tois_df["Stellar Radius (R_Sun)"] = tois_df["koi_srad"]
+    tois_df["Planet SNR"] = tois_df["koi_model_snr"]
+    tois_df["Planet Radius (R_Earth) err"] = tois_df["koi_prad_err1"].fillna(0.1 * tois_df["Planet Radius (R_Earth)"])
+    tois_df["planet_impact"] = tois_df["koi_impact"].fillna(0)
+    return tois_df
+
+
+def koi_planet_inclination(impact_param, star_mass, star_radius, planet_period):
+    """Return the inclination of a KOI in degrees from its impact parameter.
+
+    Parameters
+    ----------
+    impact_param : float
+        Impact parameter in stellar radii.
+    star_mass : float
+        Stellar mass in solar masses.
+    star_radius : float
+        Stellar radius in solar radii.
+    planet_period : float
+        Planet period in days.
+
+    Returns
+    -------
+    float
+        Inclination in degrees, at most 90.
+    """
+    a_rsun = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period) * AU_TO_RSUN
+    return min(np.rad2deg(np.arccos(np.clip(impact_param * star_radius / a_rsun, 0, 1))), 90)
+
+
 if __name__ == '__main__':
 
     formatter = logging.Formatter('%(message)s')
@@ -2090,26 +2264,14 @@ if __name__ == '__main__':
         idx = sys.argv.index("--catalog")
         if idx + 1 < len(sys.argv):
             catalog = sys.argv[idx + 1]
-    csv_path = f"/home/martin/.sherlockpipe/{catalog}.csv"
+    csv_path = catalog_csv_path(catalog)
     tois_df = pd.read_csv(csv_path)
     cadence = [120]
     author = 'SPOC'
     if catalog == "kois":
         author = 'Kepler'
         cadence = [60]
-        if "Predicted Mass (M_Earth)" not in tois_df.columns:
-            tois_df["Predicted Mass (M_Earth)"] = tois_df["Planet Radius (R_Earth)"] ** 1.5
-        if "Stellar Mass (M_Sun)" not in tois_df.columns:
-            G = 6.674e-11
-            g = 10 ** tois_df["Stellar log(g) (cm/s^2)"] / 100
-            r_m = tois_df["koi_srad"] * 6.957e8
-            tois_df["Stellar Mass (M_Sun)"] = g * r_m ** 2 / (G * 1.989e30)
-        if "Stellar Radius (R_Sun)" not in tois_df.columns:
-            tois_df["Stellar Radius (R_Sun)"] = tois_df["koi_srad"]
-        tois_df["Planet SNR"] = tois_df["koi_model_snr"]
-        tois_df["Planet Radius (R_Earth) err"] = tois_df["koi_prad_err1"].fillna(0.1 * tois_df["Planet Radius (R_Earth)"])
-        tois_df = tois_df.rename(columns={"Period (days) err": "Period (days)"})
-        tois_df["planet_impact"] = tois_df["koi_impact"].fillna(0)
+        tois_df = prepare_koi_table(tois_df)
     confirmed_tois_df = tois_df.loc[(tois_df['Disposition'] == 'CP') | (tois_df['Disposition'] == 'KP') | (tois_df['Disposition'] == 'CONFIRMED') | (tois_df['Disposition'] == 'CANDIDATE')]
     confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Planet SNR'] > 15]
     confirmed_tois_df = confirmed_tois_df.sort_values(by='Planet SNR', ascending=False)
@@ -2121,18 +2283,17 @@ if __name__ == '__main__':
         where the planet's gravity dominates over the star:
             r_Hill = a_p × (M_p / 3M_star)^(1/3)
 
-        The Roche limit (Roche 1849, Acad. Sci. Montpellier) for a rigid
+        The Roche limit (Roche 1849, Acad. Sci. Montpellier) for a fluid
         satellite is the closest orbit before tidal disruption:
             r_Roche = 2.44 × R_p × (ρ_p / ρ_m)^(1/3)
 
-        A moon can only exist if r_Hill > r_Roche. We require a factor 2
-        margin for long-term stability (Barnes & O'Brien 2002, ApJ 575, 1087)."""
+        A moon can only exist if r_Hill > r_Roche. The factor 2 margin for
+        long-term stability is a heuristic."""
         a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, period)
         r_hill = a * (p_mass * M_earth_to_M_sun / (3 * star_mass)) ** (1 / 3)
         moon_density = 5.5
-        p_density = p_mass / p_radius ** 3
-        r_roche = 2.44 * p_radius * max(p_density / moon_density, 0.1) ** (1 / 3)
-        r_roche_au = r_roche * R_earth_to_R_sun / 215.032
+        r_roche = ExoMoonLeastSquares.compute_roche_radius(p_radius, p_mass, moon_density)
+        r_roche_au = r_roche * R_earth_to_R_sun / AU_TO_RSUN
         return r_hill > r_roche_au * 2
 
     def planet_planet_stable(a1, m1_earth, a2, m2_earth, star_mass, n_hill=5):
@@ -2210,7 +2371,7 @@ if __name__ == '__main__':
     for index, row in confirmed_tois_df.iterrows():
         target_name = row['Object Id']
         logging.info("Processing target: %s", target_name)
-        object_dir = target_name + "_EMLS/"
+        object_dir = emls_output_dir(target_name, row['OI'])
         if not os.path.exists(object_dir):
             os.mkdir(object_dir)
         try:
@@ -2252,8 +2413,7 @@ if __name__ == '__main__':
             planet_duration = row['Duration (hours)'] / 24
             if catalog == "kois":
                 planet_impact_param = float(row["planet_impact"])
-                a_rsun = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period) * em.AU_TO_RSUN
-                planet_inc = min(np.rad2deg(np.arccos(np.clip(planet_impact_param * star_radius / a_rsun, 0, 1))), 90)
+                planet_inc = koi_planet_inclination(planet_impact_param, star_mass, star_radius, planet_period)
                 planet_inc_err = 0.5
             else:
                 planet_inc = 90
@@ -2290,11 +2450,9 @@ if __name__ == '__main__':
                                        min_radius, max_radius, t0s, times, flux, flux_err, max_moon_density,
                                        period_grid_size=10000, radius_grid_size=20, subtract_mode='subtract', fit_rp_per_transit=False,
                                        min_transit_completeness=0.75, max_subtraction_rms_ratio=1.5)
-            #emls.fit_single_transits(times, flux, flux_err)
             # emls.flux = emls.inject_moon(emls.time, emls.flux, emls.flux_err, emls.bary_t0s, planet_semimajor_axis,
             #                             planet_ecc, moon_radius, moon_period, moon_mass, plot=True, initial_alpha=moon_alpha,
             #                              inject_planet=False, inject_moon=False)
-            #emls.fit_single_transits(times, flux, flux_err, plot=True)
             p_m_relationship = 5
             emls.run(plot=True,
                     #  inject_params={
