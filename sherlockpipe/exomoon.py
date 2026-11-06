@@ -23,7 +23,6 @@ import astropy.units as u
 import wotan
 from lcbuilder.lcbuilder_class import LcBuilder
 from scipy import stats
-from scipy.interpolate import interp1d
 from scipy.signal import lombscargle, argrelextrema
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -84,6 +83,7 @@ class TransitFitError(RuntimeError):
 class ExoMoonLeastSquares:
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
+    TEMPLATE_MIN_SAMPLES = 1000
     # Hard fit bounds on a/R*, in units of the supplied uncertainty.
     A_OVER_RSTAR_BOUND_SIGMA = 3.0
     # Folded residual bins beyond this significance are flagged for review.
@@ -1539,10 +1539,12 @@ class ExoMoonLeastSquares:
         Returns
         -------
         tuple
-            (alternative_chi2, null_chi2, radius, model_snr) if return_lc is
-            False, or (alternative_chi2, null_chi2, radius, model_snr,
-            it_time, it_flux, oot_time, oot_flux, residual_model) if
-            return_lc is True.
+            (alternative_chi2, null_chi2, radius, model_snr,
+            template_unusable) if return_lc is False, or (alternative_chi2,
+            null_chi2, radius, model_snr, it_time, it_flux, oot_time,
+            oot_flux, residual_model) if return_lc is True.
+            template_unusable is True when a dip was seen but no template
+            had depth at the observed times.
         """
         if not len(self.bary_t0s):
             raise ValueError("No usable planetary epochs for moon search")
@@ -1593,8 +1595,9 @@ class ExoMoonLeastSquares:
             residual_calculation = residual_baseline
             residual_radius = self.min_radius
             residual_model = np.ones_like(it_flux)
+            template_unusable = True
         else:
-            residual_calculation, residual_baseline, residual_radius, residual_model = (
+            residual_calculation, residual_baseline, residual_radius, residual_model, template_unusable = (
                 self.calculate_residuals(it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err,
                                          t0_flux_mean_value, len(scenario_time), self.models, self.min_radius,
                                          self.max_radius, self.star_radius, self.radius_grid_size))
@@ -1605,7 +1608,7 @@ class ExoMoonLeastSquares:
         if return_lc:
             return residual_calculation, residual_baseline, residual_radius, model_snr, it_time, it_flux, oot_time, oot_flux, residual_model
         else:
-            return residual_calculation, residual_baseline, residual_radius, model_snr
+            return residual_calculation, residual_baseline, residual_radius, model_snr, template_unusable
 
     @staticmethod
     def running_mean_equal_length(data, width_signal):
@@ -1792,7 +1795,16 @@ class ExoMoonLeastSquares:
         Returns
         -------
         tuple
-            (best_residual, residuals_baseline, best_radius, best_model).
+            (best_residual, residuals_baseline, best_radius, best_model,
+            template_unusable). template_unusable is True when the scenario
+            has a dip but the template has no depth at the observed times, so
+            it can be told apart from a scenario without a dip.
+
+        Raises
+        ------
+        ValueError
+            If a template's times and flux are misaligned or not strictly
+            increasing physical times.
         """
         if not np.isfinite(ootr_weight) or ootr_weight < 0:
             raise ValueError("OOT weight must be finite and nonnegative")
@@ -1812,7 +1824,8 @@ class ExoMoonLeastSquares:
         best_residual = residuals_baseline
         best_model = model_baseline
         if not n_it or not np.isfinite(residuals_baseline):
-            return best_residual, residuals_baseline, best_radius, best_model
+            return best_residual, residuals_baseline, best_radius, best_model, False
+        template_has_depth = False
         for radius, template_time, template_flux in models:
             if not np.isfinite(radius) or not min_radius <= radius <= max_radius:
                 continue
@@ -1825,11 +1838,55 @@ class ExoMoonLeastSquares:
             if np.min(template_flux) >= 1.0:
                 continue
             model_sample = np.interp(it_time, template_time, template_flux, left=1.0, right=1.0)
+            template_has_depth = template_has_depth or np.min(model_sample) < 1.0
             # Apply the same observations and error weights to both hypotheses.
             residual = np.sum(((it_flux - model_sample) / it_flux_err) ** 2) + ootr_weight * oot_radius_residuals
             if np.isfinite(residual) and residual < best_residual:
                 best_residual, best_radius, best_model = residual, radius, model_sample
-        return best_residual, residuals_baseline, best_radius, best_model
+        min_depth = ((min_radius * R_earth_to_R_sun) ** 2) / star_radius ** 2
+        template_unusable = t0_flux_mean_value < 1 - min_depth and not template_has_depth
+        return best_residual, residuals_baseline, best_radius, best_model, bool(template_unusable)
+
+    @staticmethod
+    def build_moon_templates(transit_params, radii, star_radius, min_half_window):
+        """Build moon transit templates that reach unity inside their support.
+
+        Parameters
+        ----------
+        transit_params : batman.TransitParams
+            Transit geometry. Its rp value is overwritten.
+        radii : array_like
+            Moon radii in Earth radii, in increasing order.
+        star_radius : float
+            Stellar radius in solar radii.
+        min_half_window : float
+            Smallest template half-width in days.
+
+        Returns
+        -------
+        list of (float, numpy.ndarray, numpy.ndarray)
+            [(radius_Rearth, time_days_from_transit_center, flux), ...] for
+            the radii that produce a transit.
+        """
+        cadence = 2 * min_half_window / (ExoMoonLeastSquares.TEMPLATE_MIN_SAMPLES - 1)
+        max_half_window = transit_params.per / 2
+        half_window = min(min_half_window, max_half_window)
+        transit_params.rp = radii[-1] * R_earth_to_R_sun / star_radius
+        while True:
+            samples = max(ExoMoonLeastSquares.TEMPLATE_MIN_SAMPLES, int(np.ceil(2 * half_window / cadence)) + 1)
+            template_time = np.linspace(-half_window, half_window, samples)
+            time_model = transit_params.t0 + template_time
+            widest_model = batman.TransitModel(transit_params, time_model).light_curve(transit_params)
+            if (widest_model[0] >= 1 and widest_model[-1] >= 1) or half_window >= max_half_window:
+                break
+            half_window = min(half_window * 1.25, max_half_window)
+        models = []
+        for radius in radii:
+            transit_params.rp = radius * R_earth_to_R_sun / star_radius
+            model_r = batman.TransitModel(transit_params, time_model).light_curve(transit_params)
+            if np.all(np.isfinite(model_r)) and np.any(model_r < 1):
+                models.append((radius, template_time, model_r))
+        return models
 
     @staticmethod
     def running_median(data, kernel):
@@ -2318,14 +2375,12 @@ class ExoMoonLeastSquares:
         ma.t0 = 0.0
         ma.u = self.ab  # limb darkening coefficients
         ma.limb_dark = "quadratic"  # limb darkening model
-        time_model = np.linspace(ma.t0 - self.planet_duration * 0.7, ma.t0 + self.planet_duration * 0.7, 1000)
-        self.models = []
-        for r in np.linspace(self.min_radius, self.max_radius, self.radius_grid_size):
-            ma.rp = r * R_earth_to_R_sun / self.star_radius
-            m = batman.TransitModel(ma, time_model)
-            model_r = m.light_curve(ma)
-            if np.all(np.isfinite(model_r)) and np.any(model_r < 1):
-                self.models.append((r, time_model - ma.t0, model_r))
+        search_half_window = self.compute_transit_duration(self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN,
+                                                           self.planet_period, self.max_radius * R_earth_to_R_sun,
+                                                           self.planet_impact_param) / 2
+        self.models = ExoMoonLeastSquares.build_moon_templates(
+            ma, np.linspace(self.min_radius, self.max_radius, self.radius_grid_size), self.star_radius,
+            max(self.planet_duration * 0.7, search_half_window))
         search_inputs = []
         if len(self.models) == 0:
             raise ValueError("No transiting moon templates for the supplied geometry")
@@ -2406,6 +2461,10 @@ class ExoMoonLeastSquares:
                 tqdm(pool.imap(self.search, search_inputs, chunksize=100),
                      total=len(search_inputs))
             )
+        unusable_template_count = sum(all_residual[4] for all_residual in all_residuals)
+        if unusable_template_count > 0:
+            logging.warning("%d/%d scenarios had no usable template (depth 0 at observed times)",
+                            unusable_template_count, len(all_residuals))
         best_residuals_per_scenarios = []
         best_residuals_spectra = []
         best_residuals_spectra_values = []
@@ -2470,7 +2529,7 @@ class ExoMoonLeastSquares:
 
             def refined_objective(alpha):
                 candidate.moon_alpha = alpha
-                residual, baseline, radius, _ = self.search(candidate)
+                residual, baseline, radius, _, _ = self.search(candidate)
                 refined_radius[0] = radius
                 return residual - baseline
 
@@ -2484,7 +2543,7 @@ class ExoMoonLeastSquares:
             else:
                 refined_alpha_per_period[j] = best_alpha_per_period[j]
             candidate.moon_alpha = snr_refined_alpha_per_period[j, 0]
-            _, _, _, snr = self.search(candidate)
+            _, _, _, snr, _ = self.search(candidate)
             if np.isfinite(snr) and snr > best_snr_per_period[j][1]:
                 best_snr_per_period[j] = [candidate.moon_alpha, snr]
             snr_refined_alpha_per_period[j] = [best_snr_per_period[j][0], -best_snr_per_period[j][1]]

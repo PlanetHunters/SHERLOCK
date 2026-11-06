@@ -10,7 +10,7 @@ def _score(it_time, it_flux, it_err, oot_time, oot_flux, oot_err, template):
         np.asarray(it_time), np.asarray(it_flux), np.asarray(it_err),
         np.asarray(oot_time), np.asarray(oot_flux), np.asarray(oot_err),
         1.0, len(it_time) + len(oot_time), [(0.3, *template)], 0.3, 0.3, 1.0, 1,
-    )
+    )[:4]
 
 
 def test_asymmetric_template_uses_physical_times_and_unit_baseline_outside_support():
@@ -145,7 +145,7 @@ def test_search_uses_gapped_physical_context_for_null_and_alternative():
     search_input = SearchInput(1.0, np.pi / 2, 0.0, 90.0, 0.0, 0.3, 0.0,
                                0.6, 0.2, 0.4, 0.1, 0.3, 0.3)
 
-    alternative, null, radius, _ = emls.search(search_input)
+    alternative, null, radius, _, _ = emls.search(search_input)
 
     assert radius == 0.3
     assert alternative == pytest.approx(0.0)

@@ -52,20 +52,20 @@ def test_radius_template_selection_is_bounded_and_does_not_turn_mean_deficit_int
     lower = (0.2, template_time, np.array([1.0, 0.98, 1.0]))
     upper = (0.5, template_time, np.array([1.0, 0.96, 1.0]))
     outside = (0.7, template_time, upper[2])
-    alternative, null, radius, model = _residuals([outside, lower, upper])
+    alternative, null, radius, model, _ = _residuals([outside, lower, upper])
 
     assert alternative < null
     assert radius == 0.5
     np.testing.assert_allclose(model, upper[2])
 
-    alternative, null, radius, _ = _residuals([lower], flux=lower[2])
+    alternative, null, radius, _, _ = _residuals([lower], flux=lower[2])
     assert alternative < null
     assert radius == 0.2
 
 
 def test_no_dip_and_nonfinite_template_objectives_fall_back_to_the_null():
     flat = (0.3, np.array([-0.1, 0.0, 0.1]), np.ones(3))
-    alternative, null, radius, model = _residuals([flat])
+    alternative, null, radius, model, _ = _residuals([flat])
     assert alternative == null
     assert radius == 0.2
     np.testing.assert_allclose(model, 1.0)
