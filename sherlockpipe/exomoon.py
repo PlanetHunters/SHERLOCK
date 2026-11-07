@@ -486,6 +486,42 @@ class ExoMoonLeastSquares:
         return ExposureAveragedModel(transit_params, time, exposure_time, sub_exposures)
 
     @staticmethod
+    def pandora_light_curve(model, time, exposure_time=None):
+        """Evaluate a Pandora moon model, averaged over the exposure like `transit_model`.
+
+        Pandora's own supersampling expects supersampled input times, so the exposure is
+        averaged here at the midpoints of sub-exposures of at most SUBEXPOSURE_DAYS.
+
+        Parameters
+        ----------
+        model : pandoramoon.moon_model
+            Pandora model.
+        time : array_like
+            Mid-exposure times in days.
+        exposure_time : float, optional
+            Exposure time in days. None or a value up to SUBEXPOSURE_DAYS gives instantaneous fluxes.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            (total, planet, moon) fluxes at the given times.
+        """
+        time = np.asarray(time, dtype=float)
+        if exposure_time is None or exposure_time <= ExoMoonLeastSquares.SUBEXPOSURE_DAYS:
+            return tuple(np.asarray(flux, dtype=float) for flux in model.light_curve(time))
+        sub_exposures = int(np.ceil(exposure_time / ExoMoonLeastSquares.SUBEXPOSURE_DAYS))
+        offsets = ((np.arange(sub_exposures) + 0.5) / sub_exposures - 0.5) * exposure_time
+        fine = (time[:, None] + offsets[None, :]).ravel()
+        order = np.argsort(fine, kind='stable')
+        fluxes = model.light_curve(fine[order])
+        averaged = []
+        for flux in fluxes:
+            unsorted = np.empty(len(fine))
+            unsorted[order] = np.asarray(flux, dtype=float)
+            averaged.append(unsorted.reshape(len(time), sub_exposures).mean(axis=1))
+        return tuple(averaged)
+
+    @staticmethod
     def fit_single_t0(time, flux, flux_err, t0_guess, duration_window, transit_params, exposure_time=None):
         """Fit only t0 for a single transit. a, inc, rp must be pre-set on transit_params.
 
@@ -1574,7 +1610,8 @@ class ExoMoonLeastSquares:
         params.occult_small_threshold = 0.1  # [0..1]
         params.hill_sphere_threshold = 1
         model = pandora.moon_model(params)
-        injected_flux_total, injected_flux_planet, injected_flux_moon = model.light_curve(time)
+        injected_flux_total, injected_flux_planet, injected_flux_moon = \
+            ExoMoonLeastSquares.pandora_light_curve(model, time, self.exposure_time)
         self.injected_flux_moon_pandora = injected_flux_moon
         self.injected_flux_planet_pandora = injected_flux_planet
         self.injected_moon_period = moon_period

@@ -24,6 +24,8 @@
   instead of 21-30 %. Data at 2-minute cadence or shorter are unchanged.
   The averaging uses sub-exposure midpoints, because batman's own
   supersampling converges slowly at long cadence.
+  The Pandora moon injected by `run(inject_params=...)` is averaged the same
+  way, so injection tests compare like with like.
 - EMLS: the SDE spectrum no longer contains placeholder scores. A hypothesis
   without a dip, or with a brightening, scores exactly as the null, and every
   positive dip is fitted, including dips shallower than `min_radius`. A

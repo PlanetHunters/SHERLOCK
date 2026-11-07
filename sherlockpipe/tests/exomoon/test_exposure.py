@@ -143,3 +143,32 @@ def test_invalid_exposure_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match='must be positive'):
         exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=0)
+
+
+# --- injected moons follow the same exposure -----------------------------------------------------------------------
+
+INJECTED_MOON = dict(moon_radius=3.0, moon_period=2.3, moon_mass=5.0)
+
+
+def injected_moon_flux(tmp_path, exposure):
+    t0s = np.arange(6) * PERIOD
+    time = np.concatenate([t0 + np.arange(-2.0, 2.0, THIRTY_MINUTES) for t0 in t0s])
+    flux = np.ones_like(time)
+    duration = PERIOD / np.pi * np.arcsin((1 + 10.0 * R_earth_to_R_sun) / (SMA * AU_TO_RSUN))
+    emls = system(tmp_path, curve=(t0s, time, flux, np.full(len(time), 1e-4), duration), exposure_time=exposure,
+                  min_cadences_per_t0=5)
+    emls.inject_moon(emls.time, emls.flux.copy(), emls.flux_err, emls.bary_t0s, emls.planet_semimajor_axis,
+                     emls.planet_ecc, initial_alpha=1.0, **INJECTED_MOON)
+    return emls.injected_flux_moon_pandora
+
+
+def test_injected_moon_is_averaged_over_the_exposure(tmp_path, monkeypatch):
+    averaged = injected_moon_flux(tmp_path, THIRTY_MINUTES)
+    instantaneous = injected_moon_flux(tmp_path, None)
+    monkeypatch.setattr(ExoMoonLeastSquares, 'SUBEXPOSURE_DAYS', 5 / 86400)  # 360 sub-exposures as reference
+    reference = injected_moon_flux(tmp_path, THIRTY_MINUTES)
+
+    depth = 1 - np.min(reference)
+    assert depth > 0
+    assert np.max(np.abs(averaged - reference)) < 0.01 * depth
+    assert np.max(np.abs(instantaneous - reference)) > 0.1 * depth
