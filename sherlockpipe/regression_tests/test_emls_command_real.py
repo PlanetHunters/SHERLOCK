@@ -11,6 +11,13 @@ systematics, and the moon comes from an independent model:
 4. The command runs with its default period grid and the guessed planet mass.
 
 The same steps without a moon give the control.
+
+Scope: one wide-orbit moon near the outer period limit (0.9 of half the Hill period), 2 R_earth,
+about SNR 16. That is the easiest regime for EMLS: the largest timing offset, well outside the
+planet transit. It shows that the command works end to end on real data, not that EMLS recovers
+moons in general. Close moons that transit during the planet are still absorbed by the planet fit
+(audit items B3 and C1). The 1 % period check needs the default 10000-period grid, because the top
+of the grid has a competing peak near 9.94 d on this curve.
 """
 import json
 import os
@@ -38,6 +45,7 @@ LD = (0.45, 0.20)
 JUPITER_MASS = 317.8
 MOON_RADIUS = 2.0
 MOON_PERIOD_FRACTION = 0.9
+TAU_MOON = 0.37
 DETREND_WINDOW = 6 * T14
 CANDIDATE_COLUMNS = ['curve', 'period', 'per_err', 'duration', 't0', 'depth', 'snr', 'sde', 'border_score', 'oi',
                      'rad_p', 'rp_rs', 'a', 'hz', 'Object Id', 'run', 'score', 'fap', 'harmonic', 'depth_err',
@@ -67,7 +75,7 @@ def pandora_moon(time):
     params.t0_bary, params.t0_bary_offset = EPOCH, 0
     params.M_planet, params.w_bary, params.ecc_bary = JUPITER_MASS * ac.M_earth.value, 0, 0
     params.r_moon = MOON_RADIUS * ac.R_earth.value / params.R_star
-    params.per_moon, params.tau_moon = moon_period(), 0.37
+    params.per_moon, params.tau_moon = moon_period(), TAU_MOON
     params.Omega_moon, params.i_moon, params.ecc_moon, params.w_moon = 0, 90, 0, 0
     params.M_moon = 1e-3 * ac.M_earth.value
     params.epoch_distance, params.supersampling_factor = PERIOD, 1
@@ -133,8 +141,19 @@ def test_the_moon_stands_out_and_the_control_stays_quiet(runs):
 
 @pytest.mark.parametrize('name', ['moon', 'control'])
 def test_most_epochs_survive_the_planet_subtraction(runs, name):
+    # Two predicted epochs fall in Kepler data gaps and are reported, not silently dropped.
+    assert runs[name]['epochs_in_span'] == 35
+    assert runs[name]['epochs_with_data'] == 33
+    assert len(runs[name]['epochs_without_data']) == 2
     assert runs[name]['epochs_used'] >= 30
-    assert runs[name]['epochs_in_data'] == 35
+
+
+def test_the_moon_phase_is_found(runs):
+    """The recovered alpha must match the injected Pandora phase, which checks the timing model."""
+    injected_alpha = (2 * np.pi * (EPOCH / moon_period() - TAU_MOON) - np.pi) % (2 * np.pi)
+    error = abs((runs['moon']['best_alpha'] - injected_alpha + np.pi) % (2 * np.pi) - np.pi)
+
+    assert error < 0.3, f"found alpha {runs['moon']['best_alpha']:.3f}, injected {injected_alpha:.3f}"
 
 
 def test_the_moon_radius_is_of_the_right_size(runs):

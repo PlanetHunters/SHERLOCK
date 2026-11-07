@@ -181,8 +181,8 @@ def mask_candidates(time, flux, flux_err, candidates, numbers):
     return time, flux, flux_err
 
 
-def epochs_in_data(t0, period, time):
-    """Return every transit epoch of the ephemeris that falls within the data span."""
+def epochs_in_span(t0, period, time):
+    """Return every transit epoch of the ephemeris within the data span, observed or not."""
     first = np.floor((np.min(time) - t0) / period)
     last = np.ceil((np.max(time) - t0) / period)
     epochs = t0 + np.arange(first, last + 1) * period
@@ -309,7 +309,7 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
         raise ValueError("No light curve points remain after masking")
     return {"star": {"mass": star_mass, "radius": star_radius, "ld": ld}, "planet": planet, "moon": moon,
             "mask": mask, "lc_file": os.path.abspath(lc_file), "sources": sources,
-            "t0s": epochs_in_data(planet["t0"], planet["period"], time),
+            "t0s": epochs_in_span(planet["t0"], planet["period"], time),
             "time": time, "flux": flux, "flux_err": flux_err}
 
 
@@ -413,7 +413,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
     for key in ("period", "t0", "duration", "radius", "a", "inc", "impact", "ecc", "mass"):
         logging.info("Planet %s = %s (%s)", key, planet[key], inputs["sources"].get(key))
-    logging.info("Light curve %s, %d points, %d epochs; moon radius %.3f-%.3f R_earth", inputs["lc_file"],
+    logging.info("Light curve %s, %d points, %d epochs in its span; moon radius %.3f-%.3f R_earth", inputs["lc_file"],
                  len(inputs["time"]), len(inputs["t0s"]), moon["min_radius"], moon["max_radius"])
     emls = ExoMoonLeastSquares(
         output_dir, cpus, star["mass"], star["radius"], star["ld"], planet["radius"], planet["radius_err"],
@@ -422,14 +422,21 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         moon["min_radius"], moon["max_radius"], inputs["t0s"], inputs["time"], inputs["flux"], inputs["flux_err"],
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
         subtract_mode=subtract_mode)
+    with_data = list(emls.bary_t0s)
+    window = planet["duration"] * 2
+    without_data = [t0 for t0 in inputs["t0s"] if t0 not in with_data]
+    for t0 in without_data:
+        logging.info("Epoch T0=%.4f skipped: %d points within two transit durations", t0,
+                     int(np.sum(np.abs(inputs["time"] - t0) < window)))
+    logging.info("%d of %d epochs have data", len(with_data), len(inputs["t0s"]))
     emls.run(plot=True)
     results = {
         "object_dir": os.path.abspath(object_dir), "candidate": candidate, "light_curve": inputs["lc_file"],
         "masked_candidates": inputs["mask"], "star": star,
         "planet": planet,
         "moon_radius_range": moon, "sources": inputs["sources"], "period_grid_size": period_grid_size,
-        "radius_grid_size": radius_grid_size, "epochs_in_data": len(inputs["t0s"]),
-        "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
+        "radius_grid_size": radius_grid_size, "epochs_in_span": len(inputs["t0s"]),
+        "epochs_with_data": len(with_data), "epochs_without_data": without_data, "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
         "best_radius": float(getattr(emls, "best_snr_radius", np.nan)),
         "notes": "max_sde is not reliable on noise-only data yet. No false-alarm calibration is applied.",

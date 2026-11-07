@@ -208,7 +208,7 @@ def test_giant_mass_falls_back_to_jupiter(caplog):
 def test_epochs_include_transits_before_the_catalog_epoch():
     time = np.linspace(0, 100, 1000)
 
-    epochs = exomoon_run.epochs_in_data(55.0, 20.0, time)
+    epochs = exomoon_run.epochs_in_span(55.0, 20.0, time)
 
     assert epochs == [-5.0, 15.0, 35.0, 55.0, 75.0, 95.0]
 
@@ -241,7 +241,8 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
                           '--period_grid_size', str(guard.PERIOD_GRID), '--radius_grid_size', '4', '--cpus', '2')
 
     assert results['masked_candidates'] == [2]
-    assert results['epochs_used'] == len(t0s)
+    assert results['epochs_used'] == results['epochs_with_data'] == len(t0s)
+    assert results['epochs_without_data'] == []
     assert abs(results['best_period'] - guard.moon_period()) / guard.moon_period() < 0.01
     assert results['max_snr'] > 10
     assert not (tmp_path / 'emls_1' / 'stale.txt').exists()
