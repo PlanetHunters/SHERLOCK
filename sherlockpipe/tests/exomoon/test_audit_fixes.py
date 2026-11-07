@@ -419,7 +419,8 @@ def test_moon_orbit_follows_the_mass_in_the_grid(tmp_path):
 
     light = inputs[len(inputs) // 2]
     a_moon = ExoMoonLeastSquares.compute_semimajor_axis(37.5 * M_earth_to_M_sun, light.moon_period) * AU_TO_RSUN
-    expected = ExoMoonLeastSquares.compute_transit_duration(1.0, SMA * AU_TO_RSUN, PERIOD, a_moon, light.impact_param)
+    expected = ExoMoonLeastSquares.compute_moon_orbit_transit_duration(1.0, SMA * AU_TO_RSUN, PERIOD, a_moon,
+                                                                       4.0 * R_earth_to_R_sun, light.impact_param)
     assert light.half_moon_orbit_transit_duration == pytest.approx(expected / 2)
 
 

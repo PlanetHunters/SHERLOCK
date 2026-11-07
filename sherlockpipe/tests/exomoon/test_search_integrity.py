@@ -69,7 +69,8 @@ def with_moon(flux, time, t0s, params, moon_radius):
     b = a_rsun * np.cos(np.deg2rad(PLANET_INC))
     period = moon_period()
     a_moon = ExoMoonLeastSquares.compute_semimajor_axis(PLANET_MASS * M_earth_to_M_sun, period) * AU_TO_RSUN
-    orbit = ExoMoonLeastSquares.compute_transit_duration(STAR_RADIUS, a_rsun, PLANET_PERIOD, a_moon, b)
+    orbit = ExoMoonLeastSquares.compute_moon_orbit_transit_duration(STAR_RADIUS, a_rsun, PLANET_PERIOD, a_moon,
+                                                                    4.0 * R_earth_to_R_sun, b)
     transit = ExoMoonLeastSquares.compute_transit_duration(STAR_RADIUS, a_rsun, PLANET_PERIOD, 4.0 * R_earth_to_R_sun, b)
     moon = batman.TransitParams()
     moon.per = PLANET_PERIOD
