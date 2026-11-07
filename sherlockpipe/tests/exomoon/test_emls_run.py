@@ -4,12 +4,16 @@ import os
 import runpy
 import sys
 
+from unittest import mock
+
+import batman
 import numpy as np
 import pandas as pd
 import pytest
 
-from sherlockpipe import exomoon_run
-from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun
+from sherlockpipe import exomoon, exomoon_run
+from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, R_earth_to_R_sun
+from sherlockpipe.tests.exomoon.test_audit_fixes import CapturePool, StopAtSearch
 from sherlockpipe.tests.exomoon import test_search_integrity as guard
 
 CANDIDATE_COLUMNS = ['curve', 'period', 'per_err', 'duration', 't0', 'depth', 'snr', 'sde', 'border_score', 'oi',
@@ -201,14 +205,6 @@ def test_giant_mass_falls_back_to_jupiter(caplog):
     assert any('--planet_mass' in record.getMessage() for record in caplog.records)
 
 
-def test_impact_from_duration_inverts_the_transit_duration():
-    a, k, period, b = 30.0, 0.09, 20.0, 0.5
-    duration = period / np.pi * np.arcsin(np.sqrt((1 + k) ** 2 - b ** 2) / a)
-
-    assert exomoon_run.impact_from_duration(duration, period, a, k) == pytest.approx(b, rel=1e-6)
-    assert exomoon_run.impact_from_duration(duration * 2, period, a, k) == 0.0
-
-
 def test_epochs_include_transits_before_the_catalog_epoch():
     time = np.linspace(0, 100, 1000)
 
@@ -236,6 +232,8 @@ def run_command(directory, monkeypatch, *arguments):
 
 def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
     t0s, _, _ = guard_directory(tmp_path, moon_radius=3.0)
+    (tmp_path / 'emls_1').mkdir()
+    (tmp_path / 'emls_1' / 'stale.txt').write_text('old run')
     monkeypatch.chdir(tmp_path)
 
     results = run_command(tmp_path, monkeypatch, '--candidate', '1', '--mask_candidates', '2', '--planet_mass', '300',
@@ -246,6 +244,7 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
     assert results['epochs_used'] == len(t0s)
     assert abs(results['best_period'] - guard.moon_period()) / guard.moon_period() < 0.01
     assert results['max_snr'] > 10
+    assert not (tmp_path / 'emls_1' / 'stale.txt').exists()
     assert os.path.exists(tmp_path / 'emls_1' / 'emls.log')
     assert os.path.exists(tmp_path / 'emls_1' / 'stats.png')
 
@@ -259,5 +258,89 @@ def test_command_without_a_moon_stays_quiet(tmp_path, monkeypatch):
                           '--period_grid_size', str(guard.PERIOD_GRID), '--radius_grid_size', '4', '--cpus', '2')
 
     assert results['max_snr'] < 5
-    assert results['sources']['inc'] == 'estimated from the duration'
-    assert results['planet']['impact'] == pytest.approx(0.0, abs=0.2)
+    assert results['sources']['inc'].startswith('no fit')
+    text = (tmp_path / 'emls_1' / 'emls_results.json').read_text()
+    assert 'NaN' not in text and 'Infinity' not in text
+    assert not (tmp_path / 'emls_1.partial').exists()
+
+
+# --- validator round 1 -------------------------------------------------------------------------------------------
+
+def test_without_a_fit_the_inclination_starts_central_and_is_free(tmp_path, caplog):
+    guard_directory(tmp_path)
+    candidates = pd.read_csv(tmp_path / 'candidates.csv')
+    candidates.loc[0, 'duration'] *= 0.75
+    candidates.to_csv(tmp_path / 'candidates.csv', index=False)
+
+    with caplog.at_level('WARNING'):
+        planet = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)['planet']
+
+    assert any('Run sherlockpipe.fit first' in record.getMessage() for record in caplog.records)
+    a_over_rstar = guard.PLANET_SEMIMAJOR_AXIS * AU_TO_RSUN
+    min_inc = ExoMoonLeastSquares.min_transit_inclination(a_over_rstar, guard.PLANET_RADIUS * R_earth_to_R_sun,
+                                                          0.0, 0.0)
+    assert planet['inc'] == 90.0 and planet['impact'] == 0.0
+    assert planet['inc'] - planet['inc_err'] == pytest.approx(min_inc)
+
+
+def test_fold_fit_recovers_the_impact_parameter_from_a_short_search_duration(tmp_path):
+    """A search duration 25 % shorter than T14, as from TLS, must not bias the planet geometry."""
+    period, a_au, b, radius = 100.0, guard.PLANET_SEMIMAJOR_AXIS, 0.6, 10.0
+    a_over_rstar = a_au * AU_TO_RSUN
+    inc = np.degrees(np.arccos(b / a_over_rstar))
+    k = radius * R_earth_to_R_sun
+    t14 = period / np.pi * np.arcsin(np.sqrt((1 + k) ** 2 - b ** 2) / (a_over_rstar * np.sin(np.radians(inc))))
+    t0s = np.arange(8) * period
+    time = np.concatenate([t0 + np.arange(-3.0, 3.0, 5 / 1440) for t0 in t0s])
+    params = batman.TransitParams()
+    params.t0, params.per, params.rp, params.a, params.inc = 0.0, period, k, a_over_rstar, inc
+    params.ecc, params.w, params.u, params.limb_dark = 0.0, 90.0, guard.LIMB_DARKENING, 'quadratic'
+    flux = batman.TransitModel(params, time).light_curve(params) + np.random.default_rng(2).normal(0, 1e-4, len(time))
+    pd.DataFrame([candidate_row(1, period, 0.75 * t14, 0.0, radius, a_au)], columns=CANDIDATE_COLUMNS).to_csv(
+        tmp_path / 'candidates.csv', index=False)
+    write_star(tmp_path, ld=guard.LIMB_DARKENING)
+    write_lc(tmp_path / 'lc_1.csv', time, flux, np.full(len(time), 1e-4))
+
+    with mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
+        exomoon_run.run_emls(str(tmp_path), 1, planet_mass=300.0, period_grid_size=40, radius_grid_size=4, cpus=1)
+
+    log = (tmp_path / 'emls_1.partial' / 'emls.log').read_text().splitlines()
+    fold = [line.split('INFO', 1)[1].strip() for line in log if 'Fold fit' in line]
+    fitted_inc = float(fold[0].split('inc=')[1].split('->')[1].split(',')[0])
+    assert fitted_inc == pytest.approx(inc, abs=0.1)
+
+
+def test_failed_rerun_keeps_previous_results_and_logs_the_error(tmp_path):
+    guard_directory(tmp_path)
+    (tmp_path / 'emls_1').mkdir()
+    (tmp_path / 'emls_1' / 'emls_results.json').write_text('{"previous": true}')
+
+    with pytest.raises(ValueError, match='cannot mask itself'):
+        exomoon_run.run_emls(str(tmp_path), 1, mask=[1], planet_mass=300.0)
+
+    assert (tmp_path / 'emls_1' / 'emls_results.json').read_text() == '{"previous": true}'
+    log = (tmp_path / 'emls_1.partial' / 'emls.log').read_text()
+    assert 'EMLS failed for candidate 1' in log and 'cannot mask itself' in log
+
+
+def test_symlinked_output_directory_is_refused(tmp_path):
+    guard_directory(tmp_path)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (outside / 'keep.txt').write_text('keep')
+    os.symlink(outside, tmp_path / 'emls_1')
+
+    with pytest.raises(ValueError, match='symbolic link'):
+        exomoon_run.run_emls(str(tmp_path), 1, planet_mass=300.0)
+
+    assert (outside / 'keep.txt').read_text() == 'keep'
+
+
+def test_default_errors_are_recorded_with_their_source(tmp_path):
+    guard_directory(tmp_path)
+
+    inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+
+    assert inputs['planet']['radius_err'] == pytest.approx(0.1 * guard.PLANET_RADIUS)
+    assert inputs['sources']['radius_err'] == 'default: 10% of the radius'
+    assert np.isfinite(inputs['planet']['inc_err'])

@@ -14,6 +14,8 @@ from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquar
 from sherlockpipe.system_stability.mr_forecast import MrForecast
 
 MASK_DURATION_FACTOR = 2
+DEFAULT_RADIUS_ERR_FRACTION = 0.1
+DEFAULT_INC_ERR = 0.5
 MASS_FORECAST_SEED = 0
 # Above this radius the Chen & Kipping relation is nearly flat in mass, so a radius does not
 # constrain the mass (the forecast median exceeds 6 Jupiter masses at 10-12 R_earth).
@@ -148,30 +150,6 @@ def guess_planet_mass(radius, radius_err=None):
     return float(forecast[0])
 
 
-def impact_from_duration(duration, period, a_over_rstar, rp_over_rstar):
-    """Estimate the impact parameter of a circular orbit from the total transit duration.
-
-    Parameters
-    ----------
-    duration : float
-        Total transit duration in days.
-    period : float
-        Orbital period in days.
-    a_over_rstar : float
-        Semimajor axis over stellar radius.
-    rp_over_rstar : float
-        Planet radius over stellar radius.
-
-    Returns
-    -------
-    float
-        Impact parameter, 0 when the duration is longer than a central transit allows.
-    """
-    chord = np.sin(np.pi * duration / period) * a_over_rstar
-    b_squared = (1 + rp_over_rstar) ** 2 - chord ** 2
-    return float(np.sqrt(b_squared)) if b_squared > 0 else 0.0
-
-
 def mask_candidates(time, flux, flux_err, candidates, numbers):
     """Remove the transits of other candidates from the light curve.
 
@@ -272,17 +250,27 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     a_over_rstar = planet["a"] * AU_TO_RSUN / star_radius
     rp_over_rstar = planet["radius"] * R_earth_to_R_sun / star_radius
     if "inc" in planet:
-        inc = planet["inc"]
         if "impact" not in planet:
-            planet["impact"] = a_over_rstar * np.cos(np.radians(inc))
+            planet["impact"] = a_over_rstar * np.cos(np.radians(planet["inc"]))
             sources["impact"] = "a/R* cos(inc)"
-        impact = planet["impact"]
+        if not np.isfinite(planet.get("inc_err", np.nan)):
+            planet["inc_err"] = DEFAULT_INC_ERR
+            sources["inc_err"] = "default"
     else:
-        impact = impact_from_duration(planet["duration"], planet["period"], a_over_rstar, rp_over_rstar)
-        inc = float(np.degrees(np.arccos(min(1.0, impact / a_over_rstar))))
-        planet["inc_err"] = 1.0
-        sources["inc"] = sources["impact"] = "estimated from the duration"
-    planet["inc"], planet["impact"] = inc, impact
+        # The candidates.csv duration comes from the search, not from a transit fit, and is
+        # usually shorter than T14, so it does not give a reliable impact parameter. Start
+        # from a central transit and let the planet fold fit cover every transiting inclination.
+        min_inc = ExoMoonLeastSquares.min_transit_inclination(a_over_rstar, rp_over_rstar, planet["ecc"],
+                                                              planet["arg_periastron"])
+        planet["inc"], planet["impact"], planet["inc_err"] = 90.0, 0.0, 90.0 - min_inc
+        logging.warning("No fit results for candidate %d: the planet geometry comes from candidates.csv and the "
+                        "star parameters. EMLS lets a/R* move by only 2%%, so a wrong a/R* biases the planet model. "
+                        "Run sherlockpipe.fit first for a reliable planet subtraction.", candidate)
+        sources["inc"] = sources["impact"] = sources["inc_err"] = \
+            "no fit: central start, fold fit free down to the grazing limit"
+    if not np.isfinite(planet["radius_err"]):
+        planet["radius_err"] = DEFAULT_RADIUS_ERR_FRACTION * planet["radius"]
+        sources["radius_err"] = "default: 10% of the radius"
     if planet_mass is None:
         planet_mass = guess_planet_mass(planet["radius"], planet["radius_err"])
         sources["mass"] = ("Jupiter mass (giant radius)" if planet["radius"] >= GIANT_RADIUS
@@ -313,6 +301,27 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
             "time": time, "flux": flux, "flux_err": flux_err}
 
 
+def _json_safe(value):
+    """Replace non-finite floats with None, recursively, so the results are strict JSON."""
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (float, np.floating)):
+        return float(value) if np.isfinite(value) else None
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
+
+
+def _close_file_logging():
+    logger = logging.getLogger()
+    for handler in list(logger.handlers):
+        if isinstance(handler, logging.FileHandler):
+            handler.close()
+            logger.removeHandler(handler)
+
+
 def _setup_logging(log_file):
     formatter = logging.Formatter(fmt='%(asctime)s %(levelname)-8s %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
     logger = logging.getLogger()
@@ -331,7 +340,9 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
-    ``emls_results.json`` with the inputs, their sources and the search results.
+    ``emls_results.json`` with the inputs, their sources and the search results. The run
+    is written to ``emls_<candidate>.partial`` and only replaces previous results when it
+    succeeds. A failed run leaves its log, with the error, in the partial directory.
 
     Parameters
     ----------
@@ -356,12 +367,35 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     """
     object_dir = os.getcwd() if object_dir is None else object_dir
     cpus = max(1, (os.cpu_count() or 2) - 1) if cpus is None else int(cpus)
-    output_dir = os.path.join(object_dir, f"emls_{candidate}")
+    final_dir = os.path.join(object_dir, f"emls_{candidate}")
+    output_dir = final_dir + ".partial"
+    for path in (final_dir, output_dir):
+        if os.path.islink(path):
+            raise ValueError(f"{path} is a symbolic link; remove it before running EMLS")
     if os.path.isdir(output_dir):
-        shutil.rmtree(output_dir, ignore_errors=True)
+        shutil.rmtree(output_dir)
     os.mkdir(output_dir)
     _setup_logging(os.path.join(output_dir, "emls.log"))
     logging.info("Starting EMLS for candidate %d of %s", candidate, object_dir)
+    try:
+        results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
+                       period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
+                       subtract_mode)
+    except Exception:
+        logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
+                          final_dir)
+        raise
+    finally:
+        _close_file_logging()
+    if os.path.isdir(final_dir):
+        shutil.rmtree(final_dir)
+    os.rename(output_dir, final_dir)
+    results["output_dir"] = final_dir
+    return results
+
+
+def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
+         radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -372,7 +406,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     emls = ExoMoonLeastSquares(
         output_dir, cpus, star["mass"], star["radius"], star["ld"], planet["radius"], planet["radius_err"],
         planet["mass"], planet["period"], planet["t0"], planet["duration"], planet["a"], planet["inc"],
-        planet.get("inc_err", 0.5), planet["ecc"], 0.0, planet["arg_periastron"], planet["impact"],
+        planet["inc_err"], planet["ecc"], 0.0, planet["arg_periastron"], planet["impact"],
         moon["min_radius"], moon["max_radius"], inputs["t0s"], inputs["time"], inputs["flux"], inputs["flux_err"],
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
         subtract_mode=subtract_mode)
@@ -380,8 +414,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     results = {
         "object_dir": os.path.abspath(object_dir), "candidate": candidate, "light_curve": inputs["lc_file"],
         "masked_candidates": inputs["mask"], "star": star,
-        "planet": {key: (None if isinstance(value, float) and not np.isfinite(value) else value)
-                   for key, value in planet.items()},
+        "planet": planet,
         "moon_radius_range": moon, "sources": inputs["sources"], "period_grid_size": period_grid_size,
         "radius_grid_size": radius_grid_size, "epochs_in_data": len(inputs["t0s"]),
         "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
@@ -390,7 +423,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         "notes": "max_sde is not reliable on noise-only data yet. No false-alarm calibration is applied.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
-        json.dump(results, file, indent=2, default=float)
-    logging.info("EMLS finished: max SNR %.2f at P=%.4f d, alpha=%.3f rad. Results in %s", emls.max_snr,
-                 emls.recovered_period, emls.recovered_alpha, output_dir)
+        json.dump(_json_safe(results), file, indent=2, allow_nan=False)
+    logging.info("EMLS finished: max SNR %.2f at P=%.4f d, alpha=%.3f rad", emls.max_snr, emls.recovered_period,
+                 emls.recovered_alpha)
     return results
