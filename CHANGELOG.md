@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- EMLS: fix a set of defects in the exomoon search (`sherlockpipe/exomoon.py`)
+  found by an audit of the algorithm. Among them: the first epoch was counted
+  twice, the physical constants were approximate, alpha refinement used the
+  wrong polynomial coefficient, the SDE was read at the wrong index, and the
+  out-of-transit weighting differed between the null and moon models.
+- EMLS: the maximum moon offset is now `a_m / v_p`, independent of the impact
+  parameter and of the maximum moon radius.
+- EMLS: moon depth and SNR are measured against the surrounding out-of-window
+  flux, with the noise of both means, so baseline offsets and outlier clipping
+  no longer count as signal.
+- EMLS: each epoch is divided by its out-of-transit median before the planet
+  fits, so a constant normalisation offset no longer leaves a step after the
+  planet is subtracted.
+- EMLS: alpha uses the same reference epoch in injection, search and recovery;
+  injected and recovered moon times are paired by epoch; a NaN SNR no longer
+  hides a period; and the planet duration comes from the fitted model rather
+  than from the data sampling.
+- EMLS catalog driver: KOI targets load and reach the search.
+
+### Known limitations
+
+- EMLS `max_sde` is still unreliable on noise-only data until the no-dip
+  placeholder and the depth gate are reworked.
+
+### Testing
+
+- Add EMLS guards that run the complete search on synthetic curves, and
+  regression tests for each fix.
+
 ## 1.6.1 — 2026-11-01
 
 ### Changed
