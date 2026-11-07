@@ -16,6 +16,13 @@
 
 ### Fixed
 
+- EMLS: a best-SNR moon radius above `max_radius` is reported as measured and
+  flagged (`best_snr_radius_above_range`, `best_radius_above_range` in
+  `emls_results.json`) with a warning, because the dip is deeper than any moon
+  searched for.
+- EMLS: remove the call to the never-committed `sherlockpipe.exomoon_ir`
+  assessment module, which logged a traceback on every run. The run now states
+  that no false-alarm assessment is applied.
 - EMLS: fix a set of defects in the exomoon search (`sherlockpipe/exomoon.py`)
   found by an audit of the algorithm. Among them: the first epoch was counted
   twice, the physical constants were approximate, alpha refinement used the

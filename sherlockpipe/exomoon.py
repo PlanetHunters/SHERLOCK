@@ -28,7 +28,6 @@ from scipy.signal import lombscargle, argrelextrema
 import matplotlib.pyplot as plt
 import pandas as pd
 from sherlockpipe.search.sherlock import Sherlock
-from os import path
 
 G = ac.G.value  # m3 kg-1 s-2
 AU_TO_M = ac.au.value
@@ -39,7 +38,6 @@ M_earth_to_M_sun = Mearth_to_kg / Msolar_to_kg
 R_earth_to_R_sun = (ac.R_earth / ac.R_sun).value
 EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  # g/cm3
 MIN_RP_OVER_RSTAR = 1e-5
-resources_dir = path.join(path.dirname(__file__))
 
 
 class NoUsableEpochsError(ValueError):
@@ -171,6 +169,8 @@ class ExoMoonLeastSquares:
                 self.bary_t0s.append(bary_t0)
         self.min_radius = min_radius
         self.max_radius = max_radius
+        self.best_snr_radius = np.nan
+        self.best_snr_radius_above_range = False
         if period_grid_size < ExoMoonLeastSquares.SPECTRUM_KERNEL:
             raise ValueError(f"period_grid_size must be at least {ExoMoonLeastSquares.SPECTRUM_KERNEL}, "
                              f"got {period_grid_size}")
@@ -2100,6 +2100,13 @@ class ExoMoonLeastSquares:
             moon_radius = ExoMoonLeastSquares.depth_to_radius(moon_depth, self.star_radius)
             if i == 0:
                 self.best_snr_radius = moon_radius
+                # H15: the radius comes from the depth, so a dip deeper than the searched range is
+                # reported as measured and flagged, not limited to max_radius.
+                self.best_snr_radius_above_range = bool(moon_radius > self.max_radius)
+                if self.best_snr_radius_above_range:
+                    logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
+                                    "dip is deeper than any moon searched for, for example a planet residual or a "
+                                    "stellar companion", moon_radius, self.max_radius)
             logging.info("Best SNR for period %s, alpha %s: Radius->%s, Depth->%s, SNR->%s",
                          moon_period,
                          moon_initial_alpha,
@@ -2223,19 +2230,10 @@ class ExoMoonLeastSquares:
         self.max_snr = float(np.nanmax(np.transpose(best_snr_per_period)[1]))
         self.max_sde = float(SDE)
 
-        # Assess candidate using IR calibration
-        try:
-            from sherlockpipe.exomoon_ir import assess_candidate
-            import json as _json
-            result = assess_candidate(resources_dir + '/resources/emls_ir', self.max_sde, 1.0, len(self.bary_t0s), self.max_snr)
-            logging.info("SNR=%.1f, SNR_99=%.1f, completeness=%.2f, prob=%.3f",
-                         self.max_snr, result["snr_99"],
-                         result["completeness_at_snr"],
-                         result["detection_probability"])
-            with open(self.object_dir + "/emls_assessment.json", "w") as f:
-                _json.dump(result, f, indent=2)
-        except Exception as e:
-            logging.exception("assess_candidae failed")
+        # I6: the injection-recovery assessment module was never part of the repository, and its
+        # calibration predates the search fixes, so no significance is attached to these statistics.
+        logging.info("No false-alarm assessment is applied: max SNR %.2f and max SDE %.2f are search statistics "
+                     "without a calibrated significance", self.max_snr, self.max_sde)
 
 
 class SearchInput:

@@ -443,8 +443,10 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "min_points_per_epoch": min_points, "epochs_kept": len(kept), "epochs_skipped": skipped,
         "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
-        "best_radius": float(getattr(emls, "best_snr_radius", np.nan)),
-        "notes": "max_sde is not reliable on noise-only data yet. No false-alarm calibration is applied.",
+        "best_radius": float(emls.best_snr_radius),
+        "best_radius_above_range": bool(emls.best_snr_radius_above_range),
+        "notes": "max_sde is not reliable on noise-only data yet. No false-alarm assessment is applied, so max_snr "
+                 "and max_sde have no calibrated significance.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
         json.dump(_json_safe(results), file, indent=2, allow_nan=False)
