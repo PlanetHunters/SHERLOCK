@@ -171,6 +171,7 @@ class ExoMoonLeastSquares:
         self.max_radius = max_radius
         self.best_snr_radius = np.nan
         self.best_snr_radius_above_range = False
+        self.best_snr_radius_below_range = False
         if period_grid_size < ExoMoonLeastSquares.SPECTRUM_KERNEL:
             raise ValueError(f"period_grid_size must be at least {ExoMoonLeastSquares.SPECTRUM_KERNEL}, "
                              f"got {period_grid_size}")
@@ -1128,9 +1129,9 @@ class ExoMoonLeastSquares:
         depth = np.mean(oot_flux) - np.mean(it_flux)
         t0_flux_mean_value = 1 - depth
         if len(self.models) == 0:
-            residual_calculation = ExoMoonLeastSquares.MAX_RESIDUAL
             residual_baseline = np.sum(((it_flux - 1) / it_flux_err) ** 2)
-            residual_radius = self.min_radius
+            residual_calculation = residual_baseline
+            residual_radius = 0.0
             residual_model = np.ones_like(it_flux)
             template_unusable = True
         else:
@@ -1288,11 +1289,14 @@ class ExoMoonLeastSquares:
         n_it = len(it_flux)
         model_baseline = np.ones(n_it)
         residuals_baseline = np.sum(((it_flux - model_baseline) / it_flux_err) ** 2) + oot_radius_residuals
-        min_depth = ((min_radius * R_earth_to_R_sun) ** 2) / star_radius ** 2
-        best_radius = min_radius
-        best_residual = ExoMoonLeastSquares.MAX_RESIDUAL
+        # H1: a hypothesis without a dip, or with a brightening, scores exactly as the null (a moon
+        # only dims the star), so no placeholder value reaches the spectrum.
+        # H3: every positive dip is fitted, including those shallower than min_radius; the caller
+        # flags a below-range radius.
+        best_radius = 0.0
+        best_residual = residuals_baseline
         best_model = model_baseline
-        if t0_flux_mean_value < 1 - min_depth:
+        if t0_flux_mean_value < 1:
             radius = np.sqrt(1 - t0_flux_mean_value) * star_radius / R_earth_to_R_sun
             _, template_time, closest_model = min(models, key=lambda x: abs(x[0] - radius))
             if len(closest_model) < 2 or len(template_time) != len(closest_model):
@@ -1301,7 +1305,7 @@ class ExoMoonLeastSquares:
             model_sample = np.interp(it_time, template_time, closest_model, left=1.0, right=1.0)
             model_depth = 1.0 - np.min(model_sample)
             if model_depth <= 0.0:
-                return best_residual, residuals_baseline, best_radius, best_model, True
+                return residuals_baseline, residuals_baseline, 0.0, model_baseline, True
             scale_factor = (t0_flux_mean_value - 1) / (np.min(model_sample) - 1)
             model_sample_scaled = 1 + (model_sample - 1) * scale_factor
             it_radius_residuals = np.sum(((it_flux - model_sample_scaled) / it_flux_err) ** 2)
@@ -2103,6 +2107,11 @@ class ExoMoonLeastSquares:
                 # H15: the radius comes from the depth, so a dip deeper than the searched range is
                 # reported as measured and flagged, not limited to max_radius.
                 self.best_snr_radius_above_range = bool(moon_radius > self.max_radius)
+                self.best_snr_radius_below_range = bool(0 < moon_radius < self.min_radius)
+                if self.best_snr_radius_below_range:
+                    logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
+                                    "dip is shallower than the smallest moon searched for", moon_radius,
+                                    self.min_radius)
                 if self.best_snr_radius_above_range:
                     logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
                                     "dip is deeper than any moon searched for, for example a planet residual or a "

@@ -16,6 +16,12 @@
 
 ### Fixed
 
+- EMLS: the SDE spectrum no longer contains placeholder scores. A hypothesis
+  without a dip, or with a brightening, scores exactly as the null, and every
+  positive dip is fitted, including dips shallower than `min_radius`. A
+  best-SNR radius below the range is flagged (`best_snr_radius_below_range`,
+  `best_radius_below_range`). On noise the SDE no longer piles up at
+  sqrt(N - 1).
 - EMLS: a best-SNR moon radius above `max_radius` is reported as measured and
   flagged (`best_snr_radius_above_range`, `best_radius_above_range` in
   `emls_results.json`) with a warning, because the dip is deeper than any moon

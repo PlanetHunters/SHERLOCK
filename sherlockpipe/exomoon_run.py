@@ -445,6 +445,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
         "best_radius": float(emls.best_snr_radius),
         "best_radius_above_range": bool(emls.best_snr_radius_above_range),
+        "best_radius_below_range": bool(emls.best_snr_radius_below_range),
         "notes": "max_sde is not reliable on noise-only data yet. No false-alarm assessment is applied, so max_snr "
                  "and max_sde have no calibrated significance.",
     }
