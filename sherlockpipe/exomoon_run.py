@@ -263,9 +263,15 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
         min_inc = ExoMoonLeastSquares.min_transit_inclination(a_over_rstar, rp_over_rstar, planet["ecc"],
                                                               planet["arg_periastron"])
         planet["inc"], planet["impact"], planet["inc_err"] = 90.0, 0.0, 90.0 - min_inc
-        logging.warning("No fit results for candidate %d: the planet geometry comes from candidates.csv and the "
-                        "star parameters. EMLS lets a/R* move by only 2%%, so a wrong a/R* biases the planet model. "
-                        "Run sherlockpipe.fit first for a reliable planet subtraction.", candidate)
+        if not use_fit:
+            reason, advice = "the fit is ignored (--no_fit)", "Drop --no_fit to use it."
+        elif fit is None:
+            reason, advice = f"no {fit_dir}/results found", "Run sherlockpipe.fit first."
+        else:
+            reason, advice = f"the {fit_dir} results have no inclination", "Check the fit's ns_derived_table.csv."
+        logging.warning("No fitted inclination for candidate %d: %s. The fold fit starts from a central transit with "
+                        "a/R* from the star parameters, and EMLS bounds a/R* to 2%%, so the planet geometry can be "
+                        "biased. %s", candidate, reason, advice)
         sources["inc"] = sources["impact"] = sources["inc_err"] = \
             "no fit: central start, fold fit free down to the grazing limit"
     if not np.isfinite(planet["radius_err"]):

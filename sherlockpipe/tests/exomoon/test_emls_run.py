@@ -275,7 +275,8 @@ def test_without_a_fit_the_inclination_starts_central_and_is_free(tmp_path, capl
     with caplog.at_level('WARNING'):
         planet = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)['planet']
 
-    assert any('Run sherlockpipe.fit first' in record.getMessage() for record in caplog.records)
+    assert any('no ' in record.getMessage() and 'Run sherlockpipe.fit first' in record.getMessage()
+               for record in caplog.records)
     a_over_rstar = guard.PLANET_SEMIMAJOR_AXIS * AU_TO_RSUN
     min_inc = ExoMoonLeastSquares.min_transit_inclination(a_over_rstar, guard.PLANET_RADIUS * R_earth_to_R_sun,
                                                           0.0, 0.0)
@@ -334,6 +335,33 @@ def test_symlinked_output_directory_is_refused(tmp_path):
         exomoon_run.run_emls(str(tmp_path), 1, planet_mass=300.0)
 
     assert (outside / 'keep.txt').read_text() == 'keep'
+
+
+def test_no_fit_warning_names_its_cause(tmp_path, caplog):
+    guard_directory(tmp_path)
+    write_fit(tmp_path, 1, 100.001, 0.002, 9.5, 0.42, 89.9, 0.12, 13.5)
+
+    with caplog.at_level('WARNING'):
+        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, use_fit=False)
+
+    messages = [record.getMessage() for record in caplog.records if 'No fitted inclination' in record.getMessage()]
+    assert len(messages) == 1
+    assert '--no_fit' in messages[0] and 'Run sherlockpipe.fit first' not in messages[0]
+
+
+def test_fit_without_an_inclination_row_is_reported(tmp_path, caplog):
+    guard_directory(tmp_path)
+    write_fit(tmp_path, 1, 100.001, 0.002, 9.5, 0.42, 89.9, 0.12, 13.5)
+    derived = tmp_path / 'fit_[1]' / 'main' / 'results' / 'ns_derived_table.csv'
+    table = pd.read_csv(derived)
+    table[~table['#property'].str.startswith('Inclination')].to_csv(derived, index=False)
+
+    with caplog.at_level('WARNING'):
+        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+
+    messages = [record.getMessage() for record in caplog.records if 'No fitted inclination' in record.getMessage()]
+    assert len(messages) == 1 and 'have no inclination' in messages[0]
+    assert inputs['planet']['period'] == 100.001
 
 
 def test_default_errors_are_recorded_with_their_source(tmp_path):
