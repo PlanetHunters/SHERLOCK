@@ -3,7 +3,7 @@ from setuptools.command.install import install
 import platform
 import os
 import shutil
-version = "1.6.1"
+version = "1.6.2"
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
