@@ -241,8 +241,8 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
                           '--period_grid_size', str(guard.PERIOD_GRID), '--radius_grid_size', '4', '--cpus', '2')
 
     assert results['masked_candidates'] == [2]
-    assert results['epochs_used'] == results['epochs_with_data'] == len(t0s)
-    assert results['epochs_without_data'] == []
+    assert results['epochs_used'] == results['epochs_kept'] == len(t0s)
+    assert results['epochs_skipped'] == []
     assert abs(results['best_period'] - guard.moon_period()) / guard.moon_period() < 0.01
     assert results['max_snr'] > 10
     assert not (tmp_path / 'emls_1' / 'stale.txt').exists()
@@ -386,6 +386,22 @@ def test_fit_without_inclination_or_impact_is_reported(tmp_path, caplog):
     assert len(messages) == 1 and 'no inclination or impact parameter' in messages[0]
     assert os.path.join('fit_[1]', 'main') in messages[0].split('a/R* from')[1]
     assert inputs['planet']['period'] == 100.001
+
+
+def test_sparse_epoch_is_reported_with_its_point_count(tmp_path):
+    t0s, time, _ = guard_directory(tmp_path)
+    lc = pd.read_csv(tmp_path / 'lc_1.csv')
+    in_epoch = np.flatnonzero(np.abs(lc['time'] - t0s[3]) < 3.0)
+    closest = in_epoch[np.argsort(np.abs(lc['time'].to_numpy()[in_epoch] - t0s[3]))]
+    lc.drop(index=closest[5:]).to_csv(tmp_path / 'lc_1.csv', index=False)
+
+    with mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
+        exomoon_run.run_emls(str(tmp_path), 1, mask=[2], planet_mass=300.0, period_grid_size=40, radius_grid_size=4,
+                             cpus=1)
+
+    log = (tmp_path / 'emls_1.partial' / 'emls.log').read_text()
+    assert f'Epoch T0={t0s[3]:.4f} skipped: 5 points within two transit durations, fewer than 20' in log
+    assert f'{len(t0s) - 1} of {len(t0s)} epochs have at least 20 points' in log
 
 
 def test_default_errors_are_recorded_with_their_source(tmp_path):

@@ -143,8 +143,8 @@ def test_the_moon_stands_out_and_the_control_stays_quiet(runs):
 def test_most_epochs_survive_the_planet_subtraction(runs, name):
     # Two predicted epochs fall in Kepler data gaps and are reported, not silently dropped.
     assert runs[name]['epochs_in_span'] == 35
-    assert runs[name]['epochs_with_data'] == 33
-    assert len(runs[name]['epochs_without_data']) == 2
+    assert runs[name]['epochs_kept'] == 33
+    assert [epoch['points'] for epoch in runs[name]['epochs_skipped']] == [0, 0]
     assert runs[name]['epochs_used'] >= 30
 
 

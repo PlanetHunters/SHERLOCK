@@ -422,13 +422,17 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         moon["min_radius"], moon["max_radius"], inputs["t0s"], inputs["time"], inputs["flux"], inputs["flux_err"],
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
         subtract_mode=subtract_mode)
-    with_data = list(emls.bary_t0s)
+    # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
+    kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
-    without_data = [t0 for t0 in inputs["t0s"] if t0 not in with_data]
-    for t0 in without_data:
-        logging.info("Epoch T0=%.4f skipped: %d points within two transit durations", t0,
-                     int(np.sum(np.abs(inputs["time"] - t0) < window)))
-    logging.info("%d of %d epochs have data", len(with_data), len(inputs["t0s"]))
+    min_points = int(emls.min_cadences_per_t0)
+    skipped = [{"t0": t0, "points": int(np.sum(np.abs(inputs["time"] - t0) < window))}
+               for t0 in inputs["t0s"] if t0 not in kept]
+    for epoch in skipped:
+        logging.info("Epoch T0=%.4f skipped: %d points within two transit durations, fewer than %d", epoch["t0"],
+                     epoch["points"], min_points)
+    logging.info("%d of %d epochs have at least %d points within two transit durations", len(kept),
+                 len(inputs["t0s"]), min_points)
     emls.run(plot=True)
     results = {
         "object_dir": os.path.abspath(object_dir), "candidate": candidate, "light_curve": inputs["lc_file"],
@@ -436,7 +440,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "planet": planet,
         "moon_radius_range": moon, "sources": inputs["sources"], "period_grid_size": period_grid_size,
         "radius_grid_size": radius_grid_size, "epochs_in_span": len(inputs["t0s"]),
-        "epochs_with_data": len(with_data), "epochs_without_data": without_data, "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
+        "min_points_per_epoch": min_points, "epochs_kept": len(kept), "epochs_skipped": skipped,
+        "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
         "best_radius": float(getattr(emls, "best_snr_radius", np.nan)),
         "notes": "max_sde is not reliable on noise-only data yet. No false-alarm calibration is applied.",
