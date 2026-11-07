@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- `python -m sherlockpipe.emls --candidate N`: run the EMLS exomoon search on a
+  candidate of a SHERLOCK results directory, like `vet` and `fit`. It reads the
+  detrended curve the candidate was found in (`lc_<curve>.csv`), the star from
+  `params_star.csv`, and the planet from `candidates.csv`, replaced by the
+  `fit_[N]` results when they exist. Options: `--mask_candidates`,
+  `--planet_mass` (otherwise forecast with Chen & Kipping below 8 R_earth and
+  one Jupiter mass above), `--min_moon_radius`/`--max_moon_radius`,
+  `--period_grid_size` (default 10000), `--curve`/`--lc_file` and `--no_fit`.
+  Outputs go to `emls_N/`, including `emls_results.json`.
+
 ### Fixed
 
 - EMLS: fix a set of defects in the exomoon search (`sherlockpipe/exomoon.py`)
