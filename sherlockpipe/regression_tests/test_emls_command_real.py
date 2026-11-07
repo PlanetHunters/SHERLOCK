@@ -29,6 +29,7 @@ import pandas as pd
 import pandoramoon as pandora
 import pytest
 import wotan
+import yaml
 from astropy import constants as ac
 
 from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, M_earth_to_M_sun
@@ -102,6 +103,8 @@ def sherlock_directory(directory, with_moon):
     pd.DataFrame([row], columns=CANDIDATE_COLUMNS).to_csv(os.path.join(directory, 'candidates.csv'), index=False)
     pd.DataFrame([{'obj_id': 'KIC 6522242', 'radius': STAR_RADIUS, 'mass': star_mass(), 'ld_a': LD[0],
                    'ld_b': LD[1]}]).to_csv(os.path.join(directory, 'params_star.csv'), index=False)
+    with open(os.path.join(directory, 'properties.yaml'), 'w') as file:
+        yaml.safe_dump({'EXPTIME': [1800]}, file)  # Kepler long cadence, as SHERLOCK records it
 
 
 def run_command(directory, monkeypatch):
@@ -166,4 +169,5 @@ def test_inputs_follow_the_no_fit_path(runs):
 
     assert sources['mass'] == 'Jupiter mass (giant radius)'
     assert sources['inc'].startswith('no fit')
+    assert runs['moon']['exposure_time_s'] == 1800.0 and sources['exposure_time'] == 'properties.yaml'
     assert runs['moon']['period_grid_size'] == 10000
