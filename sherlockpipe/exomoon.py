@@ -1263,7 +1263,8 @@ class ExoMoonLeastSquares:
             Pre-computed model transits as
             [(radius_Rearth, time_days_from_transit_center, flux), ...].
         min_radius : float
-            Minimum moon radius in Earth radii.
+            Minimum moon radius in Earth radii. Unused since every positive dip is fitted
+            (audit item H3); kept so positional callers do not break.
         max_radius : float
             Maximum moon radius in Earth radii.
         star_radius : float

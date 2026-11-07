@@ -446,8 +446,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "best_radius": float(emls.best_snr_radius),
         "best_radius_above_range": bool(emls.best_snr_radius_above_range),
         "best_radius_below_range": bool(emls.best_snr_radius_below_range),
-        "notes": "max_sde is not reliable on noise-only data yet. No false-alarm assessment is applied, so max_snr "
-                 "and max_sde have no calibrated significance.",
+        "notes": "max_snr selects the best period, alpha and radius. max_sde is a diagnostic only: it does not "
+                 "separate moons from noise on real data (audit item H7). No false-alarm assessment is applied, so "
+                 "neither statistic has a calibrated significance.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
         json.dump(_json_safe(results), file, indent=2, allow_nan=False)
