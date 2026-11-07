@@ -15,8 +15,10 @@ class TestsEllcExposureIntegration(unittest.TestCase):
         self.assertIs(resolved_ellc, ellc)
         package_dir = os.path.dirname(os.path.abspath(resolved_ellc.__file__))
         self.assertEqual("ellc", os.path.basename(package_dir))
-        for vendoring_package in ("sherlockpipe", "alexfitter"):
-            self.assertNotIn(os.sep + vendoring_package + os.sep, package_dir)
+        for vendoring_package in (sherlockpipe, alexfitter):
+            vendoring_dir = os.path.dirname(os.path.abspath(vendoring_package.__file__))
+            self.assertFalse(package_dir.startswith(vendoring_dir + os.sep),
+                             f"ellc loaded from inside {vendoring_dir}: {package_dir}")
 
     def test_exposure_integrated_models_average_all_sub_exposures(self):
         times = np.linspace(-0.1, 0.1, 2001)
