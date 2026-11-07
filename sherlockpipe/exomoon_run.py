@@ -249,6 +249,11 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
         sources["a"] = "Kepler's third law"
     a_over_rstar = planet["a"] * AU_TO_RSUN / star_radius
     rp_over_rstar = planet["radius"] * R_earth_to_R_sun / star_radius
+    if "inc" not in planet and np.isfinite(planet.get("impact", np.nan)):
+        # A fit with an impact parameter but no inclination row: invert b = a cos i (1 - e^2) / (1 + e sin w).
+        distance_factor = (1 - planet["ecc"] ** 2) / (1 + planet["ecc"] * np.sin(np.radians(planet["arg_periastron"])))
+        planet["inc"] = float(np.degrees(np.arccos(np.clip(planet["impact"] / (a_over_rstar * distance_factor), 0, 1))))
+        sources["inc"] = "from the fitted impact parameter"
     if "inc" in planet:
         if "impact" not in planet:
             planet["impact"] = a_over_rstar * np.cos(np.radians(planet["inc"]))
@@ -268,10 +273,11 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
         elif fit is None:
             reason, advice = f"no {fit_dir}/results found", "Run sherlockpipe.fit first."
         else:
-            reason, advice = f"the {fit_dir} results have no inclination", "Check the fit's ns_derived_table.csv."
+            reason, advice = (f"the {fit_dir} results have no inclination or impact parameter",
+                              "Check the fit's ns_derived_table.csv.")
         logging.warning("No fitted inclination for candidate %d: %s. The fold fit starts from a central transit with "
-                        "a/R* from the star parameters, and EMLS bounds a/R* to 2%%, so the planet geometry can be "
-                        "biased. %s", candidate, reason, advice)
+                        "a/R* from %s, and EMLS bounds a/R* to 2%%, so the planet geometry can be biased. %s",
+                        candidate, reason, sources["a"], advice)
         sources["inc"] = sources["impact"] = sources["inc_err"] = \
             "no fit: central start, fold fit free down to the grazing limit"
     if not np.isfinite(planet["radius_err"]):

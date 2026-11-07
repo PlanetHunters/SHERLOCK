@@ -349,18 +349,41 @@ def test_no_fit_warning_names_its_cause(tmp_path, caplog):
     assert '--no_fit' in messages[0] and 'Run sherlockpipe.fit first' not in messages[0]
 
 
-def test_fit_without_an_inclination_row_is_reported(tmp_path, caplog):
+def drop_derived_rows(directory, prefixes):
+    derived = directory / 'fit_[1]' / 'main' / 'results' / 'ns_derived_table.csv'
+    table = pd.read_csv(derived)
+    table[~table['#property'].str.startswith(prefixes)].to_csv(derived, index=False)
+
+
+def test_fit_impact_parameter_gives_the_inclination_without_an_inclination_row(tmp_path, caplog):
     guard_directory(tmp_path)
     write_fit(tmp_path, 1, 100.001, 0.002, 9.5, 0.42, 89.9, 0.12, 13.5)
-    derived = tmp_path / 'fit_[1]' / 'main' / 'results' / 'ns_derived_table.csv'
-    table = pd.read_csv(derived)
-    table[~table['#property'].str.startswith('Inclination')].to_csv(derived, index=False)
+    drop_derived_rows(tmp_path, ('Inclination',))
+
+    with caplog.at_level('WARNING'):
+        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+
+    planet = inputs['planet']
+    a_over_rstar = 0.42 * AU_TO_RSUN
+    e, w = 0.25, np.radians(np.degrees(np.arctan2(0.4, 0.3)))
+    expected = np.degrees(np.arccos(0.12 / a_over_rstar * (1 + e * np.sin(w)) / (1 - e ** 2)))
+    assert planet['impact'] == 0.12
+    assert planet['inc'] == pytest.approx(expected)
+    assert inputs['sources']['inc'] == 'from the fitted impact parameter'
+    assert not any('No fitted inclination' in record.getMessage() for record in caplog.records)
+
+
+def test_fit_without_inclination_or_impact_is_reported(tmp_path, caplog):
+    guard_directory(tmp_path)
+    write_fit(tmp_path, 1, 100.001, 0.002, 9.5, 0.42, 89.9, 0.12, 13.5)
+    drop_derived_rows(tmp_path, ('Inclination', 'Impact parameter'))
 
     with caplog.at_level('WARNING'):
         inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
 
     messages = [record.getMessage() for record in caplog.records if 'No fitted inclination' in record.getMessage()]
-    assert len(messages) == 1 and 'have no inclination' in messages[0]
+    assert len(messages) == 1 and 'no inclination or impact parameter' in messages[0]
+    assert os.path.join('fit_[1]', 'main') in messages[0].split('a/R* from')[1]
     assert inputs['planet']['period'] == 100.001
 
 
