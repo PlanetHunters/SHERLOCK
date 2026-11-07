@@ -273,3 +273,65 @@ def test_fitted_duration_does_not_depend_on_cadence(tmp_path):
     run_to_search(emls)
 
     assert emls.planet_duration == pytest.approx(analytic_t14(params), rel=0.01)
+
+
+# --- A3, first step: per-epoch baseline before the planet fits ---------------------------------------------------
+
+def test_baseline_offset_does_not_create_signal_through_the_planet_fit(tmp_path):
+    snrs = {}
+    for offset in (0.0, -2e-4):
+        values = []
+        for seed in (1, 2, 3):
+            t0s, time, flux, flux_err, duration, _ = guard.planet_curve(seed)
+            output = tmp_path / f'{offset}_{seed}'
+            output.mkdir()
+            emls = guard.build(flux + offset, time, flux_err, output, t0s, duration)
+            emls.run()
+            values.append(emls.max_snr)
+        snrs[offset] = np.median(values)
+
+    assert abs(snrs[-2e-4] - snrs[0.0]) < 0.5, snrs
+
+
+def ttv_curve(shift_fraction, offset, noise=2e-5):
+    t0s = np.arange(EPOCHS_TTV) * PERIOD
+    time = np.concatenate([t0 + np.arange(-2.0, 2.0, 2 / 1440) for t0 in t0s])
+    params = batman.TransitParams()
+    params.per, params.rp, params.a, params.inc = PERIOD, 10.0 * R_earth_to_R_sun, SMA * AU_TO_RSUN, 89.9
+    params.ecc, params.w, params.u, params.limb_dark = 0.0, 90.0, LD, 'quadratic'
+    duration = guard_duration()
+    shifts = shift_fraction * duration * np.where(np.arange(EPOCHS_TTV) % 2 == 0, 1, -1)
+    flux = np.ones_like(time)
+    for t0, shift in zip(t0s, shifts):
+        window = np.abs(time - t0) < 3
+        params.t0 = t0 + shift
+        flux[window] = batman.TransitModel(params, time[window]).light_curve(params)
+    flux = flux + offset + np.random.default_rng(8).normal(0, noise, len(time))
+    return t0s, time, flux, np.full(len(time), noise), duration, shifts
+
+
+EPOCHS_TTV = 6
+
+
+@pytest.mark.parametrize('shift_fraction', [0.0, 0.5])
+def test_epochs_are_normalised_outside_a_shifted_transit(tmp_path, shift_fraction):
+    t0s, time, flux, flux_err, duration, shifts = ttv_curve(shift_fraction, offset=-2e-4)
+    emls = system(tmp_path, curve=(t0s, time, flux, flux_err, duration))
+
+    normalised, normalised_err = emls.normalise_epochs(time, flux, flux_err)
+
+    for t0, shift in zip(t0s, shifts):
+        window = np.abs(time - t0) < 2 * duration
+        outside = window & (np.abs(time - t0 - shift) > duration / 2 * 1.05)
+        assert np.median(normalised[outside]) == pytest.approx(1.0, abs=1e-5)
+    assert np.all(normalised_err <= flux_err * 1.001)
+
+
+def test_normalisation_keeps_the_transit_depth(tmp_path):
+    t0s, time, flux, flux_err, duration, shifts = ttv_curve(0.5, offset=-2e-4, noise=0.0)
+    emls = system(tmp_path, curve=(t0s, time, flux, flux_err, duration))
+
+    normalised, _ = emls.normalise_epochs(time, flux, flux_err)
+
+    true_depth = 1 - (np.min(flux) - (-2e-4))
+    assert 1 - np.min(normalised) == pytest.approx(true_depth, rel=0.01)

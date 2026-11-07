@@ -246,7 +246,8 @@ def test_mask_mode_keeps_each_cadence_with_its_own_error(tmp_path):
     run_to_search(emls)
 
     assert len(emls.flux_err) == len(emls.time) == len(emls.flux)
-    assert np.array_equal(emls.flux_err, [sigma[t] for t in emls.time])
+    # Errors are scaled with the per-epoch baseline, by far less than the 7x spread between cadences.
+    np.testing.assert_allclose(emls.flux_err, [sigma[t] for t in emls.time], rtol=1e-3)
 
 
 # --- I5: injection side effects ----------------------------------------------------------------------------------

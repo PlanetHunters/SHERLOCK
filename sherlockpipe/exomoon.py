@@ -604,6 +604,46 @@ class ExoMoonLeastSquares:
             best_model = model(guess_params, time)
         return best_theta, best_model
 
+    def normalise_epochs(self, time, flux, flux_err, min_points=10):
+        """Divide each epoch by its out-of-transit median, so the planet fits see a unit baseline.
+
+        The planet fits assume the flux outside the transit is exactly 1. An offset would
+        otherwise be absorbed into the planet depth and left as a step after subtraction.
+        Each epoch owns the data within half a planet period of it, so the moon search
+        never sees a step between normalised and unnormalised data. The median is taken
+        outside one transit duration on each side of the predicted time, so a transit
+        shifted by up to half a duration is still excluded. That is the largest shift the
+        per-epoch time fit allows.
+
+        Parameters
+        ----------
+        time, flux : numpy.ndarray
+            Light curve.
+        flux_err : numpy.ndarray or None
+            Flux uncertainties, scaled with the flux.
+        min_points : int, optional
+            Epochs with fewer out-of-transit points are left unchanged, default 10.
+
+        Returns
+        -------
+        tuple
+            (flux, flux_err) as new arrays.
+        """
+        flux = np.array(flux, dtype=float)
+        flux_err = None if flux_err is None else np.array(flux_err, dtype=float)
+        for t0 in self.bary_t0s:
+            window = np.abs(time - t0) < self.planet_period / 2
+            outside = window & (np.abs(time - t0) > self.planet_duration)
+            if np.sum(outside) < min_points:
+                continue
+            level = np.median(flux[outside])
+            if not np.isfinite(level) or level <= 0:
+                continue
+            flux[window] = flux[window] / level
+            if flux_err is not None:
+                flux_err[window] = flux_err[window] / level
+        return flux, flux_err
+
     def subtract_planet_transit(self, time, flux, flux_err, mode='subtract', plot=False):
         """Subtract or mask the planet transit signal from the light curve.
 
@@ -644,6 +684,10 @@ class ExoMoonLeastSquares:
         params.inc = self.planet_inc
         params.u = self.ab
         params.limb_dark = "quadratic"
+        flux, flux_err = self.normalise_epochs(time, flux, flux_err)
+        result_model = flux.copy()
+        if flux_err is not None:
+            result_flux_err = flux_err.copy()
         # Phase-fold all transits to get a reliable transit shape
         fold_time = []
         fold_flux = []
