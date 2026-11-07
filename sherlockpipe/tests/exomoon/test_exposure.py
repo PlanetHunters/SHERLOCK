@@ -93,9 +93,14 @@ def test_planet_subtraction_leaves_noise_on_30_minute_data(tmp_path):
     assert instantaneous > 1.2 * averaged, f"instantaneous {instantaneous * 1e6:.1f} ppm"
 
 
-def write_properties(directory, exptime):
+def write_properties(directory, exptime=None, target=None, **extra):
+    """Write properties.yaml with EXPTIME at top level, or under TARGETS[target] as SHERLOCK usually does."""
+    settings = dict(extra)
+    if exptime is not None:
+        settings['EXPTIME'] = exptime
+    properties = {'TARGETS': {target: settings}} if target is not None else settings
     with open(directory / 'properties.yaml', 'w') as file:
-        yaml.safe_dump({'EXPTIME': exptime}, file)
+        yaml.safe_dump(properties, file)
 
 
 def test_command_reads_the_exposure_from_the_sherlock_properties(tmp_path):
@@ -105,7 +110,7 @@ def test_command_reads_the_exposure_from_the_sherlock_properties(tmp_path):
     inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
 
     assert inputs['exposure_time'] == 1800.0
-    assert inputs['sources']['exposure_time'] == 'properties.yaml'
+    assert inputs['sources']['exposure_time'] == 'properties.yaml EXPTIME'
 
 
 def test_user_exposure_takes_precedence(tmp_path):
@@ -117,15 +122,60 @@ def test_user_exposure_takes_precedence(tmp_path):
     assert inputs['exposure_time'] == 120.0 and inputs['sources']['exposure_time'] == 'user'
 
 
-def test_mixed_exposures_use_the_longest_with_a_warning(tmp_path, caplog):
+def test_per_target_exposure_is_read_as_sherlock_writes_it(tmp_path):
     guard_directory(tmp_path)
-    write_properties(tmp_path, [120, 600])
+    write_properties(tmp_path, [600], target='TIC 1')
+
+    inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+
+    assert inputs['exposure_time'] == 600.0
+    assert inputs['sources']['exposure_time'] == 'properties.yaml TARGETS[TIC 1].EXPTIME'
+
+
+def test_target_exposure_overrides_the_global_one(tmp_path):
+    guard_directory(tmp_path)
+    with open(tmp_path / 'properties.yaml', 'w') as file:
+        yaml.safe_dump({'EXPTIME': [120], 'TARGETS': {'TIC 1': {'EXPTIME': [1800]}}}, file)
+
+    assert exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)['exposure_time'] == 1800.0
+
+
+def test_mixed_exposures_ask_for_an_explicit_value(tmp_path):
+    guard_directory(tmp_path)
+    write_properties(tmp_path, [600, 1800], target='TIC 1')
+
+    with pytest.raises(ValueError, match='several exposure times.*--exposure_time'):
+        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+    assert exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=600)['exposure_time'] == 600
+
+
+def test_binned_points_use_the_bin_as_exposure(tmp_path, caplog):
+    guard_directory(tmp_path)
+    write_properties(tmp_path, [120], EXPTIME_BINNING=0.1)
 
     with caplog.at_level(logging.WARNING):
         inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
 
-    assert inputs['exposure_time'] == 600.0
-    assert any('several exposure times' in record.getMessage() for record in caplog.records)
+    assert inputs['exposure_time'] == pytest.approx(8640.0)
+    assert inputs['sources']['exposure_time'] == 'properties.yaml EXPTIME_BINNING'
+    assert any('averages a 8640 s bin' in record.getMessage() for record in caplog.records)
+
+
+def test_named_cadence_asks_for_seconds(tmp_path):
+    guard_directory(tmp_path)
+    write_properties(tmp_path, ['fast'])
+
+    with pytest.raises(ValueError, match="names a cadence \\('fast'\\).*--exposure_time"):
+        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+
+
+@pytest.mark.parametrize('days', [float('inf'), 2.0])
+def test_unbounded_exposure_is_rejected(tmp_path, days):
+    t0s, time, flux, flux_err, duration = (np.arange(3) * PERIOD, np.linspace(0, 3 * PERIOD, 3000), np.ones(3000),
+                                           np.full(3000, 1e-4), 0.2)
+
+    with pytest.raises(ValueError, match='positive number of days up to 1'):
+        system(tmp_path, curve=(t0s, time, flux, flux_err, duration), exposure_time=days)
 
 
 def test_missing_exposure_falls_back_to_an_instantaneous_model(tmp_path, caplog):
@@ -141,8 +191,9 @@ def test_missing_exposure_falls_back_to_an_instantaneous_model(tmp_path, caplog)
 def test_invalid_exposure_is_rejected(tmp_path):
     guard_directory(tmp_path)
 
-    with pytest.raises(ValueError, match='must be positive'):
-        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=0)
+    for value in (0, float('inf'), float('nan')):
+        with pytest.raises(ValueError, match='finite positive number of seconds'):
+            exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=value)
 
 
 # --- injected moons follow the same exposure -----------------------------------------------------------------------

@@ -183,8 +183,8 @@ class ExoMoonLeastSquares:
         self.fit_rp_per_transit = fit_rp_per_transit
         self.min_transit_completeness = min_transit_completeness
         self.max_subtraction_rms_ratio = max_subtraction_rms_ratio
-        if exposure_time is not None and not exposure_time > 0:
-            raise ValueError(f"exposure_time must be positive, got {exposure_time}")
+        if exposure_time is not None and not (np.isfinite(exposure_time) and 0 < exposure_time <= 1):
+            raise ValueError(f"exposure_time must be a positive number of days up to 1, got {exposure_time}")
         self.exposure_time = exposure_time
         self.bary_t0s = []
         for i, bary_t0 in enumerate(t0s):
@@ -2204,12 +2204,14 @@ class ExoMoonLeastSquares:
                 self.best_snr_radius_below_range = bool(0 < moon_radius < self.min_radius)
                 if self.best_snr_radius_below_range:
                     logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
-                                    "dip is shallower than the smallest moon searched for", moon_radius,
-                                    self.min_radius)
+                                    "dip is shallower than the smallest moon searched for. The radius is a mean-depth "
+                                    "estimate that reads about 20%% low (audit item H13), so a moon just above the "
+                                    "minimum can be flagged", moon_radius, self.min_radius)
                 if self.best_snr_radius_above_range:
                     logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
                                     "dip is deeper than any moon searched for, for example a planet residual or a "
-                                    "stellar companion", moon_radius, self.max_radius)
+                                    "stellar companion. The radius is a mean-depth estimate that reads about 20%% "
+                                    "low (audit item H13)", moon_radius, self.max_radius)
             logging.info("Best SNR for period %s, alpha %s: Radius->%s, Depth->%s, SNR->%s",
                          moon_period,
                          moon_initial_alpha,

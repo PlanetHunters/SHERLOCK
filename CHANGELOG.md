@@ -26,6 +26,10 @@
   supersampling converges slowly at long cadence.
   The Pandora moon injected by `run(inject_params=...)` is averaged the same
   way, so injection tests compare like with like.
+  The command reads `EXPTIME` per target (`TARGETS[<target>]`) or globally,
+  as SHERLOCK does, uses `EXPTIME_BINNING` as the exposure of binned points,
+  and asks for `--exposure_time` when `EXPTIME` lists several values or a
+  named cadence.
 - EMLS: the SDE spectrum no longer contains placeholder scores. A hypothesis
   without a dip, or with a brightening, scores exactly as the null, and every
   positive dip is fitted, including dips shallower than `min_radius`. A

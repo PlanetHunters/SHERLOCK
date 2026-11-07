@@ -104,7 +104,8 @@ def sherlock_directory(directory, with_moon):
     pd.DataFrame([{'obj_id': 'KIC 6522242', 'radius': STAR_RADIUS, 'mass': star_mass(), 'ld_a': LD[0],
                    'ld_b': LD[1]}]).to_csv(os.path.join(directory, 'params_star.csv'), index=False)
     with open(os.path.join(directory, 'properties.yaml'), 'w') as file:
-        yaml.safe_dump({'EXPTIME': [1800]}, file)  # Kepler long cadence, as SHERLOCK records it
+        # Kepler long cadence, per target, as SHERLOCK records it in its results directories.
+        yaml.safe_dump({'TARGETS': {'KIC 6522242': {'EXPTIME': [1800]}}}, file)
 
 
 def run_command(directory, monkeypatch):
@@ -169,5 +170,5 @@ def test_inputs_follow_the_no_fit_path(runs):
 
     assert sources['mass'] == 'Jupiter mass (giant radius)'
     assert sources['inc'].startswith('no fit')
-    assert runs['moon']['exposure_time_s'] == 1800.0 and sources['exposure_time'] == 'properties.yaml'
+    assert runs['moon']['exposure_time_s'] == 1800.0 and sources['exposure_time'] == 'properties.yaml TARGETS[KIC 6522242].EXPTIME'
     assert runs['moon']['period_grid_size'] == 10000

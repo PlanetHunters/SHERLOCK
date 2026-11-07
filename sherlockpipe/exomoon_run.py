@@ -182,39 +182,74 @@ def mask_candidates(time, flux, flux_err, candidates, numbers):
     return time, flux, flux_err
 
 
-def read_exposure_time(object_dir, exposure_time=None):
-    """Return the exposure time in seconds and where it came from.
+def _config_value(properties, target_id, key):
+    """Read a key the way SHERLOCK does: the target's own value overrides the global one."""
+    value, path = properties.get(key), key
+    target = (properties.get("TARGETS") or {}).get(target_id) if target_id is not None else None
+    if isinstance(target, dict) and target.get(key) is not None:
+        value, path = target.get(key), f"TARGETS[{target_id}].{key}"
+    return value, path
+
+
+def read_exposure_time(object_dir, exposure_time=None, target_id=None):
+    """Return the exposure time of each light-curve point in seconds and where it came from.
 
     Parameters
     ----------
     object_dir : str
-        SHERLOCK results directory, whose properties.yaml records EXPTIME.
+        SHERLOCK results directory, whose properties.yaml records EXPTIME and EXPTIME_BINNING,
+        globally or under TARGETS[<target>].
     exposure_time : float, optional
         Exposure time in seconds given by the user, which takes precedence.
+    target_id : str, optional
+        Target name as in candidates.csv ("Object Id"), for the per-target settings.
 
     Returns
     -------
     tuple
         (seconds or None, source). None means an instantaneous model.
+
+    Raises
+    ------
+    ValueError
+        If the exposure is not a finite positive number, if EXPTIME names a cadence instead of
+        seconds, or if it lists several exposures, which a single value cannot model.
     """
     if exposure_time is not None:
-        if not exposure_time > 0:
-            raise ValueError(f"--exposure_time must be positive, got {exposure_time}")
+        if not (np.isfinite(exposure_time) and exposure_time > 0):
+            raise ValueError(f"--exposure_time must be a finite positive number of seconds, got {exposure_time}")
         return float(exposure_time), "user"
     properties_file = os.path.join(object_dir, "properties.yaml")
-    exptime = None
+    properties = {}
     if os.path.exists(properties_file):
         with open(properties_file) as file:
-            exptime = (yaml.safe_load(file) or {}).get("EXPTIME")
-    values = sorted({float(value) for value in np.atleast_1d(exptime) if value is not None}) if exptime is not None else []
-    if not values:
-        logging.warning("No EXPTIME in %s and no --exposure_time: the planet and moon models are instantaneous, "
-                        "which biases long-cadence data", properties_file)
-        return None, "none (instantaneous model)"
+            loaded = yaml.safe_load(file)
+        properties = loaded if isinstance(loaded, dict) else {}
+    exptime, path = _config_value(properties, target_id, "EXPTIME")
+    raw = [value for value in (exptime if isinstance(exptime, (list, tuple)) else [exptime]) if value is not None]
+    named = [value for value in raw if isinstance(value, str)]
+    if named:
+        raise ValueError(f"{path} in {properties_file} names a cadence ({named[0]!r}) instead of seconds; "
+                         f"pass --exposure_time")
+    values = sorted({float(value) for value in raw})
     if len(values) > 1:
-        logging.warning("properties.yaml lists several exposure times %s; using the longest. Mixed cadence is not "
-                        "modelled per point", values)
-    return values[-1], "properties.yaml"
+        raise ValueError(f"{path} in {properties_file} lists several exposure times {values}; one value cannot "
+                         f"model every point, so pass --exposure_time")
+    if values and not (np.isfinite(values[0]) and values[0] > 0):
+        raise ValueError(f"{path} in {properties_file} must be a finite positive number of seconds, got {values[0]}")
+    seconds, source = (values[0], f"properties.yaml {path}") if values else (None, None)
+    binning, binning_path = _config_value(properties, target_id, "EXPTIME_BINNING")
+    if binning and float(binning) > 0 and (seconds is None or float(binning) * 86400 > seconds):
+        # Binned points average the flux over the whole bin.
+        logging.warning("%s = %s d in %s: each point averages a %.0f s bin, which is used as the exposure",
+                        binning_path, binning, properties_file, float(binning) * 86400)
+        seconds, source = float(binning) * 86400, f"properties.yaml {binning_path}"
+    if seconds is None:
+        logging.warning("No EXPTIME found in %s, neither globally nor for target %s, and no --exposure_time: the "
+                        "planet and moon models are instantaneous, which biases long-cadence data", properties_file,
+                        target_id)
+        return None, "none (instantaneous model)"
+    return seconds, source
 
 
 def epochs_in_span(t0, period, time):
@@ -270,7 +305,8 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     if not np.all(np.isfinite(ld)):
         raise ValueError("params_star.csv has no finite limb darkening coefficients ld_a, ld_b")
     sources = {}
-    exposure_seconds, sources["exposure_time"] = read_exposure_time(object_dir, exposure_time)
+    exposure_seconds, sources["exposure_time"] = read_exposure_time(object_dir, exposure_time,
+                                                                    str(row["Object Id"]))
     planet = {"period": float(row["period"]), "t0": float(row["t0"]), "duration": float(row["duration"]) / 60 / 24,
               "radius": float(row["rad_p"]), "radius_err": np.nan, "a": float(row["a"]), "ecc": 0.0,
               "arg_periastron": 0.0}
@@ -492,7 +528,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "best_radius_below_range": bool(emls.best_snr_radius_below_range),
         "notes": "max_snr selects the best period, alpha and radius. max_sde is a diagnostic only: it does not "
                  "separate moons from noise on real data (audit item H7). No false-alarm assessment is applied, so "
-                 "neither statistic has a calibrated significance.",
+                 "neither statistic has a calibrated significance. best_radius comes from the mean in-window "
+                 "depth and reads about 20 % low (audit item H13), so the range flags are approximate near the "
+                 "limits.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
         json.dump(_json_safe(results), file, indent=2, allow_nan=False)
