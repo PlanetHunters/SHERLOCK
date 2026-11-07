@@ -246,6 +246,7 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
     assert abs(results['best_period'] - guard.moon_period()) / guard.moon_period() < 0.01
     assert results['max_snr'] > 10
     assert results['best_radius_above_range'] is False
+    assert results['best_radius_below_range'] is False
     assert not (tmp_path / 'emls_1' / 'stale.txt').exists()
     assert os.path.exists(tmp_path / 'emls_1' / 'emls.log')
     assert os.path.exists(tmp_path / 'emls_1' / 'stats.png')

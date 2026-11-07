@@ -91,18 +91,20 @@ def test_gaps_do_not_compress_templates():
 
 
 def test_dip_without_template_depth_is_reported_as_unusable():
-    residual, _, _, model, template_unusable = evaluate_model([-3.0, 2.0, 3.0])
+    residual, baseline, _, model, template_unusable = evaluate_model([-3.0, 2.0, 3.0])
 
     assert template_unusable
-    assert residual == ExoMoonLeastSquares.MAX_RESIDUAL
+    # Audit H1: an unusable scenario scores as the null instead of a placeholder value.
+    assert residual == baseline
     np.testing.assert_allclose(model, 1.0)
 
 
 def test_scenario_without_dip_is_not_reported_as_unusable():
-    residual, _, _, _, template_unusable = evaluate_model([-0.5, 0.0, 0.5], t0_flux_mean_value=1.0)
+    residual, baseline, radius, _, template_unusable = evaluate_model([-0.5, 0.0, 0.5], t0_flux_mean_value=1.0)
 
     assert not template_unusable
-    assert residual == ExoMoonLeastSquares.MAX_RESIDUAL
+    # Audit H1: a scenario without a dip scores as the null.
+    assert residual == baseline and radius == 0.0
 
 
 def test_fitted_scenario_is_not_reported_as_unusable():
@@ -187,9 +189,9 @@ def test_search_reports_template_outcome(tmp_path):
     emls.models = [(0.5, V_TEMPLATE_TIME, template_flux)]
     usable = emls.search(scenario_input())
 
-    assert out_of_support[0] == ExoMoonLeastSquares.MAX_RESIDUAL
+    assert out_of_support[0] == out_of_support[1]
     assert out_of_support[4]
-    assert usable[0] < ExoMoonLeastSquares.MAX_RESIDUAL
+    assert usable[0] < usable[1]
     assert not usable[4]
 
 
