@@ -8,6 +8,7 @@ import sys
 
 import numpy as np
 import pandas as pd
+import yaml
 from lcbuilder.helper import LcbuilderHelper
 
 from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquares
@@ -181,6 +182,41 @@ def mask_candidates(time, flux, flux_err, candidates, numbers):
     return time, flux, flux_err
 
 
+def read_exposure_time(object_dir, exposure_time=None):
+    """Return the exposure time in seconds and where it came from.
+
+    Parameters
+    ----------
+    object_dir : str
+        SHERLOCK results directory, whose properties.yaml records EXPTIME.
+    exposure_time : float, optional
+        Exposure time in seconds given by the user, which takes precedence.
+
+    Returns
+    -------
+    tuple
+        (seconds or None, source). None means an instantaneous model.
+    """
+    if exposure_time is not None:
+        if not exposure_time > 0:
+            raise ValueError(f"--exposure_time must be positive, got {exposure_time}")
+        return float(exposure_time), "user"
+    properties_file = os.path.join(object_dir, "properties.yaml")
+    exptime = None
+    if os.path.exists(properties_file):
+        with open(properties_file) as file:
+            exptime = (yaml.safe_load(file) or {}).get("EXPTIME")
+    values = sorted({float(value) for value in np.atleast_1d(exptime) if value is not None}) if exptime is not None else []
+    if not values:
+        logging.warning("No EXPTIME in %s and no --exposure_time: the planet and moon models are instantaneous, "
+                        "which biases long-cadence data", properties_file)
+        return None, "none (instantaneous model)"
+    if len(values) > 1:
+        logging.warning("properties.yaml lists several exposure times %s; using the longest. Mixed cadence is not "
+                        "modelled per point", values)
+    return values[-1], "properties.yaml"
+
+
 def epochs_in_span(t0, period, time):
     """Return every transit epoch of the ephemeris within the data span, observed or not."""
     first = np.floor((np.min(time) - t0) / period)
@@ -190,7 +226,7 @@ def epochs_in_span(t0, period, time):
 
 
 def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
-                 curve=None, lc_file=None, use_fit=True):
+                 curve=None, lc_file=None, use_fit=True, exposure_time=None):
     """Collect the light curve and the star, planet and moon-range inputs of an EMLS run.
 
     Parameters
@@ -211,6 +247,8 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
         Light curve file with time, flux and flux_err columns. Overrides curve.
     use_fit : bool, optional
         Use the fit_[n]/main results when they exist, default True.
+    exposure_time : float, optional
+        Exposure time in seconds. Read from properties.yaml (EXPTIME) when missing.
 
     Returns
     -------
@@ -232,6 +270,7 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     if not np.all(np.isfinite(ld)):
         raise ValueError("params_star.csv has no finite limb darkening coefficients ld_a, ld_b")
     sources = {}
+    exposure_seconds, sources["exposure_time"] = read_exposure_time(object_dir, exposure_time)
     planet = {"period": float(row["period"]), "t0": float(row["t0"]), "duration": float(row["duration"]) / 60 / 24,
               "radius": float(row["rad_p"]), "radius_err": np.nan, "a": float(row["a"]), "ecc": 0.0,
               "arg_periastron": 0.0}
@@ -308,6 +347,7 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     if len(time) == 0:
         raise ValueError("No light curve points remain after masking")
     return {"star": {"mass": star_mass, "radius": star_radius, "ld": ld}, "planet": planet, "moon": moon,
+            "exposure_time": exposure_seconds,
             "mask": mask, "lc_file": os.path.abspath(lc_file), "sources": sources,
             "t0s": epochs_in_span(planet["t0"], planet["period"], time),
             "time": time, "flux": flux, "flux_err": flux_err}
@@ -348,7 +388,7 @@ def _setup_logging(log_file):
 
 def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
-             max_moon_density=5.5, subtract_mode='subtract'):
+             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -370,6 +410,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         Maximum moon density in g/cm3 for the Roche limit, default 5.5.
     subtract_mode : str, optional
         'subtract' or 'mask' for the planet transit, default 'subtract'.
+    exposure_time : float, optional
+        Exposure time in seconds. Read from properties.yaml (EXPTIME) when missing.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -392,7 +434,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     try:
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
-                       subtract_mode)
+                       subtract_mode, exposure_time)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -407,12 +449,13 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
-         radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode):
+         radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
-                          use_fit)
+                          use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
     for key in ("period", "t0", "duration", "radius", "a", "inc", "impact", "ecc", "mass"):
         logging.info("Planet %s = %s (%s)", key, planet[key], inputs["sources"].get(key))
+    logging.info("Exposure time %s s (%s)", inputs["exposure_time"], inputs["sources"]["exposure_time"])
     logging.info("Light curve %s, %d points, %d epochs in its span; moon radius %.3f-%.3f R_earth", inputs["lc_file"],
                  len(inputs["time"]), len(inputs["t0s"]), moon["min_radius"], moon["max_radius"])
     emls = ExoMoonLeastSquares(
@@ -421,7 +464,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         planet["inc_err"], planet["ecc"], 0.0, planet["arg_periastron"], planet["impact"],
         moon["min_radius"], moon["max_radius"], inputs["t0s"], inputs["time"], inputs["flux"], inputs["flux_err"],
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
-        subtract_mode=subtract_mode)
+        subtract_mode=subtract_mode,
+        exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -436,7 +480,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
     emls.run(plot=True)
     results = {
         "object_dir": os.path.abspath(object_dir), "candidate": candidate, "light_curve": inputs["lc_file"],
-        "masked_candidates": inputs["mask"], "star": star,
+        "masked_candidates": inputs["mask"], "star": star, "exposure_time_s": inputs["exposure_time"],
         "planet": planet,
         "moon_radius_range": moon, "sources": inputs["sources"], "period_grid_size": period_grid_size,
         "radius_grid_size": radius_grid_size, "epochs_in_span": len(inputs["t0s"]),

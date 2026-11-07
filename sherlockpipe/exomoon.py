@@ -11,7 +11,6 @@ import astropy.units as u
 from lcbuilder.helper import LcbuilderHelper
 from lcbuilder.star.HabitabilityCalculator import HabitabilityCalculator
 from scipy.optimize import minimize
-from batman import TransitModel
 from numba import njit
 from pytransit import QuadraticModel
 import batman
@@ -40,6 +39,24 @@ EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  #
 MIN_RP_OVER_RSTAR = 1e-5
 
 
+class ExposureAveragedModel:
+    """batman transit model averaged over each exposure with the midpoint rule.
+
+    batman's own supersample_factor converges slowly at long cadence (about 80 ppm off at 15
+    sub-exposures over 30 minutes for a 0.25 % transit), while midpoint averaging is within about
+    5 ppm. It exposes the same light_curve(params) interface as batman.TransitModel.
+    """
+
+    def __init__(self, transit_params, time, exposure_time, sub_exposures):
+        time = np.asarray(time, dtype=float)
+        offsets = ((np.arange(sub_exposures) + 0.5) / sub_exposures - 0.5) * exposure_time
+        self.shape = (len(time), sub_exposures)
+        self.model = batman.TransitModel(transit_params, (time[:, None] + offsets[None, :]).ravel())
+
+    def light_curve(self, transit_params):
+        return self.model.light_curve(transit_params).reshape(self.shape).mean(axis=1)
+
+
 class NoUsableEpochsError(ValueError):
     """No planet transit epoch is left to search for a moon."""
 
@@ -49,6 +66,7 @@ class ExoMoonLeastSquares:
     MAX_RESIDUAL = sys.maxsize
     SPECTRUM_KERNEL = 31
     TEMPLATE_MIN_SAMPLES = 1000
+    SUBEXPOSURE_DAYS = 2 / 1440
 
     def __init__(self, object_dir, cpus, star_mass, star_radius, ab, planet_radius, planet_radius_err,
                  planet_mass, planet_period,
@@ -59,7 +77,7 @@ class ExoMoonLeastSquares:
                   subtract_mode: str = "subtract", mask_duration_factor: float = 1.0,
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
-                  max_subtraction_rms_ratio: float = 3.0):
+                  max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -127,6 +145,9 @@ class ExoMoonLeastSquares:
         subtract_mode : str, optional
             Planet subtraction mode: 'subtract' (remove model) or 'mask'
             (cut in-transit points). Default 'subtract'.
+        exposure_time : float, optional
+            Exposure time of each data point in days. The planet fits and the moon
+            templates are averaged over it. Default None, an instantaneous model.
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -162,6 +183,9 @@ class ExoMoonLeastSquares:
         self.fit_rp_per_transit = fit_rp_per_transit
         self.min_transit_completeness = min_transit_completeness
         self.max_subtraction_rms_ratio = max_subtraction_rms_ratio
+        if exposure_time is not None and not exposure_time > 0:
+            raise ValueError(f"exposure_time must be positive, got {exposure_time}")
+        self.exposure_time = exposure_time
         self.bary_t0s = []
         for i, bary_t0 in enumerate(t0s):
             mask = np.abs(time - bary_t0) < self.planet_duration * 2
@@ -435,7 +459,34 @@ class ExoMoonLeastSquares:
             return np.linspace(min, max, samples)
 
     @staticmethod
-    def fit_single_t0(time, flux, flux_err, t0_guess, duration_window, transit_params):
+    def transit_model(transit_params, time, exposure_time=None):
+        """Build a batman model, averaged over the exposure when one is given.
+
+        The exposure is split into sub-exposures of at most SUBEXPOSURE_DAYS and averaged at their
+        midpoints, so 2-minute data stay instantaneous and 30-minute data use 15 sub-exposures
+        (Kipping 2010, MNRAS 408, 1758).
+
+        Parameters
+        ----------
+        transit_params : batman.TransitParams
+            Transit parameters.
+        time : array_like
+            Mid-exposure times in days.
+        exposure_time : float, optional
+            Exposure time in days. None or a value up to SUBEXPOSURE_DAYS gives an instantaneous model.
+
+        Returns
+        -------
+        batman.TransitModel or ExposureAveragedModel
+            An object with a light_curve(params) method.
+        """
+        if exposure_time is None or exposure_time <= ExoMoonLeastSquares.SUBEXPOSURE_DAYS:
+            return batman.TransitModel(transit_params, time)
+        sub_exposures = int(np.ceil(exposure_time / ExoMoonLeastSquares.SUBEXPOSURE_DAYS))
+        return ExposureAveragedModel(transit_params, time, exposure_time, sub_exposures)
+
+    @staticmethod
+    def fit_single_t0(time, flux, flux_err, t0_guess, duration_window, transit_params, exposure_time=None):
         """Fit only t0 for a single transit. a, inc, rp must be pre-set on transit_params.
 
         Returns (best_theta, best_model) where best_theta is [t0].
@@ -444,7 +495,7 @@ class ExoMoonLeastSquares:
 
         def model(t0_val, t):
             transit_params.t0 = t0_val
-            m = TransitModel(transit_params, t)
+            m = ExoMoonLeastSquares.transit_model(transit_params, t, exposure_time)
             return m.light_curve(transit_params)
 
         def cost(t0_val):
@@ -461,7 +512,7 @@ class ExoMoonLeastSquares:
 
     @staticmethod
     def fit_single_t0_rp(time, flux, flux_err, t0_guess, rp_guess, rp_err,
-                          duration_window, transit_params):
+                          duration_window, transit_params, exposure_time=None):
         """Fit t0 and rp for a single transit. a, inc pre-set on transit_params.
 
         Returns (best_theta, best_model) where best_theta is [t0, rp].
@@ -472,7 +523,7 @@ class ExoMoonLeastSquares:
         def model(theta, t):
             transit_params.t0 = theta[0]
             transit_params.rp = theta[1]
-            m = TransitModel(transit_params, t)
+            m = ExoMoonLeastSquares.transit_model(transit_params, t, exposure_time)
             return m.light_curve(transit_params)
 
         def cost(theta):
@@ -535,7 +586,7 @@ class ExoMoonLeastSquares:
 
     @staticmethod
     def fit_single_transit(time, flux, flux_err, guess_params, guess_params_bounds,
-                           transit_params: batman.TransitParams):
+                           transit_params: batman.TransitParams, exposure_time=None):
         """Fit a single transit to light curve data.
 
         Parameters
@@ -579,7 +630,7 @@ class ExoMoonLeastSquares:
             transit_params.a = theta[1]
             transit_params.inc = theta[2]
             transit_params.rp = theta[3]
-            m = TransitModel(transit_params, t)
+            m = ExoMoonLeastSquares.transit_model(transit_params, t, exposure_time)
             return m.light_curve(transit_params)
 
         def neg_loglike(theta):
@@ -727,7 +778,7 @@ class ExoMoonLeastSquares:
                             fold_guess[3] + self.planet_radius_err / star_radius_rearth)]
         if not self.skip_fold_fit:
             fold_theta, _ = ExoMoonLeastSquares.fit_single_transit(
-                fold_time, fold_flux, fold_flux_err, fold_guess, fold_bounds, params)
+                fold_time, fold_flux, fold_flux_err, fold_guess, fold_bounds, params, self.exposure_time)
             logging.info("Fold fit: a=%.2f->%.2f, inc=%.1f->%.1f, rp=%.4f->%.4f (depth %.1f->%.1f ppm)",
                          fold_guess[1], fold_theta[1],
                          fold_guess[2], fold_theta[2],
@@ -758,7 +809,7 @@ class ExoMoonLeastSquares:
                 params_guess.inc = fold_guess[2]
                 params_guess.ecc = params.ecc; params_guess.w = params.w
                 params_guess.u = self.ab; params_guess.limb_dark = "quadratic"
-                mg = batman.TransitModel(params_guess, fold_time)
+                mg = ExoMoonLeastSquares.transit_model(params_guess, fold_time, self.exposure_time)
                 model_guess = mg.light_curve(params_guess)
                 # Build best-fit model
                 params_best = batman.TransitParams()
@@ -767,7 +818,7 @@ class ExoMoonLeastSquares:
                 params_best.inc = fold_theta[2]
                 params_best.ecc = params.ecc; params_best.w = params.w
                 params_best.u = self.ab; params_best.limb_dark = "quadratic"
-                mb = batman.TransitModel(params_best, fold_time)
+                mb = ExoMoonLeastSquares.transit_model(params_best, fold_time, self.exposure_time)
                 model_best = mb.light_curve(params_best)
                 fig_fold, ax_fold = plt.subplots(1, 1, figsize=(10, 6))
                 ax_fold.scatter(fold_time, fold_flux, color='gray', alpha=0.5, s=5)
@@ -793,10 +844,10 @@ class ExoMoonLeastSquares:
             if self.fit_rp_per_transit:
                 best_theta, best_model = ExoMoonLeastSquares.fit_single_t0_rp(
                     time[mask], flux[mask], flux_err[mask], t0, params.rp,
-                    self.planet_radius_err / star_radius_rearth, duration_window, epoch_params)
+                    self.planet_radius_err / star_radius_rearth, duration_window, epoch_params, self.exposure_time)
             else:
                 best_theta, best_model = ExoMoonLeastSquares.fit_single_t0(
-                    time[mask], flux[mask], flux_err[mask], t0, duration_window, epoch_params)
+                    time[mask], flux[mask], flux_err[mask], t0, duration_window, epoch_params, self.exposure_time)
             best_t0 = best_theta[0]
             self.ttvs.append(best_t0 - t0)
             ttv_t0s.append(t0)
@@ -1315,7 +1366,7 @@ class ExoMoonLeastSquares:
         return best_residual, residuals_baseline, best_radius, best_model, False
 
     @staticmethod
-    def build_moon_templates(transit_params, radii, star_radius, min_half_window):
+    def build_moon_templates(transit_params, radii, star_radius, min_half_window, exposure_time=None):
         """Build moon transit templates that reach unity inside their support.
 
         Parameters
@@ -1328,6 +1379,9 @@ class ExoMoonLeastSquares:
             Stellar radius in solar radii.
         min_half_window : float
             Smallest template half-width in days.
+        exposure_time : float, optional
+            Exposure time in days. The templates are averaged over it, so a template
+            sampled at a data time matches an exposure centred there. Default None.
 
         Returns
         -------
@@ -1343,14 +1397,16 @@ class ExoMoonLeastSquares:
             samples = max(ExoMoonLeastSquares.TEMPLATE_MIN_SAMPLES, int(np.ceil(2 * half_window / cadence)) + 1)
             template_time = np.linspace(-half_window, half_window, samples)
             time_model = transit_params.t0 + template_time
-            widest_model = batman.TransitModel(transit_params, time_model).light_curve(transit_params)
+            widest_model = ExoMoonLeastSquares.transit_model(transit_params, time_model, exposure_time).light_curve(
+                transit_params)
             if (widest_model[0] >= 1 and widest_model[-1] >= 1) or half_window >= max_half_window:
                 break
             half_window = min(half_window * 1.25, max_half_window)
         models = []
         for radius in radii:
             transit_params.rp = radius * R_earth_to_R_sun / star_radius
-            model_r = batman.TransitModel(transit_params, time_model).light_curve(transit_params)
+            model_r = ExoMoonLeastSquares.transit_model(transit_params, time_model, exposure_time).light_curve(
+                transit_params)
             if np.count_nonzero(model_r < 1) > 1:
                 models.append((radius, template_time, model_r))
         return models
@@ -1866,7 +1922,7 @@ class ExoMoonLeastSquares:
                                                            self.planet_impact_param) / 2
         self.models = ExoMoonLeastSquares.build_moon_templates(
             ma, np.linspace(self.min_radius, self.max_radius, self.radius_grid_size), self.star_radius,
-            max(self.planet_duration * 0.7, search_half_window))
+            max(self.planet_duration * 0.7, search_half_window), self.exposure_time)
         search_inputs = []
         if len(self.models) == 0:
             logging.warning("No moon radius produced a transit template, using a flat fallback template")
@@ -2203,7 +2259,7 @@ class ExoMoonLeastSquares:
                 ma_moon.w = 0
                 ma_moon.u = self.ab
                 ma_moon.limb_dark = "quadratic"
-                m_moon = batman.TransitModel(ma_moon, t_local)
+                m_moon = ExoMoonLeastSquares.transit_model(ma_moon, t_local, self.exposure_time)
                 model_moon = m_moon.light_curve(ma_moon)
                 fig_t, ax = plt.subplots(1, 1, figsize=(10, 6))
                 ax.axvspan(t0 - self.planet_duration / 2, t0 + self.planet_duration / 2,

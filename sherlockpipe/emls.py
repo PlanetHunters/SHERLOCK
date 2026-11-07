@@ -27,6 +27,8 @@ def parse_args(argv=None):
     ap.add_argument('--lc_file', default=None, help="Light curve CSV (time, flux, flux_err). Overrides --curve.")
     ap.add_argument('--no_fit', dest='use_fit', action='store_false',
                     help="Ignore the fit_[n] results even if they exist.")
+    ap.add_argument('--exposure_time', type=float, default=None,
+                    help="Exposure time in seconds. Default: EXPTIME from the directory's properties.yaml.")
     ap.add_argument('--max_moon_density', type=float, default=5.5, help="Maximum moon density in g/cm3.")
     ap.add_argument('--subtract_mode', choices=['subtract', 'mask'], default='subtract',
                     help="Whether the planet transit is subtracted or masked.")
@@ -38,4 +40,4 @@ if __name__ == '__main__':
     args = parse_args()
     run_emls(args.object_dir, args.candidate, args.mask_candidates, args.planet_mass, args.min_moon_radius,
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
-             args.use_fit, args.max_moon_density, args.subtract_mode)
+             args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time)

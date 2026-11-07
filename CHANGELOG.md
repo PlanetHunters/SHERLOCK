@@ -16,6 +16,14 @@
 
 ### Fixed
 
+- EMLS: the planet fits and moon templates are averaged over the exposure
+  (`exposure_time` in `ExoMoonLeastSquares`, `--exposure_time` or `EXPTIME`
+  from `properties.yaml` in `sherlockpipe.emls`). On 30-minute data the
+  planet model now matches the exposure-averaged transit within about 2 ppm
+  instead of 826 ppm, and the moon templates within 0.2 % of the depth
+  instead of 21-30 %. Data at 2-minute cadence or shorter are unchanged.
+  The averaging uses sub-exposure midpoints, because batman's own
+  supersampling converges slowly at long cadence.
 - EMLS: the SDE spectrum no longer contains placeholder scores. A hypothesis
   without a dip, or with a brightening, scores exactly as the null, and every
   positive dip is fitted, including dips shallower than `min_radius`. A
