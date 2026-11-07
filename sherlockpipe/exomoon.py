@@ -289,8 +289,11 @@ class ExoMoonLeastSquares:
     @staticmethod
     def min_period_for_orbit_duration(star_radius, planet_semimajor_axis,
                                       planet_period, planet_mass,
-                                      orbit_duration_days, impact_parameter=0):
+                                      orbit_duration_days, impact_parameter=0, moon_radius=0):
         """Minimum moon period with orbit transit duration >= orbit_duration_days.
+
+        Inverts `compute_moon_orbit_transit_duration`: the span is twice the maximum
+        offset a_m / v_p plus one moon transit, so a_m = (D - T_moon) * pi * a_p / P_p.
 
         Parameters
         ----------
@@ -306,14 +309,19 @@ class ExoMoonLeastSquares:
             Desired minimum moon orbit transit duration in days.
         impact_parameter : float, optional
             Planet impact parameter, default 0.
+        moon_radius : float, optional
+            Moon radius in solar radii, default 0.
 
         Returns
         -------
         float
-            Minimum moon orbital period in days. Returns 0 if no such
-            moon can exist (i.e., even at infeasibly large orbit).
+            Minimum moon orbital period in days. Returns 0 when the moon transit alone
+            already covers orbit_duration_days.
         """
-        a_moon_rsun = orbit_duration_days * np.pi * planet_semimajor_axis / planet_period - star_radius
+        planet_a_rsun = planet_semimajor_axis * star_radius
+        moon_transit = ExoMoonLeastSquares.compute_transit_duration(star_radius, planet_a_rsun, planet_period,
+                                                                    moon_radius, impact_parameter)
+        a_moon_rsun = (orbit_duration_days - moon_transit) * np.pi * planet_a_rsun / planet_period
         if a_moon_rsun <= 0:
             return 0.0
         return ExoMoonLeastSquares.au_to_period(planet_mass, a_moon_rsun / AU_TO_RSUN)
@@ -635,9 +643,12 @@ class ExoMoonLeastSquares:
             window = np.abs(time - t0) < self.planet_period / 2
             outside = window & (np.abs(time - t0) > self.planet_duration)
             if np.sum(outside) < min_points:
+                logging.warning("Epoch T0=%.4f not normalised: %d out-of-transit points, fewer than %d",
+                                t0, np.sum(outside), min_points)
                 continue
             level = np.median(flux[outside])
             if not np.isfinite(level) or level <= 0:
+                logging.warning("Epoch T0=%.4f not normalised: invalid out-of-transit level %s", t0, level)
                 continue
             flux[window] = flux[window] / level
             if flux_err is not None:
@@ -1769,12 +1780,23 @@ class ExoMoonLeastSquares:
                      moon_inc=90, moon_arg_periastron=0):
         """Build the search hypothesis for one moon period and initial phase.
 
+        See `search_inputs` for the parameters.
+        """
+        return self.search_inputs(moon_period, [moon_alpha], planet_mass, max_moon_period, impact_param, moon_ecc,
+                                  moon_inc, moon_arg_periastron)[0]
+
+    def search_inputs(self, moon_period, moon_alphas, planet_mass, max_moon_period, impact_param, moon_ecc=0,
+                      moon_inc=90, moon_arg_periastron=0):
+        """Build the search hypotheses for one moon period and several initial phases.
+
+        The durations do not depend on the phase, so they are computed once.
+
         Parameters
         ----------
         moon_period : float
             Moon period in days.
-        moon_alpha : float
-            Initial moon phase in radians.
+        moon_alphas : iterable of float
+            Initial moon phases in radians.
         planet_mass : float
             Planet mass in Earth masses.
         max_moon_period : float
@@ -1786,8 +1808,8 @@ class ExoMoonLeastSquares:
 
         Returns
         -------
-        SearchInput
-            The hypothesis, with the moon offset limited to a_m / v_p.
+        list of SearchInput
+            One hypothesis per phase, with the moon offset limited to a_m / v_p.
         """
         planet_a = self.planet_semimajor_axis * AU_TO_RSUN
         moon_radius = self.max_radius * R_earth_to_R_sun
@@ -1800,9 +1822,10 @@ class ExoMoonLeastSquares:
         max_orbit_duration = self.compute_moon_orbit_transit_duration(
             self.star_radius, planet_a, self.planet_period,
             self.compute_semimajor_axis(mass, max_moon_period) * AU_TO_RSUN, moon_radius, impact_param)
-        return SearchInput(moon_period, moon_alpha, moon_ecc, moon_inc, moon_arg_periastron, self.min_radius,
-                           impact_param, max_orbit_duration, moon_transit_duration, orbit_duration,
-                           moon_transit_duration / 2, orbit_duration / 2, max_orbit_duration / 2)
+        return [SearchInput(moon_period, moon_alpha, moon_ecc, moon_inc, moon_arg_periastron, self.min_radius,
+                            impact_param, max_orbit_duration, moon_transit_duration, orbit_duration,
+                            moon_transit_duration / 2, orbit_duration / 2, max_orbit_duration / 2)
+                for moon_alpha in moon_alphas]
 
     def run(self, plot=False, inject_params=None):
         """Run the full exomoon search over the parameter grid.
@@ -1862,9 +1885,11 @@ class ExoMoonLeastSquares:
                     self.star_radius, a_norm, self.planet_period,
                     planet_mass * M_earth_to_M_sun,
                     self.planet_duration * self.min_orbit_window,
-                    self.planet_impact_param)
+                    self.planet_impact_param, self.max_radius * R_earth_to_R_sun)
                 min_period = max(min_period, p_min_win)
-            logging.info(f"Roche Limit Period: {min_period}")
+            # O3: the minimum is no longer only the Roche limit.
+            logging.info("Minimum moon period: %s d (largest of Roche limit, planet contact%s)", min_period,
+                         " and orbit window" if self.min_orbit_window > 0 else "")
             max_period = self.au_to_period(planet_mass * M_earth_to_M_sun, self.compute_hill_radius(self.star_mass, planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis)) * 0.5
             logging.info(f"Hill Limit Period: {max_period}")
             period_grid = self.compute_moon_period_grid(min_period, max_period, samples=self.period_grid_size, mode="log")
@@ -1874,15 +1899,18 @@ class ExoMoonLeastSquares:
                     for moon_arg_periastron in moon_arg_periastron_grid:
                         for impact_param in impact_params_grid:
                             for moon_period in period_grid:
-                                for moon_initial_alpha in alpha_grid:
-                                    search_inputs.append(self.search_input(
-                                        moon_period, moon_initial_alpha, planet_mass, max_period, impact_param,
-                                        moon_ecc, moon_inc, moon_arg_periastron))
+                                search_inputs.extend(self.search_inputs(
+                                    moon_period, alpha_grid, planet_mass, max_period, impact_param,
+                                    moon_ecc, moon_inc, moon_arg_periastron))
         with Pool(processes=self.cpus, maxtasksperchild=500) as pool:
             all_residuals = list(
                 tqdm(pool.imap(self.search, search_inputs, chunksize=100),
                      total=len(search_inputs))
             )
+        no_data_count = sum(bool(np.isnan(all_residual[3])) for all_residual in all_residuals)
+        if no_data_count > 0:
+            logging.warning("%d/%d scenarios had no in-window or out-of-window data and were scored as no detection",
+                            no_data_count, len(all_residuals))
         unusable_template_count = sum(all_residual[4] for all_residual in all_residuals)
         if unusable_template_count > 0:
             logging.warning("%d/%d scenarios had no usable template (depth 0 at observed times)",
