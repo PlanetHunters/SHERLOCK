@@ -5,7 +5,7 @@ The light curve is the real PDCSAP flux of Kepler-706 b (KOI K00855.01, KIC 6522
 ``emls_data/make_kepler706_fixture.py``). Unlike the synthetic tests, it has real noise, gaps and
 systematics, and the moon comes from an independent model:
 
-1. A Pandora moon is added to the raw flux, averaged over the 30-minute exposure.
+1. A Pandora moon is added to the raw flux, averaged over the Kepler long-cadence exposure.
 2. The curve is detrended with a biweight filter, as SHERLOCK does, so detrending can remove signal.
 3. The candidate duration is 80 % of T14, like a TLS search duration, and there is no fit.
 4. The command runs with its default period grid and the guessed planet mass.
@@ -29,7 +29,6 @@ import pandas as pd
 import pandoramoon as pandora
 import pytest
 import wotan
-import yaml
 from astropy import constants as ac
 
 from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, M_earth_to_M_sun
@@ -44,6 +43,7 @@ IMPACT = 0.377
 PLANET_RADIUS = 11.38
 LD = (0.45, 0.20)
 JUPITER_MASS = 317.8
+KEPLER_LONG_CADENCE = 1765.5  # s: 270 frames of 6.54 s, the window each long-cadence point averages
 MOON_RADIUS = 2.0
 MOON_PERIOD_FRACTION = 0.9
 TAU_MOON = 0.37
@@ -66,7 +66,7 @@ def moon_period():
 
 
 def pandora_moon(time):
-    """Pandora moon flux for Kepler-706 b, averaged over the 30-minute exposure."""
+    """Pandora moon flux for Kepler-706 b, averaged over the Kepler long-cadence exposure."""
     a_au = ExoMoonLeastSquares.compute_semimajor_axis(star_mass(), PERIOD)
     params = pandora.model_params()
     params.R_star = STAR_RADIUS * ac.R_sun.value
@@ -81,7 +81,7 @@ def pandora_moon(time):
     params.M_moon = 1e-3 * ac.M_earth.value
     params.epoch_distance, params.supersampling_factor = PERIOD, 1
     params.occult_small_threshold, params.hill_sphere_threshold = 0.1, 1
-    offsets = (np.arange(15) + 0.5) / 15 * (1800 / 86400) - 900 / 86400
+    offsets = ((np.arange(15) + 0.5) / 15 - 0.5) * (KEPLER_LONG_CADENCE / 86400)
     fine = (time[:, None] + offsets[None, :]).ravel()
     moon_flux = np.asarray(pandora.moon_model(params).light_curve(fine)[2], float)
     return moon_flux.reshape(len(time), len(offsets)).mean(axis=1)
@@ -103,9 +103,6 @@ def sherlock_directory(directory, with_moon):
     pd.DataFrame([row], columns=CANDIDATE_COLUMNS).to_csv(os.path.join(directory, 'candidates.csv'), index=False)
     pd.DataFrame([{'obj_id': 'KIC 6522242', 'radius': STAR_RADIUS, 'mass': star_mass(), 'ld_a': LD[0],
                    'ld_b': LD[1]}]).to_csv(os.path.join(directory, 'params_star.csv'), index=False)
-    with open(os.path.join(directory, 'properties.yaml'), 'w') as file:
-        # Kepler long cadence, per target, as SHERLOCK records it in its results directories.
-        yaml.safe_dump({'TARGETS': {'KIC 6522242': {'EXPTIME': [1800]}}}, file)
 
 
 def run_command(directory, monkeypatch):
@@ -170,5 +167,6 @@ def test_inputs_follow_the_no_fit_path(runs):
 
     assert sources['mass'] == 'Jupiter mass (giant radius)'
     assert sources['inc'].startswith('no fit')
-    assert runs['moon']['exposure_time_s'] == 1800.0 and sources['exposure_time'] == 'properties.yaml TARGETS[KIC 6522242].EXPTIME'
+    assert runs['moon']['exposure_time_s'] == pytest.approx(KEPLER_LONG_CADENCE, abs=1)
+    assert sources['exposure_time'] == 'median point spacing of lc_1.csv'
     assert runs['moon']['period_grid_size'] == 10000

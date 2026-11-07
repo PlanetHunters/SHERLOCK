@@ -9,12 +9,12 @@ import logging
 import batman
 import numpy as np
 import pytest
-import yaml
+import pandas as pd
 
 from sherlockpipe import exomoon_run
 from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquares
 from sherlockpipe.tests.exomoon.test_audit_fixes import LD, PERIOD, SMA, run_to_search, system
-from sherlockpipe.tests.exomoon.test_emls_run import guard_directory
+from sherlockpipe.tests.exomoon.test_emls_run import guard_directory, write_lc
 
 THIRTY_MINUTES = 30 / 1440
 
@@ -93,80 +93,87 @@ def test_planet_subtraction_leaves_noise_on_30_minute_data(tmp_path):
     assert instantaneous > 1.2 * averaged, f"instantaneous {instantaneous * 1e6:.1f} ppm"
 
 
-def write_properties(directory, exptime=None, target=None, **extra):
-    """Write properties.yaml with EXPTIME at top level, or under TARGETS[target] as SHERLOCK usually does."""
-    settings = dict(extra)
-    if exptime is not None:
-        settings['EXPTIME'] = exptime
-    properties = {'TARGETS': {target: settings}} if target is not None else settings
-    with open(directory / 'properties.yaml', 'w') as file:
-        yaml.safe_dump(properties, file)
+def curve_with_spacing(directory, guard_time, spacings_s):
+    """Write a curve over the guard data span whose points follow the given spacings, in turn, per segment."""
+    segments = np.array_split(np.arange(int(guard_time.min()), int(np.ceil(guard_time.max()))), len(spacings_s))
+    time = np.concatenate([np.arange(days[0], days[-1] + 1, spacing / 86400) for days, spacing in
+                           zip(segments, spacings_s)])
+    lc_file = str(directory / 'lc_custom.csv')
+    write_lc(lc_file, time, np.ones_like(time), np.full(len(time), 1e-4))
+    return lc_file
 
 
-def test_command_reads_the_exposure_from_the_sherlock_properties(tmp_path):
-    guard_directory(tmp_path)
-    write_properties(tmp_path, [1800])
+@pytest.mark.parametrize('spacing', [120.0, 1765.5, 8640.0])
+def test_exposure_is_the_median_point_spacing(tmp_path, spacing):
+    _, time, _ = guard_directory(tmp_path)
+    lc_file = curve_with_spacing(tmp_path, time, [spacing])
+
+    inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
+
+    assert inputs['exposure_time'] == pytest.approx(spacing, rel=1e-6)
+    assert inputs['sources']['exposure_time'] == 'median point spacing of lc_custom.csv'
+
+
+def test_sherlock_curve_exposure_comes_from_its_spacing(tmp_path):
+    _, time, _ = guard_directory(tmp_path)
+    (tmp_path / 'properties.yaml').write_text('EXPTIME: [20, 1800]\n')  # a download filter, not read
 
     inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
 
-    assert inputs['exposure_time'] == 1800.0
-    assert inputs['sources']['exposure_time'] == 'properties.yaml EXPTIME'
+    assert inputs['exposure_time'] == pytest.approx(np.median(np.diff(time)) * 86400, rel=1e-6)
+    assert inputs['sources']['exposure_time'] == 'median point spacing of lc_1.csv'
+
+
+def test_gaps_do_not_change_the_exposure(tmp_path):
+    _, time, _ = guard_directory(tmp_path)
+    lc_file = curve_with_spacing(tmp_path, time, [600.0])
+    curve = pd.read_csv(lc_file)
+    curve[(curve['time'] % 1) < 0.3].to_csv(lc_file, index=False)  # 0.7-day gap every day
+
+    assert exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)['exposure_time'] == \
+        pytest.approx(600.0, rel=1e-6)
+
+
+def test_mixed_cadences_use_the_most_common_one(tmp_path, caplog):
+    _, time, _ = guard_directory(tmp_path)
+    lc_file = curve_with_spacing(tmp_path, time, [120.0, 1800.0])
+
+    with caplog.at_level(logging.INFO):
+        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
+
+    assert inputs['exposure_time'] == pytest.approx(120.0, rel=1e-6)
+    assert any(record.getMessage().startswith('Exposure time 120.0 s from the median point spacing')
+               for record in caplog.records)
+
+
+def test_irregular_spacing_is_warned(tmp_path, caplog):
+    _, time, _ = guard_directory(tmp_path)
+    irregular = np.sort(np.random.default_rng(0).uniform(time.min(), time.max(), 5000))
+    lc_file = str(tmp_path / 'lc_irregular.csv')
+    write_lc(lc_file, irregular, np.ones_like(irregular), np.full(len(irregular), 1e-4))
+
+    with caplog.at_level(logging.WARNING):
+        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
+
+    assert any('may mix cadences' in record.getMessage() for record in caplog.records)
 
 
 def test_user_exposure_takes_precedence(tmp_path):
     guard_directory(tmp_path)
-    write_properties(tmp_path, [1800])
 
     inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=120)
 
     assert inputs['exposure_time'] == 120.0 and inputs['sources']['exposure_time'] == 'user'
 
 
-def test_per_target_exposure_is_read_as_sherlock_writes_it(tmp_path):
-    guard_directory(tmp_path)
-    write_properties(tmp_path, [600], target='TIC 1')
+def test_spacing_longer_than_a_day_is_rejected(tmp_path):
+    _, time, _ = guard_directory(tmp_path)
+    sparse = np.arange(time.min(), time.max(), 1.5)
+    lc_file = str(tmp_path / 'lc_sparse.csv')
+    write_lc(lc_file, sparse, np.ones_like(sparse), np.full(len(sparse), 1e-4))
 
-    inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
-
-    assert inputs['exposure_time'] == 600.0
-    assert inputs['sources']['exposure_time'] == 'properties.yaml TARGETS[TIC 1].EXPTIME'
-
-
-def test_target_exposure_overrides_the_global_one(tmp_path):
-    guard_directory(tmp_path)
-    with open(tmp_path / 'properties.yaml', 'w') as file:
-        yaml.safe_dump({'EXPTIME': [120], 'TARGETS': {'TIC 1': {'EXPTIME': [1800]}}}, file)
-
-    assert exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)['exposure_time'] == 1800.0
-
-
-def test_mixed_exposures_ask_for_an_explicit_value(tmp_path):
-    guard_directory(tmp_path)
-    write_properties(tmp_path, [600, 1800], target='TIC 1')
-
-    with pytest.raises(ValueError, match='several exposure times.*--exposure_time'):
-        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
-    assert exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=600)['exposure_time'] == 600
-
-
-def test_binned_points_use_the_bin_as_exposure(tmp_path, caplog):
-    guard_directory(tmp_path)
-    write_properties(tmp_path, [120], EXPTIME_BINNING=0.1)
-
-    with caplog.at_level(logging.WARNING):
-        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
-
-    assert inputs['exposure_time'] == pytest.approx(8640.0)
-    assert inputs['sources']['exposure_time'] == 'properties.yaml EXPTIME_BINNING'
-    assert any('averages a 8640 s bin' in record.getMessage() for record in caplog.records)
-
-
-def test_named_cadence_asks_for_seconds(tmp_path):
-    guard_directory(tmp_path)
-    write_properties(tmp_path, ['fast'])
-
-    with pytest.raises(ValueError, match="names a cadence \\('fast'\\).*--exposure_time"):
-        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+    with pytest.raises(ValueError, match='longer than a day.*--exposure_time'):
+        exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
 
 
 @pytest.mark.parametrize('days', [float('inf'), 2.0])
@@ -178,21 +185,11 @@ def test_unbounded_exposure_is_rejected(tmp_path, days):
         system(tmp_path, curve=(t0s, time, flux, flux_err, duration), exposure_time=days)
 
 
-def test_missing_exposure_falls_back_to_an_instantaneous_model(tmp_path, caplog):
-    guard_directory(tmp_path)
-
-    with caplog.at_level(logging.WARNING):
-        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
-
-    assert inputs['exposure_time'] is None
-    assert any('instantaneous' in record.getMessage() for record in caplog.records)
-
-
 def test_invalid_exposure_is_rejected(tmp_path):
     guard_directory(tmp_path)
 
-    for value in (0, float('inf'), float('nan')):
-        with pytest.raises(ValueError, match='finite positive number of seconds'):
+    for value in (0, -1, float('inf'), float('nan'), 86401):
+        with pytest.raises(ValueError, match='positive number of seconds up to 86400'):
             exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, exposure_time=value)
 
 

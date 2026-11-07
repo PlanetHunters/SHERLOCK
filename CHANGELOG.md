@@ -17,8 +17,9 @@
 ### Fixed
 
 - EMLS: the planet fits and moon templates are averaged over the exposure
-  (`exposure_time` in `ExoMoonLeastSquares`, `--exposure_time` or `EXPTIME`
-  from `properties.yaml` in `sherlockpipe.emls`). On 30-minute data the
+  (`exposure_time` in `ExoMoonLeastSquares`; in `sherlockpipe.emls`,
+  `--exposure_time` or the median point spacing of the light curve). On
+  30-minute data the
   planet model now matches the exposure-averaged transit within about 2 ppm
   instead of 826 ppm, and the moon templates within 0.2 % of the depth
   instead of 21-30 %. Data at 2-minute cadence or shorter are unchanged.
@@ -26,10 +27,11 @@
   supersampling converges slowly at long cadence.
   The Pandora moon injected by `run(inject_params=...)` is averaged the same
   way, so injection tests compare like with like.
-  The command reads `EXPTIME` per target (`TARGETS[<target>]`) or globally,
-  as SHERLOCK does, uses `EXPTIME_BINNING` as the exposure of binned points,
-  and asks for `--exposure_time` when `EXPTIME` lists several values or a
-  named cadence.
+  The command measures one exposure for the whole curve as its median point
+  spacing, which also covers binned curves. It does not read `EXPTIME` from
+  `properties.yaml`, which only selects the downloaded cadences. A curve that
+  mixes cadences is modelled with its most common one, with a warning when
+  fewer than half of the spacings match it.
 - EMLS: the SDE spectrum no longer contains placeholder scores. A hypothesis
   without a dip, or with a brightening, scores exactly as the null, and every
   positive dip is fitted, including dips shallower than `min_radius`. A

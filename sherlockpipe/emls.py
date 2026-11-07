@@ -28,7 +28,7 @@ def parse_args(argv=None):
     ap.add_argument('--no_fit', dest='use_fit', action='store_false',
                     help="Ignore the fit_[n] results even if they exist.")
     ap.add_argument('--exposure_time', type=float, default=None,
-                    help="Exposure time in seconds. Default: EXPTIME from the directory's properties.yaml.")
+                    help="Exposure time in seconds. Default: the median point spacing of the light curve.")
     ap.add_argument('--max_moon_density', type=float, default=5.5, help="Maximum moon density in g/cm3.")
     ap.add_argument('--subtract_mode', choices=['subtract', 'mask'], default='subtract',
                     help="Whether the planet transit is subtracted or masked.")

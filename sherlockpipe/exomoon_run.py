@@ -8,7 +8,6 @@ import sys
 
 import numpy as np
 import pandas as pd
-import yaml
 from lcbuilder.helper import LcbuilderHelper
 
 from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquares
@@ -22,6 +21,7 @@ MASS_FORECAST_SEED = 0
 # constrain the mass (the forecast median exceeds 6 Jupiter masses at 10-12 R_earth).
 GIANT_RADIUS = 8.0
 JUPITER_MASS = 317.8
+MAX_EXPOSURE_SECONDS = 86400
 
 
 def read_candidate(object_dir, candidate):
@@ -182,27 +182,22 @@ def mask_candidates(time, flux, flux_err, candidates, numbers):
     return time, flux, flux_err
 
 
-def _config_value(properties, target_id, key):
-    """Read a key the way SHERLOCK does: the target's own value overrides the global one."""
-    value, path = properties.get(key), key
-    target = (properties.get("TARGETS") or {}).get(target_id) if target_id is not None else None
-    if isinstance(target, dict) and target.get(key) is not None:
-        value, path = target.get(key), f"TARGETS[{target_id}].{key}"
-    return value, path
+def estimate_exposure_time(time, lc_file, exposure_time=None):
+    """Return the exposure time of the light-curve points in seconds and where it came from.
 
-
-def read_exposure_time(object_dir, exposure_time=None, target_id=None):
-    """Return the exposure time of each light-curve point in seconds and where it came from.
+    The exposure is the median spacing between consecutive points of the whole curve. Mission
+    exposures span their cadence, and a binned point spans its bin, so the spacing measures the
+    exposure without the SHERLOCK configuration, whose EXPTIME only selects the downloaded data.
+    A curve mixing cadences gets the exposure of its most common cadence.
 
     Parameters
     ----------
-    object_dir : str
-        SHERLOCK results directory, whose properties.yaml records EXPTIME and EXPTIME_BINNING,
-        globally or under TARGETS[<target>].
+    time : array_like
+        Light-curve times in days.
+    lc_file : str
+        Light-curve file, named in the source.
     exposure_time : float, optional
         Exposure time in seconds given by the user, which takes precedence.
-    target_id : str, optional
-        Target name as in candidates.csv ("Object Id"), for the per-target settings.
 
     Returns
     -------
@@ -212,44 +207,31 @@ def read_exposure_time(object_dir, exposure_time=None, target_id=None):
     Raises
     ------
     ValueError
-        If the exposure is not a finite positive number, if EXPTIME names a cadence instead of
-        seconds, or if it lists several exposures, which a single value cannot model.
+        If the exposure is not a positive number of seconds up to one day.
     """
     if exposure_time is not None:
-        if not (np.isfinite(exposure_time) and exposure_time > 0):
-            raise ValueError(f"--exposure_time must be a finite positive number of seconds, got {exposure_time}")
+        if not (np.isfinite(exposure_time) and 0 < exposure_time <= MAX_EXPOSURE_SECONDS):
+            raise ValueError(f"--exposure_time must be a positive number of seconds up to {MAX_EXPOSURE_SECONDS}, "
+                             f"got {exposure_time}")
         return float(exposure_time), "user"
-    properties_file = os.path.join(object_dir, "properties.yaml")
-    properties = {}
-    if os.path.exists(properties_file):
-        with open(properties_file) as file:
-            loaded = yaml.safe_load(file)
-        properties = loaded if isinstance(loaded, dict) else {}
-    exptime, path = _config_value(properties, target_id, "EXPTIME")
-    raw = [value for value in (exptime if isinstance(exptime, (list, tuple)) else [exptime]) if value is not None]
-    named = [value for value in raw if isinstance(value, str)]
-    if named:
-        raise ValueError(f"{path} in {properties_file} names a cadence ({named[0]!r}) instead of seconds; "
-                         f"pass --exposure_time")
-    values = sorted({float(value) for value in raw})
-    if len(values) > 1:
-        raise ValueError(f"{path} in {properties_file} lists several exposure times {values}; one value cannot "
-                         f"model every point, so pass --exposure_time")
-    if values and not (np.isfinite(values[0]) and values[0] > 0):
-        raise ValueError(f"{path} in {properties_file} must be a finite positive number of seconds, got {values[0]}")
-    seconds, source = (values[0], f"properties.yaml {path}") if values else (None, None)
-    binning, binning_path = _config_value(properties, target_id, "EXPTIME_BINNING")
-    if binning and float(binning) > 0 and (seconds is None or float(binning) * 86400 > seconds):
-        # Binned points average the flux over the whole bin.
-        logging.warning("%s = %s d in %s: each point averages a %.0f s bin, which is used as the exposure",
-                        binning_path, binning, properties_file, float(binning) * 86400)
-        seconds, source = float(binning) * 86400, f"properties.yaml {binning_path}"
-    if seconds is None:
-        logging.warning("No EXPTIME found in %s, neither globally nor for target %s, and no --exposure_time: the "
-                        "planet and moon models are instantaneous, which biases long-cadence data", properties_file,
-                        target_id)
+    spacing = np.diff(np.sort(np.asarray(time, dtype=float)))
+    spacing = spacing[spacing > 0]
+    if len(spacing) == 0:
+        logging.warning("%s has fewer than two distinct times, so the exposure cannot be measured: the planet and "
+                        "moon models are instantaneous", lc_file)
         return None, "none (instantaneous model)"
-    return seconds, source
+    seconds = float(np.median(spacing)) * 86400
+    if seconds > MAX_EXPOSURE_SECONDS:
+        raise ValueError(f"The median point spacing of {lc_file} is {seconds:.0f} s, longer than a day, so it is not "
+                         f"an exposure; pass --exposure_time")
+    near = np.abs(spacing * 86400 - seconds) <= 0.05 * seconds
+    logging.info("Exposure time %.1f s from the median point spacing of %s (%.0f%% of the spacings within 5%%)",
+                 seconds, lc_file, 100 * np.mean(near))
+    if np.mean(near) < 0.5:
+        logging.warning("Fewer than half of the point spacings of %s are within 5%% of the median %.1f s, so the "
+                        "curve may mix cadences; every point is modelled with %.1f s. Pass --exposure_time to "
+                        "change it", lc_file, seconds, seconds)
+    return seconds, f"median point spacing of {os.path.basename(lc_file)}"
 
 
 def epochs_in_span(t0, period, time):
@@ -283,7 +265,7 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     use_fit : bool, optional
         Use the fit_[n]/main results when they exist, default True.
     exposure_time : float, optional
-        Exposure time in seconds. Read from properties.yaml (EXPTIME) when missing.
+        Exposure time in seconds. The median point spacing of the light curve when missing.
 
     Returns
     -------
@@ -305,8 +287,6 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     if not np.all(np.isfinite(ld)):
         raise ValueError("params_star.csv has no finite limb darkening coefficients ld_a, ld_b")
     sources = {}
-    exposure_seconds, sources["exposure_time"] = read_exposure_time(object_dir, exposure_time,
-                                                                    str(row["Object Id"]))
     planet = {"period": float(row["period"]), "t0": float(row["t0"]), "duration": float(row["duration"]) / 60 / 24,
               "radius": float(row["rad_p"]), "radius_err": np.nan, "a": float(row["a"]), "ecc": 0.0,
               "arg_periastron": 0.0}
@@ -379,6 +359,7 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     time, flux, flux_err = lc["time"].to_numpy(float), lc["flux"].to_numpy(float), lc["flux_err"].to_numpy(float)
     finite = np.isfinite(time) & np.isfinite(flux) & np.isfinite(flux_err)
     time, flux, flux_err = time[finite], flux[finite], flux_err[finite]
+    exposure_seconds, sources["exposure_time"] = estimate_exposure_time(time, lc_file, exposure_time)
     time, flux, flux_err = mask_candidates(time, flux, flux_err, candidates, mask)
     if len(time) == 0:
         raise ValueError("No light curve points remain after masking")
@@ -447,7 +428,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     subtract_mode : str, optional
         'subtract' or 'mask' for the planet transit, default 'subtract'.
     exposure_time : float, optional
-        Exposure time in seconds. Read from properties.yaml (EXPTIME) when missing.
+        Exposure time in seconds. The median point spacing of the light curve when missing.
     Other parameters are passed to `build_inputs`.
 
     Returns
