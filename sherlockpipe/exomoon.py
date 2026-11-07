@@ -2244,6 +2244,66 @@ def koi_planet_inclination(impact_param, star_mass, star_radius, planet_period):
     return min(np.rad2deg(np.arccos(np.clip(impact_param * star_radius / a_rsun, 0, 1))), 90)
 
 
+def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_offset):
+    """Return the planet and moon-radius inputs of EMLS for one catalog row.
+
+    Parameters
+    ----------
+    row : pandas.Series
+        Catalog row, after `prepare_koi_table` for KOIs.
+    catalog : str
+        Catalog name, ``"kois"`` or a TOI-like catalog.
+    star_mass : float
+        Stellar mass in solar masses.
+    star_radius : float
+        Stellar radius in solar radii.
+    first_time : float
+        First time of the light curve, used to move the epoch into the data.
+    bjd_offset : float
+        Offset between the catalog epoch and the light curve time.
+
+    Returns
+    -------
+    dict
+        Keyword values named as the `ExoMoonLeastSquares` arguments. The moon radius
+        range is Rp/20 to Rp/2 for every catalog.
+    """
+    planet_radius = row['Planet Radius (R_Earth)']
+    planet_period = row['Period (days)']
+    planet_t0 = row['Epoch (BJD)'] - bjd_offset
+    planet_t0 = first_time + (planet_t0 - first_time) % planet_period
+    planet_mass = row['Predicted Mass (M_Earth)']
+    if planet_mass is None or np.isnan(planet_mass):
+        planet_mass = planet_radius ** 1.5
+    planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
+    if catalog == "kois":
+        planet_impact_param = float(row["planet_impact"])
+        planet_inc = koi_planet_inclination(planet_impact_param, star_mass, star_radius, planet_period)
+        planet_inc_err = 0.5
+    else:
+        planet_inc = 90
+        planet_inc_err = 3
+        planet_impact_param = LcbuilderHelper.convert_from_to(planet_semimajor_axis, u.au, u.R_sun) / star_radius * \
+            np.cos(np.deg2rad(planet_inc))
+    return {
+        'planet_radius': planet_radius,
+        'planet_radius_err': row['Planet Radius (R_Earth) err'],
+        'planet_period': planet_period,
+        'planet_t0': planet_t0,
+        'planet_duration': row['Duration (hours)'] / 24,
+        'planet_inc': planet_inc,
+        'planet_inc_err': planet_inc_err,
+        'planet_ecc': 0.15,
+        'planet_ecc_err': 0.15,
+        'planet_arg_periastron': 0,
+        'planet_mass': planet_mass,
+        'planet_semimajor_axis': planet_semimajor_axis,
+        'planet_impact_param': planet_impact_param,
+        'min_radius': planet_radius / 20,
+        'max_radius': planet_radius / 2,
+    }
+
+
 if __name__ == '__main__':
 
     formatter = logging.Formatter('%(message)s')
@@ -2405,30 +2465,22 @@ if __name__ == '__main__':
             # flux = np.random.normal(1, 0.001, len(times))
             # flux_err = np.random.normal(0.001, 0.0001, len(times))
             # ld_coeffs = [0.4136, 0.1999]
-            planet_radius = row['Planet Radius (R_Earth)']
-            planet_radius_err = row['Planet Radius (R_Earth) err']
-            planet_period = row['Period (days)']
-            planet_t0 = row['Epoch (BJD)'] - bjd_offset
-            planet_t0 = times[0] + (planet_t0 - times[0]) % planet_period
-            planet_duration = row['Duration (hours)'] / 24
-            if catalog == "kois":
-                planet_impact_param = float(row["planet_impact"])
-                planet_inc = koi_planet_inclination(planet_impact_param, star_mass, star_radius, planet_period)
-                planet_inc_err = 0.5
-            else:
-                planet_inc = 90
-                planet_inc_err = 3
-            planet_ecc = 0.15
-            planet_ecc_err = 0.15
-            planet_arg_periastron = 0
-            planet_mass = row['Predicted Mass (M_Earth)']
-            if np.isnan(planet_mass) or planet_mass is None:
-                planet_mass = planet_radius ** 1.5
-            planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
-            if catalog != "kois":
-                planet_impact_param = LcbuilderHelper.convert_from_to(planet_semimajor_axis, u.au, u.R_sun) / star_radius * np.cos(np.deg2rad(planet_inc))
-                min_radius = planet_radius / 20
-                max_radius = planet_radius / 2
+            planet = catalog_planet_params(row, catalog, star_mass, star_radius, times[0], bjd_offset)
+            planet_radius = planet['planet_radius']
+            planet_radius_err = planet['planet_radius_err']
+            planet_period = planet['planet_period']
+            planet_t0 = planet['planet_t0']
+            planet_duration = planet['planet_duration']
+            planet_inc = planet['planet_inc']
+            planet_inc_err = planet['planet_inc_err']
+            planet_ecc = planet['planet_ecc']
+            planet_ecc_err = planet['planet_ecc_err']
+            planet_arg_periastron = planet['planet_arg_periastron']
+            planet_mass = planet['planet_mass']
+            planet_semimajor_axis = planet['planet_semimajor_axis']
+            planet_impact_param = planet['planet_impact_param']
+            min_radius = planet['min_radius']
+            max_radius = planet['max_radius']
             # planet_radius = 11.8142656578
             # planet_radius_err = 1.00
             # planet_period = 141.834025
