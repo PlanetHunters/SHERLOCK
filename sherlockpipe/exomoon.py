@@ -11,7 +11,7 @@ from multiprocessing import Pool
 import astropy.units as u
 from lcbuilder.helper import LcbuilderHelper
 from lcbuilder.star.HabitabilityCalculator import HabitabilityCalculator
-from scipy.optimize import minimize
+from scipy.optimize import least_squares, minimize
 from numba import njit
 from pytransit import QuadraticModel
 import batman
@@ -105,7 +105,7 @@ class ExoMoonLeastSquares:
                  planet_ecc_err, planet_arg_periastron, planet_impact_param, min_radius, max_radius, t0s, time, flux,
                  flux_err, max_moon_density, period_grid_size=2000, radius_grid_size=10,
                  min_cadences_per_t0: bool = 20, min_orbit_window: float = 0,
-                  subtract_mode: str = "subtract", mask_duration_factor: float = 1.0,
+                  subtract_mode: str = "subtract", mask_duration_factor: float = None,
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
@@ -178,6 +178,9 @@ class ExoMoonLeastSquares:
         subtract_mode : str, optional
             Planet subtraction mode: 'subtract' (remove model) or 'mask'
             (cut in-transit points). Default 'subtract'.
+        mask_duration_factor : float, optional
+            In mask mode, the mask half-width in units of T14 / 2. Default None: 1.1 T14 / 2
+            plus one cadence (see `mask_half_width`).
         max_subtraction_rms_ratio : float, optional
             In-transit to out-of-transit residual RMS ratio above which an epoch is
             flagged in epochs_flagged_rms. It is kept, because a moon dip inside the
@@ -281,6 +284,9 @@ class ExoMoonLeastSquares:
         self.recovered = None
         self.recovered_alias = None
         self.planet_rp_over_rstar = None
+        self.fold_realigned = False
+        self.planet_shape_check = None
+        self.mask_mode_survival = None
         self.aliases = None
         self.red_noise_factor = 1.0
         self.red_noise_measured = None
@@ -826,6 +832,26 @@ class ExoMoonLeastSquares:
         polished = minimize(cost, res.x, method='Powell', bounds=guess_params_bounds)
         if polished.fun <= res.fun:
             res = polished
+        # B8: Powell's ftol is relative to a cost that grows with the number of points, so with
+        # correlated b, T14 and rp it stops early on large folds. A bounded least-squares run on
+        # the residuals from its result converges on the gradient instead.
+        n_points = len(flux)
+
+        def residuals(theta):
+            if geometry(theta) is None:
+                return np.full(n_points, 1e6)
+            return (flux - model(theta, time)) / flux_err
+
+        lower = np.array([bound[0] for bound in guess_params_bounds], dtype=float)
+        upper = np.array([bound[1] for bound in guess_params_bounds], dtype=float)
+        start = np.clip(np.asarray(res.x, dtype=float), lower, upper)
+        try:
+            refined = least_squares(residuals, start, bounds=(lower, upper), method='trf', x_scale='jac')
+            if refined.success and refined.cost <= res.fun and geometry(refined.x) is not None:
+                refined.fun = refined.cost
+                res = refined
+        except ValueError:
+            pass
         best_theta = res.x if geometry(res.x) is not None else np.asarray(guess_params, dtype=float)
         status = ExoMoonLeastSquares.fit_status(res, guess_params_bounds, ['t0', 't14', 'b', 'rp'],
                                                 free_edges=[('b', 'lower')])
@@ -1009,6 +1035,168 @@ class ExoMoonLeastSquares:
                 sigmas.append(precisions[j])
         return sigmas
 
+    def mask_half_width(self, epoch_time):
+        """Return the half-width in days of the mask-mode window around a planet transit (audit item E2).
+
+        With mask_duration_factor given it is that factor times T14 / 2. By default it is
+        1.1 T14 / 2 plus one cadence, so an imperfect T14 or t0, or a long exposure, leaves no
+        ingress or egress points next to the mask.
+        """
+        if self.mask_duration_factor is not None:
+            return self.planet_duration / 2 * self.mask_duration_factor
+        cadence = np.median(np.diff(np.sort(epoch_time))) if len(epoch_time) > 1 else 0.0
+        if self.exposure_time is not None:
+            cadence = max(cadence, self.exposure_time)
+        return 1.1 * self.planet_duration / 2 + cadence
+
+    @staticmethod
+    def mask_survival(max_offset, half_duration, half_mask):
+        """Return the mean fraction of a moon's transit time left outside the planet mask (audit item E3).
+
+        The moon transits max_offset sin(phase) from the planet, over a time as long as the planet
+        transit (2 half_duration), and the mask covers +-half_mask; the fraction is averaged over a
+        uniform orbital phase. 0.32 for a maximum offset of one half-duration with a T14 mask.
+        """
+        phase = np.linspace(0, np.pi / 2, 2001)
+        centre = max_offset * np.sin(phase)
+        overlap = np.clip(np.minimum(centre + half_duration, half_mask) - np.maximum(centre - half_duration,
+                                                                                     -half_mask), 0, None)
+        return float(np.mean(1 - overlap / (2 * half_duration)))
+
+    def warn_mask_mode_survival(self, threshold=0.5):
+        """Warn when mask mode removes most of the signal of the widest searched moons (audit item E3)."""
+        mass = np.max(self.planet_mass_grid) * M_earth_to_M_sun
+        max_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
+                                                                       self.planet_semimajor_axis)) * 0.5
+        max_offset = self.compute_max_moon_offset(self.compute_semimajor_axis(mass, max_period),
+                                                  self.planet_semimajor_axis, self.planet_period)
+        half_duration = self.planet_duration / 2
+        survival = self.mask_survival(max_offset, half_duration, self.mask_half_width(self.time))
+        self.mask_mode_survival = survival
+        level = logging.WARNING if survival < threshold else logging.INFO
+        logging.log(level, "Mask mode keeps on average %.0f%% of the transit time of the widest searched moons "
+                    "(offset up to %.2f d); closer moons keep less. Subtract mode keeps them", survival * 100,
+                    max_offset)
+
+    def check_planet_shape(self, time, residual_flux, fitted_t0s, bins=20, p_threshold=1e-3):
+        """Test the stacked post-subtraction residual for a planet shape left behind (audit item D2).
+
+        The residuals of the kept epochs are stacked on their fitted mid-times and binned over
+        +-0.75 T14, so ingress, egress and the contact points are covered. The chi2 of the bin
+        means against the level between 0.75 T14 and 1.5 T14, with errors from the scatter
+        there, is compared with a chi2 distribution; a p-value below p_threshold fails the
+        check. A moon inside the planet transit can also fail it, so it is a flag.
+
+        Returns
+        -------
+        dict or None
+            {"chi2", "dof", "p_value", "ok"}, or None without enough data.
+        """
+        if not fitted_t0s:
+            return None
+        phase = np.concatenate([time[np.abs(time - t0) < 1.5 * self.planet_duration] - t0 for t0 in fitted_t0s])
+        values = np.concatenate([residual_flux[np.abs(time - t0) < 1.5 * self.planet_duration]
+                                 for t0 in fitted_t0s])
+        inner = np.abs(phase) < 0.75 * self.planet_duration
+        outer = ~inner
+        if np.sum(outer) < 20 or np.sum(inner) < 2 * bins:
+            return None
+        sigma = 1.4826 * np.median(np.abs(values[outer] - np.median(values[outer])))
+        level = np.median(values[outer])
+        edges = np.linspace(-0.75 * self.planet_duration, 0.75 * self.planet_duration, bins + 1)
+        index = np.digitize(phase[inner], edges) - 1
+        chi2, dof = 0.0, 0
+        for b in range(bins):
+            in_bin = values[inner][index == b]
+            if len(in_bin) >= 3:
+                chi2 += ((np.mean(in_bin) - level) / (sigma / np.sqrt(len(in_bin)))) ** 2
+                dof += 1
+        if dof == 0 or not sigma > 0:
+            return None
+        p_value = float(stats.chi2.sf(chi2, dof))
+        result = {"chi2": float(chi2), "dof": dof, "p_value": p_value, "ok": bool(p_value >= p_threshold)}
+        if not result["ok"]:
+            logging.warning("Planet shape check failed: the stacked residual over the transit has chi2 %.1f for %d "
+                            "bins (p = %.1e), so the planet model leaves a residual, or a moon sits inside the "
+                            "transit", chi2, dof, p_value)
+        else:
+            logging.info("Planet shape check passed: stacked residual chi2 %.1f for %d bins (p = %.2f)", chi2, dof,
+                         p_value)
+        return result
+
+    def realign_fold(self, time, flux, flux_err, params, duration_window, prior_sigmas, fold_bounds):
+        """Refit the planet shape on a fold aligned on the fitted epoch times (audit item B6).
+
+        The first fold uses the linear ephemeris, so TTVs or a drifting ephemeris smear it. Each
+        epoch's mid-time is fitted with the first shape and the C1 prior, the epochs are folded on
+        those times and the shape is refitted. The new shape is kept when the fold chi2 drops by
+        more than N + 4 + 3 sqrt(2 N) for N epochs, three standard deviations above what fitting one
+        time per epoch and the shape to noise alone gives. The moon stage keeps the linear ephemeris (bary_t0s) for
+        the moon phases, so a moon-induced TTV is not absorbed into them. params, the planet
+        geometry attributes and fold_realigned are updated in place.
+        """
+        def fold(shifts):
+            parts = [(time[np.abs(time - t0) < duration_window] - t0 - shift,
+                      flux[np.abs(time - t0) < duration_window], flux_err[np.abs(time - t0) < duration_window])
+                     for t0, shift in shifts]
+            return tuple(np.concatenate([part[i] for part in parts]) for i in range(3))
+
+        def chi2(theta_params, fold_time, fold_flux, fold_err):
+            model = ExoMoonLeastSquares.transit_model(theta_params, fold_time, self.exposure_time)
+            return float(np.sum(((fold_flux - model.light_curve(theta_params)) / fold_err) ** 2))
+
+        shifts = []
+        for t0, sigma in zip(self.bary_t0s, prior_sigmas):
+            mask = np.abs(time - t0) < duration_window
+            if np.sum(mask) < self.min_cadences_per_t0:
+                continue
+            epoch_params = copy.copy(params)
+            epoch_params.t0, epoch_params.u = t0, self.ab
+            theta, _, status = ExoMoonLeastSquares.fit_single_t0(time[mask], flux[mask], flux_err[mask], t0,
+                                                                 duration_window, epoch_params, self.exposure_time,
+                                                                 sigma)
+            usable = status is None or (status["converged"] and "t0" not in status["at_bound"])
+            shifts.append((t0, float(theta[0] - t0) if usable else 0.0))
+        if len(shifts) < 2:
+            return
+        current = copy.copy(params)
+        current.t0 = 0.0
+        linear = fold([(t0, 0.0) for t0, _ in shifts])
+        aligned = fold(shifts)
+        before = chi2(current, *linear)
+        start_b = ExoMoonLeastSquares.impact_parameter(params.a, params.inc, params.ecc, params.w)
+        guess = [0.0, self.planet_duration, float(np.clip(start_b, fold_bounds[2][0], fold_bounds[2][1])),
+                 float(np.clip(params.rp, fold_bounds[3][0], fold_bounds[3][1]))]
+        try:
+            theta, _, (a_new, inc_new), status = ExoMoonLeastSquares.fit_fold_shape(
+                *aligned, guess, fold_bounds, copy.copy(params), self.exposure_time)
+        except ValueError:
+            return
+        refitted = copy.copy(params)
+        refitted.t0, refitted.a, refitted.inc, refitted.rp = theta[0], a_new, inc_new, theta[3]
+        after = chi2(refitted, *aligned)
+        rms = float(np.sqrt(np.mean(np.square([shift for _, shift in shifts]))))
+        # Fitting one time per epoch and the four shape parameters to noise alone lowers the chi2 by
+        # about N + 4, with a scatter of sqrt(2 N); three of those above it is a real improvement.
+        needed = len(shifts) + 4 + 3 * np.sqrt(2 * len(shifts))
+        if before - after <= needed:
+            logging.info("Fold not realigned: aligning on the fitted epoch times (rms %.1f min) lowers the fold "
+                         "chi2 by %.1f, not more than the %.1f noise alone gives for %d epochs", rms * 1440,
+                         before - after, needed, len(shifts))
+            return
+        params.a, params.inc, params.rp = a_new, inc_new, theta[3]
+        fitted_duration = ExoMoonLeastSquares.model_transit_duration(refitted, duration_window)
+        if fitted_duration > 0:
+            self.planet_duration = fitted_duration
+        self.planet_inc = float(inc_new)
+        self.planet_impact_param = float(theta[2])
+        self.planet_a_over_rstar = float(a_new)
+        self.planet_rp_over_rstar = float(theta[3])
+        self.fold_fit_status = status
+        self.fold_realigned = True
+        logging.info("Fold realigned on the fitted epoch times (rms %.1f min): chi2 %.1f -> %.1f, T14=%.4f d, "
+                     "b=%.3f, rp=%.4f", rms * 1440, before, after, self.planet_duration, theta[2], theta[3])
+
     def normalise_epochs(self, time, flux, flux_err, min_points=10):
         """Divide each epoch by its out-of-window baseline, so the planet fits see a unit baseline.
 
@@ -1139,6 +1327,25 @@ class ExoMoonLeastSquares:
             if start_t14 <= 0:
                 start_t14 = self.planet_duration
             start_b = ExoMoonLeastSquares.impact_parameter(params.a, params.inc, params.ecc, params.w)
+            if not self.skip_fold_fit and fold_flux_err is not None:
+                # B2: the catalog radius comes from another stellar radius and may not match this
+                # depth, and the bound is only +-1 sigma wide. The start, and the centre of that
+                # bound, is the radius that gives the observed central fold depth with the input
+                # shape (limb darkening included); the width stays +-1 sigma, so the planet does not
+                # gain room to absorb a moon (audit item B3).
+                centre = np.abs(fold_time) < 0.25 * start_t14
+                if np.sum(centre) >= 10:
+                    observed = 1 - np.median(fold_flux[centre])
+                    model_centre = ExoMoonLeastSquares.transit_model(start_params, fold_time[centre],
+                                                                     self.exposure_time).light_curve(start_params)
+                    expected = 1 - np.median(model_centre)
+                    if observed > 0 and expected > 0:
+                        data_rp = float(params.rp * np.sqrt(observed / expected))
+                        if abs(data_rp / params.rp - 1) > 0.01:
+                            logging.info("Planet rp start from the fold depth: %.4f (catalog %.4f, %.0f ppm observed "
+                                         "against %.0f ppm expected at the centre)", data_rp, params.rp,
+                                         observed * 1e6, expected * 1e6)
+                        params.rp = data_rp
             fold_guess = [0.0, start_t14, min(start_b, 1.0), params.rp]
             fold_bounds = [(-start_t14 / 2, start_t14 / 2),
                            (start_t14 / 2, start_t14 * 2),
@@ -1217,6 +1424,9 @@ class ExoMoonLeastSquares:
             if known:
                 logging.info("Ephemeris uncertainty in the t0 prior (from %s): median %.1f min, largest %.1f min",
                              self.ephemeris_source, np.median(known) * 1440, np.max(known) * 1440)
+        self.fold_realigned = False
+        if not self.skip_fold_fit and len(fold_time) > 0 and flux_err is not None:
+            self.realign_fold(time, flux, flux_err, params, duration_window, prior_sigmas, fold_bounds)
         for t0, t0_prior_sigma in zip(self.bary_t0s, prior_sigmas):
             mask = np.abs(time - t0) < duration_window
             intransit_indexes = np.argwhere(np.abs(time - t0) < duration_window).flatten()
@@ -1303,7 +1513,16 @@ class ExoMoonLeastSquares:
                     plt.savefig(os.path.join(view_dir, "T0_" + str(round(best_t0, 3)) + suffix + ".png"))
                     plt.close()
             else:
-                intransit_mask_local = np.abs(result_time - best_t0) <= self.planet_duration / 2 * self.mask_duration_factor
+                # D4: the mask needs a usable mid-time. Without in-transit data, or with a fit that
+                # cannot be used, it is centred on the ephemeris time.
+                usable_fit = status is None or (status["converged"] and "t0" not in status["at_bound"])
+                covered = np.sum(np.abs(time[mask] - best_t0) < self.planet_duration / 2)
+                if not usable_fit or covered == 0:
+                    logging.info("  Masking transit T0=%.4f around the ephemeris time: %s", t0,
+                                 "no in-transit data" if covered == 0 else "the epoch fit is not usable")
+                    best_t0 = t0
+                half_mask = self.mask_half_width(time[mask])
+                intransit_mask_local = np.abs(result_time - best_t0) <= half_mask
                 if plot:
                     view_dir = os.path.join(self.object_dir, "t0s_view")
                     os.makedirs(view_dir, exist_ok=True)
@@ -1311,14 +1530,13 @@ class ExoMoonLeastSquares:
                     # Before mask: windowed flux + model
                     ax1.scatter(time[mask], flux[mask], color='gray', alpha=0.7, s=10)
                     ax1.plot(time[mask], best_model, color='orange', alpha=1, label='Planet model')
-                    ax1.axvspan(best_t0 - self.planet_duration / 2 * self.mask_duration_factor,
-                                best_t0 + self.planet_duration / 2 * self.mask_duration_factor,
+                    ax1.axvspan(best_t0 - half_mask, best_t0 + half_mask,
                                 color='red', alpha=0.15, label='Masked region')
                     ax1.axvline(best_t0, color='red', linestyle='--')
                     ax1.set_title(f"T0={best_t0:.4f} (before mask)")
                     ax1.set_ylabel('Flux'); ax1.legend()
                     # After mask: remaining data at this window
-                    keep_mask_window = ~(np.abs(time[mask] - best_t0) <= self.planet_duration / 2 * self.mask_duration_factor)
+                    keep_mask_window = ~(np.abs(time[mask] - best_t0) <= half_mask)
                     if np.any(keep_mask_window):
                         ax2.scatter(time[mask][keep_mask_window], flux[mask][keep_mask_window],
                                     color='gray', alpha=0.7, s=10, label='After mask')
@@ -1341,6 +1559,11 @@ class ExoMoonLeastSquares:
             self.bary_t0s = [t0 for t0 in self.bary_t0s if t0 not in rejected_t0s]
             self.ttvs = [ttv for t0, ttv in zip(ttv_t0s, self.ttvs) if t0 not in rejected_t0s]
             self.require_usable_epochs()
+        if mode == 'subtract':
+            self.planet_shape_check = self.check_planet_shape(result_time, result_model,
+                                                              [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)])
+        else:
+            self.warn_mask_mode_survival()
         plt.figure(figsize=(10, 6))
         plt.scatter(range(len(self.ttvs)), self.ttvs, marker='o')
         plt.xticks(range(len(self.ttvs)), [f"{t0:.4f}" for t0 in self.bary_t0s], rotation=45)

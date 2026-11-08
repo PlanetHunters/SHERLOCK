@@ -38,6 +38,29 @@
 
 ### Fixed
 
+- EMLS fold fit (audit item B8): it ends with a bounded least-squares run on
+  the residuals, so it converges on large folds where Powell's relative
+  tolerance stopped early; chi2 is within 0.1 of a least-squares fit from the
+  truth on a 62100-point fold.
+- EMLS fold realignment (audit item B6): after the first fold, each epoch's
+  mid-time is fitted with the C1 prior, the fold is rebuilt on those times and
+  the shape refitted. The new shape is kept when the fold chi2 drops by more
+  than N + 4 + 3 sqrt(2N) for N epochs. The moon stage keeps the linear
+  ephemeris for the moon phases. A 30-minute TTV now gives rp within 0.3 %.
+- EMLS fold rp start (audit item B2): the fold radius starts from the observed
+  central depth with the input shape, and its +-1 sigma bound is centred
+  there, so a catalog radius from another stellar radius no longer rejects
+  the epochs; 20 % high now keeps 12/12 epochs.
+- EMLS planet shape check (audit item D2): the stacked residual over
+  +-0.75 T14 is tested with a chi2 in 20 phase bins; a p-value below 1e-3
+  logs a warning and sets `planet_shape_check.ok` false (a moon inside the
+  transit can trip it too).
+- EMLS mask mode (audit items D4, E2, E3): an epoch without in-transit data
+  or with an unusable fit is masked around its ephemeris time; the default
+  mask is 1.1 T14 / 2 plus one cadence wide (`mask_duration_factor` still
+  sets it), so no ingress or egress point is left; the run logs the mean
+  fraction of the widest moons' transit time that survives the mask, as a
+  warning below 50 %.
 - EMLS detrending (audit item A1): the command now reads `lc_0.csv`, the
   curve before SHERLOCK detrending, and EMLS detrends it with a biweight
   (`--detrend_window`, default three planet durations) in which every point
