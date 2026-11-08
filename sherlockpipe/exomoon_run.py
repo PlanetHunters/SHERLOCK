@@ -71,6 +71,15 @@ def _fitted_value(table, suffix):
     return float(rows.iloc[0]["median"])
 
 
+def _fitted_error(table, suffix):
+    """Return the larger of the lower and upper errors of a fitted parameter, or None if not positive."""
+    rows = table[table["#name"].astype(str).str.endswith(suffix)]
+    if len(rows) == 0 or "lower_error" not in rows or "upper_error" not in rows:
+        return None
+    error = float(np.nanmax([rows.iloc[0]["lower_error"], rows.iloc[0]["upper_error"]]))
+    return error if np.isfinite(error) and error > 0 else None
+
+
 def read_fit_parameters(fit_dir):
     """Read the planet parameters of a SHERLOCK fit directory (allesfitter results).
 
@@ -95,6 +104,9 @@ def read_fit_parameters(fit_dir):
         value = _fitted_value(table, suffix)
         if value is not None:
             params[key] = value
+            error = _fitted_error(table, suffix)
+            if error is not None:
+                params[f"{key}_err"] = error
     f_c, f_s = _fitted_value(table, "_f_c"), _fitted_value(table, "_f_s")
     if f_c is not None and f_s is not None:
         params["ecc"] = f_c ** 2 + f_s ** 2
@@ -509,8 +521,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     exposure_time : float, optional
         Exposure time in seconds. The median point spacing of the light curve when missing.
     ttv_prior_minutes : float, optional
-        Timing variation in minutes allowed around the linear ephemeris, on top of each epoch's
-        timing precision, in the prior on the per-epoch t0. Default None: the largest planet TTV
+        Timing variation in minutes allowed around the linear ephemeris, on top of the
+        ephemeris uncertainty at each epoch, in the prior on the per-epoch t0. Default None: the largest planet TTV
         a searched moon can cause. 0 removes the prior.
     Other parameters are passed to `build_inputs`.
 
@@ -567,7 +579,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         subtract_mode=subtract_mode,
         exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400,
         ttv_prior_width="auto" if ttv_prior_minutes is None else (ttv_prior_minutes / 1440 if ttv_prior_minutes
-                                                                  else None))
+                                                                  else None),
+        planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"))
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -595,6 +608,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "ttv_prior_minutes": None if emls.ttv_prior_width_used is None else emls.ttv_prior_width_used * 1440,
         "ttv_prior_source": "auto: largest TTV of a searched moon" if ttv_prior_minutes is None
         else ("none" if not ttv_prior_minutes else "user"),
+        "ephemeris_uncertainty_source": emls.ephemeris_source,
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,

@@ -26,18 +26,18 @@
   and impact parameter. The semi-major axis in AU still sets the Hill sphere
   and the moon offsets.
 - EMLS: each transit's mid-time has a Gaussian prior around the linear
-  ephemeris, as wide as the transit's timing precision (Carter et al. 2008)
-  plus the largest planet TTV a searched moon can cause: the heaviest moon
+  ephemeris, as wide as the ephemeris uncertainty at that transit plus the
+  largest planet TTV a searched moon can cause: the heaviest moon
   (the Chen & Kipping mass of the largest searched radius, capped at the
   largest moon density) on the widest searched orbit
   (half the Hill period) moves the planet a_m M_m / (M_p + M_m) from the
-  barycentre. `--ttv_prior_minutes` overrides it, and 0 removes the prior;
-  `emls_results.json` records the value used. With a 10-minute allowance,
-  the timing scatter at 3 sigma per transit falls from 1.8 to 0.7 times the
-  Carter precision, while a 10-minute TTV at SNR 30 is still fitted. Both per-transit fits bound t0 to half a
-  duration. The width counts the measurement noise in the prior as well as in
-  the likelihood, so it is a heuristic regularisation: a low-SNR transit is
-  pulled about halfway to the ephemeris.
+  barycentre. `--ttv_prior_minutes` overrides it, and 0 removes the prior.
+  The ephemeris uncertainty comes from the T0 and period errors of the
+  `fit_[n]` results, sqrt(sigma_T0^2 + (n sigma_P)^2). Without them it is the
+  uncertainty of a linear ephemeris fitted to the other transits' timing
+  precisions (Carter et al. 2008), so a transit's own noise is not counted
+  twice. `emls_results.json` records the allowance and the ephemeris source.
+  Both per-transit fits bound t0 to half a duration.
 - EMLS: a transit whose fit does not converge or whose t0 stops at its bound
   is dropped and listed in `epochs_dropped_fit`. A per-transit radius at its
   bound is kept and listed in `epochs_flagged_rp`. A fold fit at a bound is

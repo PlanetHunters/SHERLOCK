@@ -105,7 +105,7 @@ class ExoMoonLeastSquares:
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
-                  ttv_prior_width="auto"):
+                  ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -182,9 +182,14 @@ class ExoMoonLeastSquares:
             templates are averaged over it. Default None, an instantaneous model.
         ttv_prior_width : float, "auto" or None, optional
             Timing variation in days allowed around the linear ephemeris, on top of the
-            timing precision of each epoch, in the Gaussian prior on the per-epoch t0.
+            ephemeris uncertainty at each epoch, in the Gaussian prior on the per-epoch t0.
             Default "auto": the largest planet TTV that a searched moon can cause (see
             `max_moon_ttv`). None fits t0 without a prior.
+        planet_t0_err, planet_period_err : float, optional
+            1-sigma uncertainties in days of planet_t0 and planet_period, such as those of a
+            transit fit. They set the ephemeris uncertainty in the t0 prior. When either is
+            missing, it is measured from the timing precision of the other transits (see
+            `ephemeris_sigmas`).
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -229,6 +234,12 @@ class ExoMoonLeastSquares:
                              f"{ttv_prior_width}")
         self.ttv_prior_width = ttv_prior_width
         self.ttv_prior_width_used = None
+        for name, value in (("planet_t0_err", planet_t0_err), ("planet_period_err", planet_period_err)):
+            if value is not None and not (np.isfinite(value) and value >= 0):
+                raise ValueError(f"{name} must be a non-negative number of days or None, got {value}")
+        self.planet_t0_err = planet_t0_err
+        self.planet_period_err = planet_period_err
+        self.ephemeris_source = None
         self.fold_fit_status = None
         self.planet_a_over_rstar = None
         self.absorbed_fraction = None
@@ -879,19 +890,11 @@ class ExoMoonLeastSquares:
         t23 = transit_params.per / np.pi * np.arcsin(min(np.sqrt(chord_squared) / a_sin_i, 1.0)) * speed_factor
         return float(np.clip((t14 - t23) / 2, 0, t14 / 2))
 
-    def t0_prior_sigma(self, epoch_time, epoch_flux, depth, ingress):
-        """Return the width of the ephemeris prior on one epoch's t0 (audit item C1).
+    def epoch_timing_precision(self, epoch_time, epoch_flux, depth, ingress):
+        """Return the mid-time precision of one epoch (Carter et al. 2008, Eq. 43).
 
-        The width combines the timing precision of the epoch (Carter et al. 2008, Eq. 43:
-        sigma = T / Q * sqrt(tau / 2T), with Q = sqrt(N_in) depth / noise) with the timing
-        variation allowed beyond it (ttv_prior_width_used, by default `max_moon_ttv`), so a
-        moon-induced TTV is still fitted.
-
-        This is a heuristic regularisation, not a prior on the true mid-time: the likelihood
-        already holds the measurement noise, so including it in the width counts it twice. A
-        low-SNR epoch is therefore pulled about halfway to the ephemeris, not onto it, while at
-        high SNR the prior has no effect. A prior on the true t0 would use the ephemeris
-        uncertainty at that epoch plus the allowed timing variation.
+        sigma = T / Q * sqrt(tau / 2T), with Q = sqrt(N_in) depth / noise and the noise measured
+        as the MAD outside the transit.
 
         Parameters
         ----------
@@ -907,11 +910,8 @@ class ExoMoonLeastSquares:
         Returns
         -------
         float or None
-            Width in days, or None when there is no prior (ttv_prior_width None) or the epoch
-            has too few points to measure its noise.
+            Precision in days, or None when the epoch has too few points to measure it.
         """
-        if self.ttv_prior_width_used is None:
-            return None
         t14 = self.planet_duration
         in_transit = np.abs(epoch_time) < t14 / 2
         outside = ~in_transit
@@ -921,8 +921,49 @@ class ExoMoonLeastSquares:
         if not noise > 0:
             return None
         q = np.sqrt(np.sum(in_transit)) * depth / noise
-        timing = t14 / q * np.sqrt(ingress / (2 * t14))
-        return float(np.hypot(timing, self.ttv_prior_width_used))
+        return float(t14 / q * np.sqrt(ingress / (2 * t14)))
+
+    def ephemeris_sigmas(self, t0s, precisions):
+        """Return the uncertainty of the linear ephemeris at each epoch, in days (audit item C1).
+
+        With planet_t0_err and planet_period_err it is sqrt(sigma_T0^2 + (n sigma_P)^2), n being
+        the epoch number from planet_t0. Otherwise each epoch gets the uncertainty of a weighted
+        linear ephemeris fitted to the timing precisions of the other epochs (leave one out), so
+        an epoch's own noise, already in its likelihood, is not counted twice. This needs at
+        least two other epochs with a measured precision; with fewer, the epoch's own precision
+        is used instead. Sets ephemeris_source to "fit", "other transits" or "own transit"
+        (the last when any epoch fell back).
+
+        Parameters
+        ----------
+        t0s : list of float
+            Predicted mid-transit times.
+        precisions : list of float or None
+            Mid-time precision of each epoch (see `epoch_timing_precision`).
+
+        Returns
+        -------
+        list of float or None
+            The uncertainty per epoch, None when it cannot be estimated.
+        """
+        numbers = np.round((np.asarray(t0s, dtype=float) - self.planet_t0) / self.planet_period)
+        if self.planet_t0_err is not None and self.planet_period_err is not None:
+            self.ephemeris_source = "fit"
+            return [float(np.hypot(self.planet_t0_err, n * self.planet_period_err)) for n in numbers]
+        weights = np.array([0.0 if p is None or not p > 0 else 1 / p ** 2 for p in precisions])
+        self.ephemeris_source = "other transits"
+        sigmas = []
+        for j, n in enumerate(numbers):
+            w = weights.copy()
+            w[j] = 0.0
+            s0, s1, s2 = np.sum(w), np.sum(w * numbers), np.sum(w * numbers ** 2)
+            det = s0 * s2 - s1 ** 2
+            if np.count_nonzero(w) >= 2 and det > 0:
+                sigmas.append(float(np.sqrt((s2 - 2 * n * s1 + n ** 2 * s0) / det)))
+            else:
+                self.ephemeris_source = "own transit"
+                sigmas.append(precisions[j])
+        return sigmas
 
     def normalise_epochs(self, time, flux, flux_err, min_points=10):
         """Divide each epoch by its out-of-transit median, so the planet fits see a unit baseline.
@@ -1101,14 +1142,25 @@ class ExoMoonLeastSquares:
             self.ttv_prior_width_used = self.ttv_prior_width
             if self.ttv_prior_width is not None:
                 logging.info("TTV allowed by the t0 prior: %.1f min (given)", self.ttv_prior_width * 1440)
-        for t0 in self.bary_t0s:
+        prior_sigmas = [None] * len(self.bary_t0s)
+        if self.ttv_prior_width_used is not None:
+            precisions = [self.epoch_timing_precision(time[np.abs(time - t0) < duration_window] - t0,
+                                                      flux[np.abs(time - t0) < duration_window], params.rp ** 2,
+                                                      ingress) for t0 in self.bary_t0s]
+            ephemeris = self.ephemeris_sigmas(self.bary_t0s, precisions)
+            prior_sigmas = [None if sigma is None else float(np.hypot(sigma, self.ttv_prior_width_used))
+                            for sigma in ephemeris]
+            known = [sigma for sigma in ephemeris if sigma is not None]
+            if known:
+                logging.info("Ephemeris uncertainty in the t0 prior (from %s): median %.1f min, largest %.1f min",
+                             self.ephemeris_source, np.median(known) * 1440, np.max(known) * 1440)
+        for t0, t0_prior_sigma in zip(self.bary_t0s, prior_sigmas):
             mask = np.abs(time - t0) < duration_window
             intransit_indexes = np.argwhere(np.abs(time - t0) < duration_window).flatten()
             # Always fit t0 and compute TTV
             epoch_params = copy.copy(params)
             epoch_params.t0 = t0
             epoch_params.u = self.ab
-            t0_prior_sigma = self.t0_prior_sigma(time[mask] - t0, flux[mask], params.rp ** 2, ingress)
             if self.fit_rp_per_transit:
                 best_theta, best_model, status = ExoMoonLeastSquares.fit_single_t0_rp(
                     time[mask], flux[mask], flux_err[mask], t0, params.rp,

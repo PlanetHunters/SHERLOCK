@@ -34,7 +34,7 @@ def parse_args(argv=None):
                     help="Whether the planet transit is subtracted or masked.")
     ap.add_argument('--ttv_prior_minutes', type=float, default=None,
                     help="Timing variation in minutes allowed around the ephemeris in the per-transit t0 prior, "
-                         "on top of each transit's timing precision. Default: the largest planet TTV a searched "
+                         "on top of the ephemeris uncertainty at that transit. Default: the largest planet TTV a searched "
                          "moon can cause. 0 removes the prior.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")
     return ap.parse_args(argv)

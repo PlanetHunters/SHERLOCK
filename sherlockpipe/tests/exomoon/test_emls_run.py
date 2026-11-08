@@ -78,6 +78,20 @@ def write_fit(directory, candidate, period, epoch, radius, a_au, inc, impact, du
         os.path.join(results, 'ns_derived_table.csv'), index=False)
 
 
+def test_fit_ephemeris_errors_are_read(tmp_path):
+    guard_directory(tmp_path)
+    write_fit(tmp_path, 1, 100.001, 0.002, 9.5, 0.42, 89.9, 0.12, 13.5)
+    table = os.path.join(tmp_path, 'fit_[1]', 'main', 'results', 'ns_table.csv')
+    ns = pd.read_csv(table)
+    ns.loc[ns['#name'].str.endswith('_epoch'), ['lower_error', 'upper_error']] = [0.0004, 0.0006]
+    ns.to_csv(table, index=False)
+
+    params = exomoon_run.read_fit_parameters(os.path.join(tmp_path, 'fit_[1]', 'main'))
+
+    assert params['t0_err'] == 0.0006
+    assert 'period_err' not in params  # a zero error is not an uncertainty
+
+
 # --- unit: input selection ---------------------------------------------------------------------------------------
 
 def test_fit_results_replace_the_search_parameters(tmp_path):

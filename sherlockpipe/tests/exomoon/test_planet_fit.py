@@ -124,8 +124,8 @@ def test_low_snr_epochs_stay_near_the_ephemeris(tmp_path):
 
     emls.subtract_planet_transit(*data[1:])
 
-    # The audit asked for below 2x Carter; without the prior this fixture gives about 1.8x, with it
-    # about 0.7x, so the test asks for below 1x.
+    # The audit asked for below 2x Carter; without the prior this fixture gives about 1.7x, with the
+    # ephemeris prior about 0.15x, so the test asks for below 1x.
     assert np.sqrt(np.mean(np.square(emls.ttvs))) < carter_sigma(truth, noise)
 
 
@@ -139,6 +139,47 @@ def test_ttvs_are_still_fitted_at_high_snr(tmp_path):
     emls.subtract_planet_transit(*data[1:])
 
     assert np.median(np.abs(np.array(emls.ttvs) - shifts)) < 2 / 1440
+
+
+def test_ephemeris_uncertainty_from_fit_errors(tmp_path):
+    truth = planet_params()
+    emls = emls_for(tmp_path, curve(truth, epochs=3), t14(truth), planet_t0_err=0.001, planet_period_err=0.0002)
+
+    sigmas = emls.ephemeris_sigmas([0.0, PERIOD, 5 * PERIOD], [None, None, None])
+
+    assert sigmas == pytest.approx([0.001, np.hypot(0.001, 0.0002), np.hypot(0.001, 0.001)])
+    assert emls.ephemeris_source == 'fit'
+
+
+def test_ephemeris_uncertainty_from_the_other_transits(tmp_path):
+    truth = planet_params()
+    emls = emls_for(tmp_path, curve(truth, epochs=3), t14(truth))
+    t0s = [n * PERIOD for n in range(5)]
+
+    sigmas = emls.ephemeris_sigmas(t0s, [0.01] * 5)
+    # The middle epoch, from epochs 0, 1, 3 and 4 of equal weight: the linear fit through them
+    # predicts epoch 2 with sigma / sqrt(4).
+    assert sigmas[2] == pytest.approx(0.01 / 2)
+    assert emls.ephemeris_source == 'other transits'
+    # An epoch's own precision does not enter its prior.
+    assert emls.ephemeris_sigmas(t0s, [0.01, 0.01, 0.5, 0.01, 0.01])[2] == pytest.approx(sigmas[2])
+    # An epoch beyond the others is extrapolated, so its prior is wider.
+    assert sigmas[0] > sigmas[2]
+
+
+def test_ephemeris_falls_back_to_the_own_transit_with_few_epochs(tmp_path):
+    truth = planet_params()
+    emls = emls_for(tmp_path, curve(truth, epochs=3), t14(truth))
+
+    assert emls.ephemeris_sigmas([0.0, PERIOD], [0.01, 0.02]) == [0.01, 0.02]
+    assert emls.ephemeris_source == 'own transit'
+
+
+@pytest.mark.parametrize('error', [-1.0, float('nan')])
+def test_invalid_ephemeris_errors_are_rejected(tmp_path, error):
+    truth = planet_params()
+    with pytest.raises(ValueError, match='planet_t0_err'):
+        emls_for(tmp_path, curve(truth, epochs=3), t14(truth), planet_t0_err=error)
 
 
 def test_allowed_ttv_is_the_largest_a_searched_moon_can_cause(tmp_path):
