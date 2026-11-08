@@ -35,7 +35,7 @@ def test_run_states_that_no_assessment_is_applied(tmp_path, caplog):
         guard.execute(tmp_path)
 
     messages = [record.getMessage() for record in caplog.records]
-    assert any(message.startswith('No false-alarm assessment is applied') for message in messages)
+    assert any(message.startswith('No false-alarm probability') for message in messages)
     assert not any('exomoon_ir' in message or 'assess_candid' in message for message in messages)
     assert not any(record.levelno >= logging.ERROR for record in caplog.records)
     assert not os.path.exists(tmp_path / 'emls_assessment.json')

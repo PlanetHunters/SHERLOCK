@@ -18,6 +18,10 @@ planet transit. It shows that the command works end to end on real data, not tha
 moons in general. Close moons that transit during the planet are still absorbed by the planet fit
 (audit items B3 and C1). The 1 % period check needs the default 10000-period grid, because the top
 of the grid has a competing peak near 9.94 d on this curve.
+
+The command runs with ``--null_runs 0``: the fixture keeps only +-3 d around each transit, so the
+pseudo-epochs of the false-alarm probability would all come from the same thin strip of data just
+outside the moon window, and 100 of them take about 45 minutes per run.
 """
 import json
 import os
@@ -108,7 +112,7 @@ def sherlock_directory(directory, with_moon):
 def run_command(directory, monkeypatch):
     monkeypatch.chdir(directory)
     monkeypatch.setattr(sys, 'argv', ['emls.py', '--object_dir', str(directory), '--candidate', '1',
-                                      '--cpus', str(min(8, os.cpu_count() or 1))])
+                                      '--cpus', str(min(8, os.cpu_count() or 1)), '--null_runs', '0'])
     runpy.run_module('sherlockpipe.emls', run_name='__main__')
     with open(os.path.join(directory, 'emls_1', 'emls_results.json')) as file:
         return json.load(file)

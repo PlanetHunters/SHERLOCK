@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from lcbuilder.helper import LcbuilderHelper
 
+from sherlockpipe import __version__
 from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquares
 from sherlockpipe.system_stability.mr_forecast import MrForecast
 
@@ -496,7 +497,8 @@ def _setup_logging(log_file):
 
 def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
-             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None):
+             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None,
+             null_runs=100, fap_threshold=0.01):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -524,6 +526,11 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         Timing variation in minutes allowed around the linear ephemeris, on top of the
         ephemeris uncertainty at each epoch, in the prior on the per-epoch t0. Default None: the largest planet TTV
         a searched moon can cause. 0 removes the prior.
+    null_runs : int, optional
+        Searches on pseudo-epochs, windows of the light curve away from the transits, that form
+        the null distribution of the SNR for the false-alarm probability, default 100. 0 skips it.
+    fap_threshold : float, optional
+        False-alarm probability below which the best hypothesis is a detection, default 0.01.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -546,7 +553,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     try:
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
-                       subtract_mode, exposure_time, ttv_prior_minutes)
+                       subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -562,7 +569,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
-         ttv_prior_minutes=None):
+         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -580,7 +587,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400,
         ttv_prior_width="auto" if ttv_prior_minutes is None else (ttv_prior_minutes / 1440 if ttv_prior_minutes
                                                                   else None),
-        planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"))
+        planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,
+        fap_threshold=fap_threshold)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -614,19 +622,30 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,
                      "impact": emls.planet_impact_param, "inc": emls.planet_inc,
                      "a_over_rstar": emls.planet_a_over_rstar},
-        "max_snr": emls.max_snr, "max_sde": emls.max_sde,
+        "sherlockpipe_version": __version__,
+        "max_snr": emls.max_snr, "sde": emls.sde, "max_sde": emls.max_sde,
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
+        "fap": emls.fap, "fap_empirical": emls.fap_empirical, "fap_threshold": emls.fap_threshold,
+        "detected": emls.detected,
+        "null_runs_requested": null_runs, "null_runs_completed": len(emls.null_snrs or []),
+        "null_independent_offsets": emls.null_independent_offsets, "null_snrs": emls.null_snrs,
+        "single_event": emls.single_event, "loo_snr_min": emls.loo_snr_min, "epoch_stats": emls.epoch_stats,
         "best_radius": float(emls.best_snr_radius),
         "best_radius_above_range": bool(emls.best_snr_radius_above_range),
         "best_radius_below_range": bool(emls.best_snr_radius_below_range),
-        "notes": "max_snr selects the best period, alpha and radius. max_sde is a diagnostic only: it does not "
-                 "separate moons from noise on real data (audit item H7). No false-alarm assessment is applied, so "
-                 "neither statistic has a calibrated significance. best_radius comes from the mean in-window "
-                 "depth and reads about 20 % low (audit item H13), so the range flags are approximate near the "
-                 "limits.",
+        "notes": "max_snr is the detection statistic: it selects the best period and alpha, and sde, best_radius "
+                 "and the epoch statistics describe that same hypothesis (audit items H7, H8). fap is the "
+                 "probability that noise alone gives this SNR, from a Gumbel fit to the SNR of null searches on "
+                 "pseudo-epochs of the same light curve away from the transits; fap_empirical is (k+1)/(N+1). "
+                 "detected is fap < fap_threshold, or null without enough null runs. single_event flags a "
+                 "signal that one transit carries (leaving one out keeps less than half the SNR); it does not "
+                 "change detected. sde (SNR spectrum at the selected period) and max_sde (residual spectrum) "
+                 "are diagnostics that do not separate moons from noise. best_radius comes from the mean "
+                 "in-window depth and reads about 20 % low (audit item H13).",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
         json.dump(_json_safe(results), file, indent=2, allow_nan=False)
-    logging.info("EMLS finished: max SNR %.2f at P=%.4f d, alpha=%.3f rad", emls.max_snr, emls.recovered_period,
-                 emls.recovered_alpha)
+    logging.info("EMLS finished: SNR %.2f at P=%.4f d, alpha=%.3f rad, FAP %s, detected=%s, single event=%s",
+                 emls.max_snr, emls.recovered_period, emls.recovered_alpha,
+                 "n/a" if emls.fap is None else f"{emls.fap:.2g}", emls.detected, emls.single_event)
     return results

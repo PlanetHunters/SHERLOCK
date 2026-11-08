@@ -36,6 +36,11 @@ def parse_args(argv=None):
                     help="Timing variation in minutes allowed around the ephemeris in the per-transit t0 prior, "
                          "on top of the ephemeris uncertainty at that transit. Default: the largest planet TTV a searched "
                          "moon can cause. 0 removes the prior.")
+    ap.add_argument('--null_runs', type=int, default=100,
+                    help="Searches on pseudo-epochs away from the transits that calibrate the false-alarm "
+                         "probability of the SNR. 0 skips them.")
+    ap.add_argument('--fap_threshold', type=float, default=0.01,
+                    help="False-alarm probability below which the best hypothesis is a detection.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")
     return ap.parse_args(argv)
 
@@ -44,4 +49,5 @@ if __name__ == '__main__':
     args = parse_args()
     run_emls(args.object_dir, args.candidate, args.mask_candidates, args.planet_mass, args.min_moon_radius,
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
-             args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes)
+             args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes,
+             args.null_runs, args.fap_threshold)

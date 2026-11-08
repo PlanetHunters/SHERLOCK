@@ -39,6 +39,7 @@ M_earth_to_M_sun = Mearth_to_kg / Msolar_to_kg
 R_earth_to_R_sun = (ac.R_earth / ac.R_sun).value
 EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  # g/cm3
 MIN_RP_OVER_RSTAR = 1e-5
+MIN_NULL_RUNS = 20
 MOON_MASS_FORECAST_SEED = 0
 _moon_mass_cache = {}
 
@@ -89,6 +90,8 @@ class NoUsableEpochsError(ValueError):
 
 
 class ExoMoonLeastSquares:
+    RECOVERY_PERIOD_TOLERANCE = 0.05
+    SINGLE_EVENT_SNR_FRACTION = 0.5
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
     SPECTRUM_KERNEL = 31
@@ -105,7 +108,8 @@ class ExoMoonLeastSquares:
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
-                  ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None):
+                  ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
+                  fap_threshold=0.01, null_seed=0):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -190,6 +194,16 @@ class ExoMoonLeastSquares:
             transit fit. They set the ephemeris uncertainty in the t0 prior. When either is
             missing, it is measured from the timing precision of the other transits (see
             `ephemeris_sigmas`).
+        null_runs : int, optional
+            Number of searches on pseudo-epochs, windows of the same light curve away from the
+            planet transits with the fitted planet injected, that form the null distribution of
+            the detection SNR (audit item H10, see `run_nulls`). Default 0, no false-alarm
+            probability.
+        fap_threshold : float, optional
+            False-alarm probability below which the best hypothesis counts as a detection,
+            default 0.01.
+        null_seed : int, optional
+            Seed of the pseudo-epoch offsets, default 0.
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -240,6 +254,25 @@ class ExoMoonLeastSquares:
         self.planet_t0_err = planet_t0_err
         self.planet_period_err = planet_period_err
         self.ephemeris_source = None
+        if not (isinstance(null_runs, (int, np.integer)) and null_runs >= 0):
+            raise ValueError(f"null_runs must be a non-negative integer, got {null_runs}")
+        if not (np.isfinite(fap_threshold) and 0 < fap_threshold < 1):
+            raise ValueError(f"fap_threshold must be between 0 and 1, got {fap_threshold}")
+        self.null_runs = int(null_runs)
+        self.fap_threshold = float(fap_threshold)
+        self.null_seed = null_seed
+        self.null_snrs = None
+        self.null_independent_offsets = None
+        self.fap = None
+        self.fap_empirical = None
+        self.detected = None
+        self.sde = None
+        self.epoch_stats = None
+        self.loo_snr_min = None
+        self.single_event = None
+        self.recovered = None
+        self.recovered_alias = None
+        self.planet_rp_over_rstar = None
         self.fold_fit_status = None
         self.planet_a_over_rstar = None
         self.absorbed_fraction = None
@@ -1044,7 +1077,8 @@ class ExoMoonLeastSquares:
         params.w = self.planet_arg_periastron  # longitude of periastron (deg)
         params.rp = self.planet_radius / star_radius_rearth  # planet radius / stellar radius
         params.a = self.planet_semimajor_axis / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun,
-                                                                                u.au)
+                                                                                u.au) \
+            if self.planet_a_over_rstar is None else self.planet_a_over_rstar
         params.inc = self.planet_inc
         params.u = self.ab
         params.limb_dark = "quadratic"
@@ -1106,6 +1140,7 @@ class ExoMoonLeastSquares:
             self.planet_inc = float(fold_inc)
             self.planet_impact_param = float(fold_theta[2])
             self.planet_a_over_rstar = float(fold_a)
+            self.planet_rp_over_rstar = float(fold_theta[3])
             if plot:
                 guess_params = copy.copy(start_params)
                 model_guess = ExoMoonLeastSquares.transit_model(guess_params, fold_time,
@@ -1567,13 +1602,23 @@ class ExoMoonLeastSquares:
                                          self.max_radius, self.star_radius, self.radius_grid_size))
         #oot_noise = np.std(oot_flux)
         #oot_noise = np.sqrt(np.std(oot_flux) * (np.sqrt(np.sum(oot_flux_err ** 2) / len(oot_flux_err))))
-        oot_noise = np.std(oot_flux)
-        # The depth is a difference of two means, so both contribute noise.
-        model_snr = depth / (oot_noise * np.sqrt(1 / len(it_flux) + 1 / len(oot_flux)))
+        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux)
         if return_lc:
             return residual_calculation, residual_baseline, residual_radius, model_snr, it_time, it_flux, oot_time, oot_flux, residual_model
         else:
             return residual_calculation, residual_baseline, residual_radius, model_snr, template_unusable
+
+    @staticmethod
+    def box_snr(it_flux, oot_flux):
+        """Return the SNR of the moon-window depth against its surroundings, as `search` scores it.
+
+        The depth is a difference of two means, so both contribute noise. NaN without in-window
+        data or with fewer than two points outside it.
+        """
+        if len(it_flux) == 0 or len(oot_flux) < 2:
+            return np.nan
+        depth = np.mean(oot_flux) - np.mean(it_flux)
+        return float(depth / (np.std(oot_flux) * np.sqrt(1 / len(it_flux) + 1 / len(oot_flux))))
 
     @staticmethod
     def running_mean_equal_length(data, width_signal):
@@ -2082,12 +2127,7 @@ class ExoMoonLeastSquares:
         tuple
             (time, flux, flux_err) restricted to transit windows.
         """
-        max_period = self.au_to_period(max_planet_mass * M_earth_to_M_sun, self.compute_hill_radius(self.star_mass, max_planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis))
-        moon_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun, max_period)
-        moon_orbit_transit_duration = self.compute_transit_duration(self.star_radius,
-                                                              self.planet_semimajor_axis * AU_TO_RSUN,
-                                                              self.planet_period,
-                                                              moon_semimajor_axis * AU_TO_RSUN)
+        moon_orbit_transit_duration = self.trim_half_window(max_planet_mass)
         mask_parts = []
         for t0 in t0s:
             mask_parts.append(np.argwhere(
@@ -2097,6 +2137,13 @@ class ExoMoonLeastSquares:
         flux = flux[flux_mask]
         flux_err = flux_err[flux_mask]
         return time, flux, flux_err
+
+    def trim_half_window(self, max_planet_mass):
+        """Return the half-width in days of the data kept around each epoch (see `remove_non_transit_flux`)."""
+        max_period = self.au_to_period(max_planet_mass * M_earth_to_M_sun, self.compute_hill_radius(self.star_mass, max_planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis))
+        moon_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun, max_period)
+        return self.compute_transit_duration(self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN,
+                                             self.planet_period, moon_semimajor_axis * AU_TO_RSUN)
 
     @staticmethod
     def depth_to_radius(depth, star_radius):
@@ -2357,36 +2404,270 @@ class ExoMoonLeastSquares:
                             moon_transit_duration / 2, orbit_duration / 2, max_orbit_duration / 2)
                 for moon_alpha in moon_alphas]
 
-    def run(self, plot=False, inject_params=None):
-        """Run the full exomoon search over the parameter grid.
+    @staticmethod
+    def snr_matrix(all_residuals, alpha_grid_size, period_count):
+        """Arrange the grid SNRs as an (alpha, period) matrix."""
+        matrix = np.full((alpha_grid_size, period_count), np.nan)
+        for i, residual in enumerate(all_residuals[:alpha_grid_size * period_count]):
+            matrix[i % alpha_grid_size][i // alpha_grid_size] = residual[3]
+        return matrix
 
-        Parameters
-        ----------
-        plot : bool, optional
-            If True, generate diagnostic plots, default False.
-        inject_params : dict or None, optional
-            If a dict with keys 'moon_radius', 'moon_period', 'initial_alpha',
-            'moon_mass', injects a moon signal into the flux before the grid
-            search to test injection-recovery. Default None (no injection).
+    def select_best(self, period_grid, alpha_grid, snr_matrix):
+        """Select the hypothesis that every reported statistic describes (audit items H7 and H8).
+
+        The SNR is the detection statistic. The best grid point is taken, and its phase is refined
+        with a parabola over alpha when the refined phase scores a higher SNR in `search`. The same
+        selection scores the nulls, so the SNR and its false-alarm probability are comparable.
+
+        Returns
+        -------
+        tuple or None
+            (period index, period, alpha, SNR), or None when no hypothesis has an SNR.
         """
-        self.require_usable_epochs()
-        planet_mass_grid = self.planet_mass_grid
-        moon_inc_grid = self.moon_inc_grid
-        moon_ecc_grid = self.moon_ecc_grid
-        moon_arg_periastron_grid = self.moon_arg_periastron_grid
-        self.inject_flux_time = self.time.copy()  # save full time before trimming
-        self.time, self.flux, self.flux_err = self.remove_non_transit_flux(self.time, self.flux, self.flux_err, self.bary_t0s, np.max(planet_mass_grid))
-        rms = np.std(self.flux)
-        if inject_params is not None:
-            self.flux = self.inject_moon(self.time, self.flux, self.flux_err, self.bary_t0s, self.planet_semimajor_axis,
-                                         self.planet_ecc, inject_params['moon_radius'], inject_params['moon_period'],
-                                         inject_params['moon_mass'], initial_alpha=inject_params['initial_alpha'],
-                                         inject_planet=False, inject_moon=True)
-            logging.info("Injected moon: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
-                         inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
-            self.inject_flux_time = self.time.copy()
-        before_planet_fit = copy.copy(self)
-        self.time, self.flux, self.flux_err = self.subtract_planet_transit(self.time, self.flux, self.flux_err, mode=self.subtract_mode, plot=plot)
+        finite = np.where(np.isfinite(snr_matrix), snr_matrix, -np.inf)
+        if not np.any(np.isfinite(snr_matrix)):
+            return None
+        alpha_index, period_index = np.unravel_index(np.argmax(finite), finite.shape)
+        period, alpha = float(period_grid[period_index]), float(alpha_grid[alpha_index])
+        snr = float(snr_matrix[alpha_index, period_index])
+        try:
+            refined = float(ExoMoonLeastSquares.refine_alpha(alpha_grid, -finite)[period_index][0])
+        except Exception:
+            refined = np.nan
+        if np.isfinite(refined) and refined != alpha:
+            refined_snr = self.search(self.search_input(period, refined, self.planet_mass, period_grid[-1],
+                                                        self.planet_impact_param))[3]
+            if np.isfinite(refined_snr) and refined_snr > snr:
+                alpha, snr = refined, float(refined_snr)
+        return int(period_index), period, alpha, snr
+
+    def null_offsets(self, trim_half_window, exclusion):
+        """Offsets from each planet epoch, in days, at which a pseudo-epoch holds neither planet nor moon."""
+        step = trim_half_window / 4
+        return np.arange(exclusion, self.planet_period - exclusion + step / 2, step)
+
+    def null_valid_offsets(self, before_trim, trim_half_window, offsets):
+        """Return, per epoch, the offsets whose window holds at least half the points of the real epoch.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            One array of usable offsets per epoch of bary_t0s.
+        """
+        time = np.sort(before_trim.time)
+
+        def counts(centres):
+            centres = np.asarray(centres, dtype=float)
+            return np.searchsorted(time, centres + trim_half_window) - np.searchsorted(time, centres - trim_half_window)
+
+        valid = []
+        for t0 in self.bary_t0s:
+            needed = max(self.min_cadences_per_t0, 0.5 * counts([t0])[0])
+            valid.append(offsets[counts(t0 + offsets) >= needed])
+        return valid
+
+    @staticmethod
+    def independent_offsets(valid, trim_half_window):
+        """Return how many of the offsets are at least one window (2 trim_half_window) apart, so share no data."""
+        count, last = 0, -np.inf
+        for offset in np.sort(valid):
+            if offset - last >= 2 * trim_half_window:
+                count, last = count + 1, offset
+        return count
+
+    def null_curve(self, before_trim, rng, trim_half_window, valid_offsets):
+        """Build one pseudo-epoch light curve for the null distribution (audit item H10).
+
+        For each epoch, the data around a random offset from it, where neither the planet nor any
+        searched moon can transit, are moved onto the epoch, and the fitted planet is injected
+        there. The search therefore sees the same epochs, geometry and noise, with no moon.
+        valid_offsets holds the usable offsets of each epoch (see `null_valid_offsets`).
+
+        Returns
+        -------
+        tuple or None
+            (time, flux, flux_err, epochs), or None when fewer than half the epochs have a usable
+            offset.
+        """
+        order = np.argsort(before_trim.time)
+        time, flux, flux_err = before_trim.time[order], before_trim.flux[order], before_trim.flux_err[order]
+        params = self.null_planet_params()
+        pieces, epochs = [], []
+        for t0, valid in zip(self.bary_t0s, valid_offsets):
+            if len(valid) == 0:
+                continue
+            offset = rng.choice(valid)
+            window = np.abs(time - (t0 + offset)) < trim_half_window
+            piece_time = time[window] - offset
+            params.t0 = t0
+            planet = ExoMoonLeastSquares.transit_model(params, piece_time, self.exposure_time).light_curve(params)
+            pieces.append((piece_time, flux[window] * planet, flux_err[window]))
+            epochs.append(t0)
+        if len(epochs) == 0 or len(epochs) < len(self.bary_t0s) / 2:
+            return None
+        null_time = np.concatenate([piece[0] for piece in pieces])
+        order = np.argsort(null_time)
+        return (null_time[order], np.concatenate([piece[1] for piece in pieces])[order],
+                np.concatenate([piece[2] for piece in pieces])[order], epochs)
+
+    def null_planet_params(self):
+        """Return the fitted planet model that the null searches inject and subtract."""
+        params = batman.TransitParams()
+        params.t0 = 0.0
+        params.per = self.planet_period
+        params.rp = self.planet_rp_over_rstar if self.planet_rp_over_rstar is not None \
+            else self.planet_radius * R_earth_to_R_sun / self.star_radius
+        params.a = self.planet_a_over_rstar if self.planet_a_over_rstar is not None \
+            else self.planet_semimajor_axis * AU_TO_RSUN / self.star_radius
+        params.inc = self.planet_inc
+        params.ecc = self.planet_ecc
+        params.w = self.planet_arg_periastron
+        params.u = self.ab
+        params.limb_dark = "quadratic"
+        return params
+
+    def null_statistic(self, before_trim, time, flux, flux_err, epochs):
+        """Return the detection SNR of the full search on one pseudo-epoch light curve."""
+        null = copy.copy(before_trim)
+        null.time, null.flux, null.flux_err = time, flux, flux_err
+        null.bary_t0s = list(epochs)
+        null.null_runs = 0
+        null.skip_fold_fit = True
+        for name in ("planet_inc", "planet_impact_param", "planet_a_over_rstar", "planet_rp_over_rstar",
+                     "planet_duration"):
+            setattr(null, name, getattr(self, name))
+        params = self.null_planet_params()
+        null.planet_radius = params.rp * self.star_radius / R_earth_to_R_sun
+        with tempfile.TemporaryDirectory() as plots_dir:
+            null.object_dir = plots_dir
+            null.time, null.flux, null.flux_err = null.remove_non_transit_flux(
+                null.time, null.flux, null.flux_err, null.bary_t0s, np.max(null.planet_mass_grid))
+            null.time, null.flux, null.flux_err = null.subtract_planet_transit(null.time, null.flux, null.flux_err,
+                                                                               mode=self.subtract_mode)
+            null.build_search_templates()
+            period_grid, alpha_grid, _, residuals = null.grid_search(progress=False)
+            best = null.select_best(period_grid, alpha_grid,
+                                    ExoMoonLeastSquares.snr_matrix(residuals, len(alpha_grid), len(period_grid)))
+        return np.nan if best is None else best[3]
+
+    def run_nulls(self, before_trim, period_grid):
+        """Return the null distribution of the detection SNR from null_runs pseudo-epoch searches (audit item H10).
+
+        Each null search uses windows of this light curve placed away from the planet transits
+        (see `null_curve`), so it keeps the target's own noise, gaps and correlated noise (audit
+        item H11), and goes through the same planet fit, grid and selection as the real search.
+        The windows of different null runs overlap, so they are not independent; the number of
+        independent offsets per epoch is recorded in null_independent_offsets.
+
+        Returns
+        -------
+        list of float
+            The SNR of each completed null search.
+        """
+        trim_half_window = self.trim_half_window(np.max(self.planet_mass_grid))
+        search_half_window = self.search_input(period_grid[-1], 0.0, self.planet_mass, period_grid[-1],
+                                               self.planet_impact_param).half_moon_max_orbit_transit_duration
+        exclusion = trim_half_window + search_half_window
+        offsets = self.null_offsets(trim_half_window, exclusion)
+        valid_offsets = self.null_valid_offsets(before_trim, trim_half_window, offsets) if len(offsets) else []
+        # Independent positions where the data exist, the median over the epochs.
+        self.null_independent_offsets = int(np.median([self.independent_offsets(valid, trim_half_window)
+                                                       for valid in valid_offsets])) if valid_offsets else 0
+        if len(offsets) == 0:
+            logging.warning("No null runs: the data kept around each transit (+-%.2f d) plus the widest moon window "
+                            "(+-%.2f d) leave no room within the %.2f d period for windows without the planet or a "
+                            "moon, so no false-alarm probability is given", trim_half_window, search_half_window,
+                            self.planet_period)
+            return []
+        logging.info("Null distribution: %d searches on pseudo-epochs offset %.2f-%.2f d from each transit "
+                     "(%d independent offsets with data per epoch)", self.null_runs, offsets[0], offsets[-1],
+                     self.null_independent_offsets)
+        if self.null_independent_offsets < 3:
+            logging.warning("Only %d independent pseudo-epoch offsets with data per epoch: the null runs reuse the "
+                            "same data, so the false-alarm probability is uncertain", self.null_independent_offsets)
+        rng = np.random.default_rng(self.null_seed)
+        snrs, failed = [], 0
+        previous_disable = logging.root.manager.disable
+        logging.disable(logging.WARNING)
+        try:
+            for _ in range(self.null_runs):
+                curve = self.null_curve(before_trim, rng, trim_half_window, valid_offsets)
+                if curve is None:
+                    failed += 1
+                    continue
+                try:
+                    snr = self.null_statistic(before_trim, *curve)
+                except Exception:
+                    snr = np.nan
+                if np.isfinite(snr):
+                    snrs.append(float(snr))
+                else:
+                    failed += 1
+        finally:
+            logging.disable(previous_disable)
+        if failed:
+            logging.warning("%d/%d null runs failed: too few pseudo-epochs with data, or the search gave no SNR",
+                            failed, self.null_runs)
+        if snrs:
+            logging.info("Null SNR over %d runs: median %.2f, 95th percentile %.2f, largest %.2f", len(snrs),
+                         np.median(snrs), np.percentile(snrs, 95), np.max(snrs))
+        return snrs
+
+    def false_alarm(self, snr):
+        """Return (Gumbel, empirical) false-alarm probabilities of an SNR against the null runs.
+
+        The Gumbel distribution, fitted to the null maxima, gives the probability; the empirical
+        value (k + 1) / (N + 1) is a check that cannot go below 1 / (N + 1). Both are None with
+        fewer than MIN_NULL_RUNS nulls.
+        """
+        nulls = np.array([value for value in (self.null_snrs or []) if np.isfinite(value)])
+        if len(nulls) < MIN_NULL_RUNS or not np.isfinite(snr):
+            if self.null_snrs:
+                logging.warning("Only %d null runs completed, fewer than %d: no false-alarm probability",
+                                len(nulls), MIN_NULL_RUNS)
+            return None, None
+        empirical = float((np.sum(nulls >= snr) + 1) / (len(nulls) + 1))
+        try:
+            loc, scale = stats.gumbel_r.fit(nulls)
+            fap = float(stats.gumbel_r.sf(snr, loc, scale)) if scale > 0 else empirical
+        except Exception:
+            fap = empirical
+        return fap, empirical
+
+    def assess_single_event(self, search_input):
+        """Measure each epoch's depth and SNR and the leave-one-out SNR at the best hypothesis (audit item H12).
+
+        Sets epoch_stats, loo_snr_min and single_event. single_event is True when one epoch
+        carries the signal: with one epoch, or when leaving one epoch out keeps less than
+        SINGLE_EVENT_SNR_FRACTION of the SNR. A signal spread over N epochs keeps about
+        sqrt((N - 1) / N) of it. The flag does not change the detection.
+        """
+        def measure(epochs):
+            split = self.split_scenarios(search_input, self.time, self.flux, self.flux_err, epochs) if epochs else None
+            if split is None or len(split[2]) == 0 or len(split[5]) < 2:
+                return None, None
+            return float(np.mean(split[5]) - np.mean(split[2])), ExoMoonLeastSquares.box_snr(split[2], split[5])
+
+        self.epoch_stats = []
+        for t0 in self.bary_t0s:
+            depth, snr = measure([t0])
+            _, loo = measure([epoch for epoch in self.bary_t0s if epoch != t0])
+            self.epoch_stats.append({"t0": float(t0), "depth": depth, "snr": snr, "loo_snr": loo})
+        loos = [stat["loo_snr"] for stat in self.epoch_stats if stat["loo_snr"] is not None
+                and np.isfinite(stat["loo_snr"])]
+        self.loo_snr_min = float(min(loos)) if loos else None
+        if not (np.isfinite(self.max_snr) and self.max_snr > 0):
+            self.single_event = None
+            return
+        self.single_event = bool(len(self.bary_t0s) < 2 or self.loo_snr_min is None
+                                 or self.loo_snr_min < ExoMoonLeastSquares.SINGLE_EVENT_SNR_FRACTION * self.max_snr)
+        if self.single_event:
+            logging.warning("Single-event flag: leaving one transit out drops the SNR from %.2f to %s, so one epoch "
+                            "carries the signal; see epoch_stats", self.max_snr,
+                            "nothing" if self.loo_snr_min is None else f"{self.loo_snr_min:.2f}")
+
+    def build_search_templates(self):
+        """Build the moon transit templates for the radius grid with the current (fitted) geometry."""
         ma = self.moon_template_params()
         search_half_window = self.compute_transit_duration(self.star_radius, self.transit_semimajor_axis(),
                                                            self.planet_period, self.max_radius * R_earth_to_R_sun,
@@ -2394,6 +2675,25 @@ class ExoMoonLeastSquares:
         self.models = ExoMoonLeastSquares.build_moon_templates(
             ma, np.linspace(self.min_radius, self.max_radius, self.radius_grid_size), self.star_radius,
             max(self.planet_duration * 0.7, search_half_window), self.exposure_time)
+
+    def grid_search(self, progress=True):
+        """Score every moon hypothesis of the grid.
+
+        Parameters
+        ----------
+        progress : bool, optional
+            Show a progress bar, default True.
+
+        Returns
+        -------
+        tuple
+            (period_grid, alpha_grid, search_inputs, all_residuals), with the alpha index varying
+            fastest in search_inputs and all_residuals.
+        """
+        planet_mass_grid = self.planet_mass_grid
+        moon_inc_grid = self.moon_inc_grid
+        moon_ecc_grid = self.moon_ecc_grid
+        moon_arg_periastron_grid = self.moon_arg_periastron_grid
         search_inputs = []
         if len(self.models) == 0:
             logging.warning("No moon radius produced a transit template, using a flat fallback template")
@@ -2436,8 +2736,47 @@ class ExoMoonLeastSquares:
         with Pool(processes=self.cpus, maxtasksperchild=500) as pool:
             all_residuals = list(
                 tqdm(pool.imap(self.search, search_inputs, chunksize=100),
-                     total=len(search_inputs))
+                     total=len(search_inputs), disable=not progress)
             )
+        return period_grid, alpha_grid, search_inputs, all_residuals
+
+    def run(self, plot=False, inject_params=None, null_snrs=None):
+        """Run the full exomoon search over the parameter grid.
+
+        Parameters
+        ----------
+        plot : bool, optional
+            If True, generate diagnostic plots, default False.
+        inject_params : dict or None, optional
+            If a dict with keys 'moon_radius', 'moon_period', 'initial_alpha',
+            'moon_mass', injects a moon signal into the flux before the grid
+            search to test injection-recovery. Default None (no injection).
+        null_snrs : array_like, optional
+            Null SNR maxima to use instead of running null_runs searches, for example from an
+            earlier run on the same light curve, as injection campaigns do.
+        """
+        self.require_usable_epochs()
+        planet_mass_grid = self.planet_mass_grid
+        moon_inc_grid = self.moon_inc_grid
+        moon_ecc_grid = self.moon_ecc_grid
+        moon_arg_periastron_grid = self.moon_arg_periastron_grid
+        self.inject_flux_time = self.time.copy()  # save full time before trimming
+        before_trim = copy.copy(self)  # the whole light curve, without an injected moon, for the nulls
+        self.time, self.flux, self.flux_err = self.remove_non_transit_flux(self.time, self.flux, self.flux_err, self.bary_t0s, np.max(planet_mass_grid))
+        rms = np.std(self.flux)
+        if inject_params is not None:
+            self.flux = self.inject_moon(self.time, self.flux, self.flux_err, self.bary_t0s, self.planet_semimajor_axis,
+                                         self.planet_ecc, inject_params['moon_radius'], inject_params['moon_period'],
+                                         inject_params['moon_mass'], initial_alpha=inject_params['initial_alpha'],
+                                         inject_planet=False, inject_moon=True)
+            logging.info("Injected moon: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
+                         inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
+            self.inject_flux_time = self.time.copy()
+        before_planet_fit = copy.copy(self)
+        self.time, self.flux, self.flux_err = self.subtract_planet_transit(self.time, self.flux, self.flux_err, mode=self.subtract_mode, plot=plot)
+        self.build_search_templates()
+        period_grid, alpha_grid, search_inputs, all_residuals = self.grid_search()
+        alpha_grid_size = len(alpha_grid)
         no_data_count = sum(bool(np.isnan(all_residual[3])) for all_residual in all_residuals)
         if no_data_count > 0:
             logging.warning("%d/%d scenarios had no in-window or out-of-window data and were scored as no detection",
@@ -2629,22 +2968,6 @@ class ExoMoonLeastSquares:
             fig_transit, axs = plt.subplots(2, 1, figsize=(20, 20))
             moon_depth = 1 - np.min(model)
             moon_radius = ExoMoonLeastSquares.depth_to_radius(moon_depth, self.star_radius)
-            if i == 0:
-                self.best_snr_radius = moon_radius
-                # H15: the radius comes from the depth, so a dip deeper than the searched range is
-                # reported as measured and flagged, not limited to max_radius.
-                self.best_snr_radius_above_range = bool(moon_radius > self.max_radius)
-                self.best_snr_radius_below_range = bool(0 < moon_radius < self.min_radius)
-                if self.best_snr_radius_below_range:
-                    logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
-                                    "dip is shallower than the smallest moon searched for. The radius is a mean-depth "
-                                    "estimate that reads about 20%% low (audit item H13), so a moon just above the "
-                                    "minimum can be flagged", moon_radius, self.min_radius)
-                if self.best_snr_radius_above_range:
-                    logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
-                                    "dip is deeper than any moon searched for, for example a planet residual or a "
-                                    "stellar companion. The radius is a mean-depth estimate that reads about 20%% "
-                                    "low (audit item H13)", moon_radius, self.max_radius)
             logging.info("Best SNR for period %s, alpha %s: Radius->%s, Depth->%s, SNR->%s",
                          moon_period,
                          moon_initial_alpha,
@@ -2662,12 +2985,38 @@ class ExoMoonLeastSquares:
             self.plot_signal(axs[1], scenario_time, scenario_flux, it_time, oot_time[args_in_moon_transit_duration], model)
             plt.savefig(self.object_dir + "/SNR " + str(i) + ".png")
             plt.close(fig_transit)
-        # --- Compute best-candidate T0s (reused by recovery + plotting) ---
-        best_snr_idx = best_scenario_per_snr_args[-1]
-        best_snr_period = period_grid[best_snr_idx]
-        best_snr_alpha = snr_refined_alpha_per_period[best_snr_idx][0]
+        # --- H8: one hypothesis for every reported statistic ---
+        best = self.select_best(period_grid, alpha_grid, snr_matrix)
+        if best is None:
+            best_snr_idx = best_scenario_per_snr_args[-1]
+            best_snr_period, best_snr_alpha, selected_snr = period_grid[best_snr_idx], alpha_grid[0], np.nan
+        else:
+            best_snr_idx, best_snr_period, best_snr_alpha, selected_snr = best
         best_input = self.search_input(best_snr_period, best_snr_alpha, self.planet_mass, period_grid[-1],
                                        self.planet_impact_param)
+        # The radius comes from the same hypothesis as the SNR and the SDE (audit item H8).
+        best_model = self.search(best_input, return_lc=True)[-1]
+        moon_radius = ExoMoonLeastSquares.depth_to_radius(1 - np.min(best_model), self.star_radius) \
+            if len(best_model) else 0.0
+        self.best_snr_radius = moon_radius
+        # H15: the radius comes from the depth, so a dip deeper than the searched range is
+        # reported as measured and flagged, not limited to max_radius.
+        self.best_snr_radius_above_range = bool(moon_radius > self.max_radius)
+        self.best_snr_radius_below_range = bool(0 < moon_radius < self.min_radius)
+        if self.best_snr_radius_below_range:
+            logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
+                            "dip is shallower than the smallest moon searched for. The radius is a mean-depth "
+                            "estimate that reads about 20%% low (audit item H13), so a moon just above the "
+                            "minimum can be flagged", moon_radius, self.min_radius)
+        if self.best_snr_radius_above_range:
+            logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
+                            "dip is deeper than any moon searched for, for example a planet residual or a "
+                            "stellar companion. The radius is a mean-depth estimate that reads about 20%% "
+                            "low (audit item H13)", moon_radius, self.max_radius)
+        # The SDE of the SNR spectrum at the selected period, a diagnostic only (audit item H7).
+        snr_spectrum_std = np.nanstd(snr_spectrum - snr_median)
+        self.sde = float((snr_spectrum[best_snr_idx] - snr_median[best_snr_idx]) / snr_spectrum_std) \
+            if snr_spectrum_std > 0 and np.isfinite(snr_spectrum[best_snr_idx]) else None
         half_orbit_dur_max = best_input.half_moon_max_orbit_transit_duration
         half_orbit_dur_rec = best_input.half_moon_orbit_transit_duration
         half_moon_dur = best_input.half_moon_transit_duration
@@ -2701,12 +3050,17 @@ class ExoMoonLeastSquares:
                              alias_k, alias_period, min_alias_err * 100)
             self.recovered_period = float(best_snr_period)
             self.recovered_alpha = float(best_snr_alpha)
-            # T0-based recovery
+            # I1: recovered needs a detection, the moon times within half a moon transit, and the
+            # period; a sampling alias with matching times is reported apart.
+            self.injection_period_error = float(period_err)
+            self.injection_timing_error = None
+            timing_match = None
             if self.injected_t0s and len(rec_t0s) > 0:
                 diffs = np.abs([rec - inj for rec, inj in zip(rec_t0s, self.injected_t0s) if inj is not None])
-                self.recovered = bool(np.median(diffs) < 0.1)
-            else:
-                self.recovered = bool(min_alias_err < 0.05)
+                self.injection_timing_error = float(np.median(diffs))
+                timing_match = bool(self.injection_timing_error < half_moon_dur)
+            pending_recovery = (timing_match, period_err < ExoMoonLeastSquares.RECOVERY_PERIOD_TOLERANCE,
+                                alias_k not in (None, 0) and min_alias_err < ExoMoonLeastSquares.RECOVERY_PERIOD_TOLERANCE)
         # Plot best moon model on each single transit
         try:
             has_injected_plot = hasattr(self, 'injected_flux_moon_pandora')
@@ -2765,14 +3119,39 @@ class ExoMoonLeastSquares:
         except Exception as e:
             logging.warning("Could not plot moon model transits: %s", e)
 
-        self.max_snr = float(np.nanmax(np.transpose(best_snr_per_period)[1]))
+        self.max_snr = float(selected_snr)
         self.max_sde = float(SDE)
         self.absorbed_fraction = self.measure_absorbed_fraction(before_planet_fit, best_input, rec_t0s)
-
-        # I6: the injection-recovery assessment module was never part of the repository, and its
-        # calibration predates the search fixes, so no significance is attached to these statistics.
-        logging.info("No false-alarm assessment is applied: max SNR %.2f and max SDE %.2f are search statistics "
-                     "without a calibrated significance", self.max_snr, self.max_sde)
+        self.assess_single_event(best_input)
+        if null_snrs is not None:
+            self.null_snrs = [float(value) for value in null_snrs]
+        elif self.null_runs > 0:
+            self.null_snrs = self.run_nulls(before_trim, period_grid)
+        self.fap, self.fap_empirical = self.false_alarm(self.max_snr)
+        self.detected = None if self.fap is None else bool(self.fap < self.fap_threshold)
+        if self.fap is None:
+            logging.info("No false-alarm probability: SNR %.2f at P=%.4f d, alpha=%.3f rad is a search statistic "
+                         "without a calibrated significance%s", self.max_snr, best_snr_period, best_snr_alpha,
+                         "" if self.null_runs or null_snrs is not None else " (no null runs requested)")
+        else:
+            logging.info("SNR %.2f at P=%.4f d, alpha=%.3f rad: false-alarm probability %.2g (Gumbel fit to %d "
+                         "nulls; empirical %.2g), %s at the %.2g threshold", self.max_snr, best_snr_period,
+                         best_snr_alpha, self.fap, len(self.null_snrs), self.fap_empirical,
+                         "detected" if self.detected else "not detected", self.fap_threshold)
+        if inject_params is not None:
+            timing_match, period_match, alias_match = pending_recovery
+            if self.detected is None:
+                self.recovered = self.recovered_alias = None
+                logging.info("Injection recovery undetermined: recovery needs a false-alarm probability (null runs)")
+            else:
+                times_ok = timing_match if timing_match is not None else True
+                self.recovered = bool(self.detected and times_ok and period_match)
+                self.recovered_alias = bool(self.detected and times_ok and not period_match and alias_match)
+                logging.info("Injection recovery: detected=%s, moon times %s (median error %s d, tolerance %.4f d), "
+                             "period match=%s, alias=%s -> recovered=%s", self.detected,
+                             "match" if timing_match else ("not checked" if timing_match is None else "differ"),
+                             None if self.injection_timing_error is None else round(self.injection_timing_error, 4),
+                             half_moon_dur, period_match, alias_match, self.recovered)
 
 
 class SearchInput:

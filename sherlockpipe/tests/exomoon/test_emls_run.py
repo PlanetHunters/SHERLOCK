@@ -259,6 +259,13 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
     assert results['epochs_skipped'] == []
     assert abs(results['best_period'] - guard.moon_period()) / guard.moon_period() < 0.01
     assert results['max_snr'] > 10
+    # The fixture has data only around the transits, so no pseudo-epochs and no false-alarm probability.
+    assert results['null_runs_requested'] == 100 and results['null_runs_completed'] == 0
+    assert results['fap'] is None and results['detected'] is None
+    assert results['single_event'] is False
+    assert len(results['epoch_stats']) == results['epochs_used']
+    assert results['sde'] > 0
+    assert results['sherlockpipe_version']
     assert results['best_radius_above_range'] is False
     assert results['best_radius_below_range'] is False
     assert not (tmp_path / 'emls_1' / 'stale.txt').exists()

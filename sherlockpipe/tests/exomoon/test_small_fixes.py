@@ -198,7 +198,7 @@ def test_epoch_without_injected_dip_keeps_the_pairing(tmp_path):
     assert len(emls.injected_t0s) == len(emls.recovered_t0s)
     diffs = [abs(rec - inj) for rec, inj in zip(emls.recovered_t0s, emls.injected_t0s) if inj is not None]
     assert np.median(diffs) < 0.1
-    assert emls.recovered
+    assert emls.injection_timing_error == pytest.approx(np.median(diffs))
 
 
 # --- E4: NaN SNR in one alpha bin --------------------------------------------------------------------------------

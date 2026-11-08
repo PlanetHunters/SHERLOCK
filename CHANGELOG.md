@@ -4,6 +4,23 @@
 
 ### Added
 
+- EMLS false-alarm probability (audit item H10): `--null_runs` (default 100)
+  searches on pseudo-epochs, windows of the same light curve away from the
+  planet transits and outside every searched moon window, moved onto the real
+  epochs with the fitted planet injected. They keep the target's own noise,
+  gaps and correlated noise and go through the same planet fit, grid and
+  selection. A Gumbel fit to their SNR gives `fap`, with the empirical
+  (k+1)/(N+1) as a check; `detected` is `fap < --fap_threshold` (default
+  0.01). Without data away from the transits, or with fewer than 20 completed
+  nulls, `fap` and `detected` are null and the log says why.
+- EMLS single-event flag (audit item H12): each epoch's depth and SNR and the
+  leave-one-out SNR at the best hypothesis are stored in `epoch_stats`.
+  `single_event` is set when leaving one transit out keeps less than half the
+  SNR, or with one transit; it does not change `detected`.
+- `emls_results.json` records `fap`, `fap_empirical`, `fap_threshold`,
+  `detected`, the null runs and their SNRs, `single_event`, `loo_snr_min`,
+  `epoch_stats`, `sde` and the `sherlockpipe_version` (audit item I8).
+
 - `python -m sherlockpipe.emls --candidate N`: run the EMLS exomoon search on a
   candidate of a SHERLOCK results directory, like `vet` and `fit`. It reads the
   detrended curve the candidate was found in (`lc_<curve>.csv`), the star from
@@ -16,6 +33,17 @@
 
 ### Fixed
 
+- EMLS reports one hypothesis (audit items H7, H8): the SNR selects the
+  period and phase, and the SNR, the SDE of the SNR spectrum (`sde`, a
+  diagnostic) and the radius all come from that hypothesis, so they reproduce
+  from one `search` call. The residual-spectrum SDE stays as `max_sde`, a
+  diagnostic.
+- EMLS injection recovery (audit item I1): `recovered` now needs a detection
+  (false-alarm probability below the threshold), moon times within half a
+  moon transit of the injected ones, and the period within 5 %. A sampling
+  alias with matching times sets `recovered_alias` instead. Without a
+  false-alarm probability both are None. Before, an undetectable moon was
+  "recovered" 82 % of the time by chance.
 - EMLS planet fit: the folded transit is fitted in duration, impact parameter
   and radius (T14, b, rp) instead of a/R* bounded to 2 %, so a transit longer
   than the catalog stellar density allows no longer leaves a moon-like
@@ -106,8 +134,13 @@
 
 ### Known limitations
 
-- EMLS `max_sde` is still unreliable on noise-only data until the no-dip
-  placeholder and the depth gate are reworked.
+- EMLS `sde` and `max_sde` are diagnostics: neither separates moons from
+  noise (audit item H7). Use `max_snr` with `fap`.
+- The EMLS null runs reuse the same light curve, so they are not independent:
+  `null_independent_offsets` gives the number of independent pseudo-epoch
+  positions per epoch, and the log warns below 3. Curves cut around the
+  transits, such as the Kepler-706 regression fixture, have no pseudo-epochs
+  and get no false-alarm probability.
 
 ### Testing
 
