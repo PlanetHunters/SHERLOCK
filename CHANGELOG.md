@@ -28,7 +28,8 @@
 - EMLS: each transit's mid-time has a Gaussian prior around the linear
   ephemeris, as wide as the transit's timing precision (Carter et al. 2008)
   plus the largest planet TTV a searched moon can cause: the heaviest moon
-  (largest radius at the largest density) on the widest searched orbit
+  (the Chen & Kipping mass of the largest searched radius, capped at the
+  largest moon density) on the widest searched orbit
   (half the Hill period) moves the planet a_m M_m / (M_p + M_m) from the
   barycentre. `--ttv_prior_minutes` overrides it, and 0 removes the prior;
   `emls_results.json` records the value used. With a 10-minute allowance,

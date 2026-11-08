@@ -28,6 +28,7 @@ from scipy.signal import lombscargle, argrelextrema
 import matplotlib.pyplot as plt
 import pandas as pd
 from sherlockpipe.search.sherlock import Sherlock
+from sherlockpipe.system_stability.mr_forecast import MrForecast
 
 G = ac.G.value  # m3 kg-1 s-2
 AU_TO_M = ac.au.value
@@ -38,6 +39,31 @@ M_earth_to_M_sun = Mearth_to_kg / Msolar_to_kg
 R_earth_to_R_sun = (ac.R_earth / ac.R_sun).value
 EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  # g/cm3
 MIN_RP_OVER_RSTAR = 1e-5
+MOON_MASS_FORECAST_SEED = 0
+_moon_mass_cache = {}
+
+
+def forecast_moon_mass(radius, max_density):
+    """Return a realistic mass in Earth masses for a moon of the given radius in Earth radii.
+
+    The median of the Chen & Kipping (2017) mass-radius forecast, capped at the mass of a body of
+    that radius at max_density in g/cm3. The forecast uses a fixed seed and the global numpy random
+    state is restored. A radius outside the forecaster range falls back to the density cap.
+    """
+    cap = max_density / EARTH_DENSITY * radius ** 3
+    key = float(radius)
+    if key not in _moon_mass_cache:
+        state = np.random.get_state()
+        try:
+            np.random.seed(MOON_MASS_FORECAST_SEED)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                forecast = MrForecast.Rstat2M(key, 1e-3 * key)
+        finally:
+            np.random.set_state(state)
+        _moon_mass_cache[key] = None if forecast is None else float(forecast[0])
+    forecast = _moon_mass_cache[key]
+    return cap if forecast is None else min(forecast, cap)
 
 
 class ExposureAveragedModel:
@@ -803,7 +829,9 @@ class ExoMoonLeastSquares:
         The planet orbits the planet-moon barycentre, a_m M_m / (M_p + M_m) away, so it crosses
         the star that distance divided by its orbital velocity v_p early or late. The largest
         moon mass is the largest searched radius at the largest moon density, and the widest
-        orbit is the outer limit of the period grid, half the Hill period.
+        orbit is the outer limit of the period grid, half the Hill period. The moon mass is the
+        Chen & Kipping forecast for the largest searched radius, capped by that radius at the
+        largest moon density (see `forecast_moon_mass`).
 
         Parameters
         ----------
@@ -817,7 +845,7 @@ class ExoMoonLeastSquares:
         """
         planet_mass = np.max(self.planet_mass_grid) if planet_mass is None else planet_mass
         mass = planet_mass * M_earth_to_M_sun
-        moon_mass = self.max_moon_density / EARTH_DENSITY * self.max_radius ** 3  # Earth masses
+        moon_mass = forecast_moon_mass(self.max_radius, self.max_moon_density)  # Earth masses
         widest_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
                                                                          self.planet_semimajor_axis)) * 0.5
         moon_a = self.compute_semimajor_axis(mass, widest_period)
@@ -1066,9 +1094,9 @@ class ExoMoonLeastSquares:
         ingress = ExoMoonLeastSquares.ingress_duration(params, self.planet_duration)
         if self.ttv_prior_width == "auto":
             self.ttv_prior_width_used = self.max_moon_ttv()
-            logging.info("TTV allowed by the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth "
-                         "at %.1f g/cm3 on the widest searched orbit)", self.ttv_prior_width_used * 1440,
-                         self.max_radius, self.max_moon_density)
+            logging.info("TTV allowed by the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth, "
+                         "%.1f M_earth forecast, on the widest searched orbit)", self.ttv_prior_width_used * 1440,
+                         self.max_radius, forecast_moon_mass(self.max_radius, self.max_moon_density))
         else:
             self.ttv_prior_width_used = self.ttv_prior_width
             if self.ttv_prior_width is not None:

@@ -146,7 +146,7 @@ def test_allowed_ttv_is_the_largest_a_searched_moon_can_cause(tmp_path):
     emls = emls_for(tmp_path, curve(truth, epochs=3), t14(truth))
     planet_mass = 300.0
     mass = planet_mass * 3.0034893e-06
-    moon_mass = 5.5 / exomoon.EARTH_DENSITY * 4.0 ** 3
+    moon_mass = exomoon.forecast_moon_mass(4.0, 5.5)
     hill_period = ExoMoonLeastSquares.au_to_period(mass, ExoMoonLeastSquares.compute_hill_radius(1.0, mass, SMA))
     moon_a = ExoMoonLeastSquares.compute_semimajor_axis(mass, hill_period / 2)
     planet_shift_au = moon_a * moon_mass / (planet_mass + moon_mass)  # distance to the barycentre
@@ -154,8 +154,26 @@ def test_allowed_ttv_is_the_largest_a_searched_moon_can_cause(tmp_path):
 
     assert emls.max_moon_ttv() == pytest.approx(expected, rel=1e-6)
     emls.max_radius = 1.0
-    assert emls.max_moon_ttv() == pytest.approx(expected * (1 / 64) * (planet_mass + moon_mass)
-                                                / (planet_mass + moon_mass / 64), rel=1e-6)
+    small = exomoon.forecast_moon_mass(1.0, 5.5)
+    assert emls.max_moon_ttv() == pytest.approx(expected * small / moon_mass * (planet_mass + moon_mass)
+                                                / (planet_mass + small), rel=1e-6)
+
+
+def test_moon_mass_follows_the_mass_radius_relation():
+    # Chen & Kipping: about one Earth mass at 1 R_earth, a 4 R_earth body is Neptunian (~15 M_earth),
+    # far below the 64 M_earth of an Earth-density body.
+    assert exomoon.forecast_moon_mass(1.0, 5.5) == pytest.approx(1.0, rel=0.3)
+    assert 8 < exomoon.forecast_moon_mass(4.0, 5.5) < 30
+    # The density cap still applies, and the forecast does not touch the global random state.
+    assert exomoon.forecast_moon_mass(4.0, 0.1) == pytest.approx(0.1 / exomoon.EARTH_DENSITY * 64)
+    np.random.seed(5)
+    expected = np.random.rand()
+    np.random.seed(5)
+    exomoon._moon_mass_cache.clear()
+    exomoon.forecast_moon_mass(2.0, 5.5)
+    assert np.random.rand() == expected
+    # Outside the forecaster range it falls back to the cap.
+    assert exomoon.forecast_moon_mass(0.05, 5.5) == pytest.approx(5.5 / exomoon.EARTH_DENSITY * 0.05 ** 3)
 
 
 def test_default_prior_uses_the_largest_moon_ttv(tmp_path):
