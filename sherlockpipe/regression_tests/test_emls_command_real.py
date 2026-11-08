@@ -6,7 +6,9 @@ The light curve is the real PDCSAP flux of Kepler-706 b (KOI K00855.01, KIC 6522
 systematics, and the moon comes from an independent model:
 
 1. A Pandora moon is added to the raw flux, averaged over the Kepler long-cadence exposure.
-2. The curve is detrended with a biweight filter, as SHERLOCK does, so detrending can remove signal.
+2. The raw curve is written as ``lc_0.csv``, which the command detrends itself with a biweight that
+   masks every moon window (audit item A1). The SHERLOCK-style unmasked biweight is written as
+   ``lc_1.csv``, the curve the candidate was found in.
 3. The candidate duration is 80 % of T14, like a TLS search duration, and there is no fit.
 4. The command runs with its default period grid and the guessed planet mass.
 
@@ -96,6 +98,8 @@ def sherlock_directory(directory, with_moon):
     time, flux, flux_err = (data[column].to_numpy(float) for column in ('time', 'flux', 'flux_err'))
     if with_moon:
         flux = flux * pandora_moon(time)
+    pd.DataFrame({'time': time, 'flux': flux, 'flux_err': flux_err}).to_csv(os.path.join(directory, 'lc_0.csv'),
+                                                                          index=False)
     flat = wotan.flatten(time, flux, method='biweight', window_length=DETREND_WINDOW)
     keep = np.isfinite(flat)
     pd.DataFrame({'time': time[keep], 'flux': flat[keep], 'flux_err': flux_err[keep]}).to_csv(
@@ -172,5 +176,6 @@ def test_inputs_follow_the_no_fit_path(runs):
     assert sources['mass'] == 'Jupiter mass (giant radius)'
     assert sources['inc'].startswith('no fit')
     assert runs['moon']['exposure_time_s'] == pytest.approx(KEPLER_LONG_CADENCE, abs=1)
-    assert sources['exposure_time'] == 'median point spacing of lc_1.csv'
+    assert sources['exposure_time'] == 'median point spacing of lc_0.csv'
+    assert runs['moon']['detrending']['by'] == 'emls'
     assert runs['moon']['period_grid_size'] == 10000

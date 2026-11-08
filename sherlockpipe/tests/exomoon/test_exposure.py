@@ -126,7 +126,7 @@ def test_sherlock_curve_exposure_comes_from_its_spacing(tmp_path):
     inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
 
     assert inputs['exposure_time'] == pytest.approx(np.median(np.diff(time)) * 86400, rel=1e-6)
-    assert inputs['sources']['exposure_time'] == 'median point spacing of lc_1.csv'
+    assert inputs['sources']['exposure_time'] == 'median point spacing of lc_0.csv'
 
 
 def test_gaps_do_not_change_the_exposure(tmp_path):

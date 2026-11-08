@@ -110,7 +110,7 @@ class ExoMoonLeastSquares:
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
-                  fap_threshold=0.01, null_seed=0):
+                  fap_threshold=0.01, null_seed=0, detrend_window=None):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -205,6 +205,10 @@ class ExoMoonLeastSquares:
             default 0.01.
         null_seed : int, optional
             Seed of the pseudo-epoch offsets, default 0.
+        detrend_window : float, optional
+            Biweight window in days. When given, the light curve is taken as undetrended and
+            `run` detrends it with every moon window masked (audit item A1), after any injected
+            moon is added (audit item A2). Default None: the curve is already detrended.
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -259,6 +263,9 @@ class ExoMoonLeastSquares:
             raise ValueError(f"null_runs must be a non-negative integer, got {null_runs}")
         if not (np.isfinite(fap_threshold) and 0 < fap_threshold < 1):
             raise ValueError(f"fap_threshold must be between 0 and 1, got {fap_threshold}")
+        if detrend_window is not None and not (np.isfinite(detrend_window) and detrend_window > 0):
+            raise ValueError(f"detrend_window must be a positive number of days or None, got {detrend_window}")
+        self.detrend_window = detrend_window
         self.null_runs = int(null_runs)
         self.fap_threshold = float(fap_threshold)
         self.null_seed = null_seed
@@ -1003,7 +1010,12 @@ class ExoMoonLeastSquares:
         return sigmas
 
     def normalise_epochs(self, time, flux, flux_err, min_points=10):
-        """Divide each epoch by its out-of-transit median, so the planet fits see a unit baseline.
+        """Divide each epoch by its out-of-window baseline, so the planet fits see a unit baseline.
+
+        A3: the baseline is a straight line fitted to the points outside the widest moon window
+        (and at least one transit duration from the epoch), so neither the planet nor a searched
+        moon can shape it. A residual slope would otherwise move the fitted mid-time. With fewer
+        than min_points / 2 points on either side, the median of the points outside is used.
 
         The planet fits assume the flux outside the transit is exactly 1. An offset would
         otherwise be absorbed into the planet depth and left as a step after subtraction.
@@ -1029,16 +1041,28 @@ class ExoMoonLeastSquares:
         """
         flux = np.array(flux, dtype=float)
         flux_err = None if flux_err is None else np.array(flux_err, dtype=float)
+        exclusion = max(self.planet_duration, self.moon_window_half_width())
+        self.epoch_baseline_slopes = []
         for t0 in self.bary_t0s:
             window = np.abs(time - t0) < self.planet_period / 2
-            outside = window & (np.abs(time - t0) > self.planet_duration)
+            outside = window & (np.abs(time - t0) > exclusion)
             if np.sum(outside) < min_points:
-                logging.warning("Epoch T0=%.4f not normalised: %d out-of-transit points, fewer than %d",
+                logging.warning("Epoch T0=%.4f not normalised: %d points outside the moon window, fewer than %d",
                                 t0, np.sum(outside), min_points)
                 continue
-            level = np.median(flux[outside])
-            if not np.isfinite(level) or level <= 0:
-                logging.warning("Epoch T0=%.4f not normalised: invalid out-of-transit level %s", t0, level)
+            before, after = np.sum(outside & (time < t0)), np.sum(outside & (time > t0))
+            if min(before, after) >= min_points / 2:
+                slope, intercept = np.polyfit(time[outside] - t0, flux[outside], 1)
+                residual = flux[outside] - (intercept + slope * (time[outside] - t0))
+                keep = np.abs(residual) < 5 * 1.4826 * np.median(np.abs(residual - np.median(residual)))
+                if np.sum(keep) >= min_points:
+                    slope, intercept = np.polyfit(time[outside][keep] - t0, flux[outside][keep], 1)
+                level = intercept + slope * (time[window] - t0)
+                self.epoch_baseline_slopes.append(float(slope))
+            else:
+                level = np.full(np.sum(window), np.median(flux[outside]))
+            if not np.all(np.isfinite(level)) or np.any(level <= 0):
+                logging.warning("Epoch T0=%.4f not normalised: invalid out-of-window baseline", t0)
                 continue
             flux[window] = flux[window] / level
             if flux_err is not None:
@@ -2512,6 +2536,50 @@ class ExoMoonLeastSquares:
         white = sigma / np.sqrt(np.mean(counts[full]))
         return float(binned_scatter / white)
 
+    def moon_window_half_width(self):
+        """Return the half-width in days of the widest searched moon window around each epoch."""
+        mass = np.max(self.planet_mass_grid) * M_earth_to_M_sun
+        max_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
+                                                                       self.planet_semimajor_axis)) * 0.5
+        return self.search_input(max_period, 0.0, self.planet_mass, max_period,
+                                 self.planet_impact_param).half_moon_max_orbit_transit_duration
+
+    def epoch_distance(self, time):
+        """Return the distance in days from each time to the nearest planet epoch of the linear ephemeris."""
+        time = np.asarray(time, dtype=float)
+        if len(time) == 0:
+            return time
+        phase = (time - self.planet_t0) / self.planet_period
+        return np.abs(phase - np.round(phase)) * self.planet_period
+
+    def detrend(self, time, flux, flux_err):
+        """Detrend an undetrended light curve without letting the planet or a moon shape the trend (audit item A1).
+
+        A biweight of detrend_window days is computed with the points within the widest searched
+        moon window of every epoch masked, so they do not shape it (Hippke et al. 2019, AJ 158,
+        143, Sect. V.4). Every point, the masked ones included, is then divided by the trend;
+        where a masked window is wider than the biweight window, the trend is joined linearly
+        across it.
+
+        Returns
+        -------
+        tuple
+            (time, flux, flux_err), sorted by time, with the flux and errors divided by the trend.
+        """
+        order = np.argsort(time)
+        time, flux = np.asarray(time, dtype=float)[order], np.asarray(flux, dtype=float)[order]
+        flux_err = None if flux_err is None else np.asarray(flux_err, dtype=float)[order]
+        mask = self.epoch_distance(time) < self.moon_window_half_width()
+        _, trend = wotan.flatten(time, flux, method='biweight', window_length=self.detrend_window,
+                                 return_trend=True, mask=mask)
+        # Inside a mask the biweight only sees one side of the window, which is noisy; the
+        # trend there is the straight line between the mask edges instead.
+        finite = np.isfinite(trend) & (trend > 0) & ~mask
+        if np.count_nonzero(finite) < 2:
+            raise ValueError("The masked detrending left no trend: too few points outside the moon windows")
+        trend = np.interp(time, time[finite], trend[finite])
+        return time, flux / trend, None if flux_err is None else flux_err / trend
+
     def set_red_noise_factor(self, before_trim):
         """Measure beta (see `measure_red_noise`) on the light curve before trimming and set red_noise_factor.
 
@@ -2521,8 +2589,10 @@ class ExoMoonLeastSquares:
         max_period = self.au_to_period(np.max(self.planet_mass_grid) * M_earth_to_M_sun, self.compute_hill_radius(
             self.star_mass, np.max(self.planet_mass_grid) * M_earth_to_M_sun, self.planet_semimajor_axis)) * 0.5
         window = self.search_input(max_period, 0.0, self.planet_mass, max_period, self.planet_impact_param)
-        self.red_noise_measured = self.measure_red_noise(before_trim.time, before_trim.flux,
-                                                         window.half_moon_max_orbit_transit_duration,
+        time, flux = before_trim.time, before_trim.flux
+        if self.detrend_window is not None:
+            time, flux, _ = self.detrend(time, flux, None)
+        self.red_noise_measured = self.measure_red_noise(time, flux, window.half_moon_max_orbit_transit_duration,
                                                          window.moon_transit_duration)
         if self.red_noise_measured is None:
             self.red_noise_factor = 1.0
@@ -2669,6 +2739,8 @@ class ExoMoonLeastSquares:
         null.planet_radius = params.rp * self.star_radius / R_earth_to_R_sun
         with tempfile.TemporaryDirectory() as plots_dir:
             null.object_dir = plots_dir
+            if null.detrend_window is not None:
+                null.time, null.flux, null.flux_err = null.detrend(null.time, null.flux, null.flux_err)
             null.time, null.flux, null.flux_err = null.remove_non_transit_flux(
                 null.time, null.flux, null.flux_err, null.bary_t0s, np.max(null.planet_mass_grid))
             null.time, null.flux, null.flux_err = null.subtract_planet_transit(null.time, null.flux, null.flux_err,
@@ -2892,9 +2964,27 @@ class ExoMoonLeastSquares:
         moon_arg_periastron_grid = self.moon_arg_periastron_grid
         self.inject_flux_time = self.time.copy()  # save full time before trimming
         before_trim = copy.copy(self)  # the whole light curve, without an injected moon, for the nulls
+        if self.detrend_window is not None:
+            # A2: the moon is injected into the undetrended curve, so recovery includes the detrending loss.
+            if inject_params is not None:
+                self.flux = self.inject_moon(self.time, self.flux, self.flux_err, self.bary_t0s,
+                                             self.planet_semimajor_axis, self.planet_ecc, inject_params['moon_radius'],
+                                             inject_params['moon_period'], inject_params['moon_mass'],
+                                             initial_alpha=inject_params['initial_alpha'], inject_planet=False,
+                                             inject_moon=True)
+                logging.info("Injected moon before detrending: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
+                             inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
+                self.inject_flux_time = self.time.copy()
+            self.time, self.flux, self.flux_err = self.detrend(self.time, self.flux, self.flux_err)
+            if inject_params is not None:
+                order = np.argsort(self.inject_flux_time)
+                self.inject_flux_time = self.inject_flux_time[order]
+                self.injected_flux_moon_pandora = np.asarray(self.injected_flux_moon_pandora)[order]
+            logging.info("Detrended with a %.2f d biweight, masking +-%.2f d around every epoch", self.detrend_window,
+                         self.moon_window_half_width())
         self.time, self.flux, self.flux_err = self.remove_non_transit_flux(self.time, self.flux, self.flux_err, self.bary_t0s, np.max(planet_mass_grid))
         rms = np.std(self.flux)
-        if inject_params is not None:
+        if inject_params is not None and self.detrend_window is None:
             self.flux = self.inject_moon(self.time, self.flux, self.flux_err, self.bary_t0s, self.planet_semimajor_axis,
                                          self.planet_ecc, inject_params['moon_radius'], inject_params['moon_period'],
                                          inject_params['moon_mass'], initial_alpha=inject_params['initial_alpha'],

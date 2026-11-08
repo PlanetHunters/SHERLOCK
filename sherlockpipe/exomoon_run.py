@@ -334,6 +334,9 @@ def epochs_in_span(t0, period, time):
     return [float(epoch) for epoch in epochs if np.min(time) - period / 2 <= epoch <= np.max(time) + period / 2]
 
 
+DETREND_DURATIONS = 3  # biweight window in planet durations (Hippke et al. 2019)
+
+
 def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
                  curve=None, lc_file=None, use_fit=True, exposure_time=None):
     """Collect the light curve and the star, planet and moon-range inputs of an EMLS run.
@@ -351,7 +354,9 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     min_moon_radius, max_moon_radius : float, optional
         Moon radius range in Earth radii. Defaults to Rp/20 and Rp/2.
     curve : int, optional
-        Detrended curve number (lc_<curve>.csv). Defaults to the curve the candidate was found in.
+        SHERLOCK curve number (lc_<curve>.csv), used as is unless it is 0. Default: lc_0.csv, the
+        curve before SHERLOCK detrending, which EMLS detrends with the moon windows masked (audit
+        item A1); the curve the candidate was found in when lc_0.csv is missing.
     lc_file : str, optional
         Light curve file with time, flux and flux_err columns. Overrides curve.
     use_fit : bool, optional
@@ -442,11 +447,23 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
     if not 0 < moon["min_radius"] < moon["max_radius"]:
         raise ValueError(f"Moon radius range must satisfy 0 < min < max, got {moon['min_radius']} and "
                          f"{moon['max_radius']}")
+    # A1: by default EMLS detrends the undetrended SHERLOCK curve itself, with the moon windows
+    # masked; a SHERLOCK detrended curve (--curve N) or a given file (--lc_file) is used as is.
+    detrend = False
     if lc_file is None:
-        curve = int(row["curve"]) if curve is None else int(curve)
+        undetrended = os.path.join(object_dir, "lc_0.csv")
+        if curve is None and os.path.exists(undetrended):
+            curve = 0
+        elif curve is None:
+            curve = int(row["curve"])
+            logging.warning("No lc_0.csv (the curve before SHERLOCK detrending): using the SHERLOCK detrended curve "
+                            "lc_%d.csv, whose unmasked detrending can flatten part of the planet and a moon", curve)
+        else:
+            curve = int(curve)
+        detrend = curve == 0
         lc_file = os.path.join(object_dir, f"lc_{curve}.csv")
-        if curve == 0:
-            logging.warning("lc_0.csv is the curve before SHERLOCK detrending")
+    sources["detrending"] = "EMLS biweight with the moon windows masked (lc_0.csv)" if detrend \
+        else f"as given ({os.path.basename(lc_file)})"
     lc = pd.read_csv(lc_file)
     time, flux, flux_err = lc["time"].to_numpy(float), lc["flux"].to_numpy(float), lc["flux_err"].to_numpy(float)
     finite = np.isfinite(time) & np.isfinite(flux) & np.isfinite(flux_err)
@@ -457,7 +474,7 @@ def build_inputs(object_dir, candidate, mask=None, planet_mass=None, min_moon_ra
         raise ValueError("No light curve points remain after masking")
     return {"star": {"mass": star_mass, "radius": star_radius, "ld": ld}, "planet": planet, "moon": moon,
             "exposure_time": exposure_seconds, "cadences": cadences,
-            "mask": mask, "lc_file": os.path.abspath(lc_file), "sources": sources,
+            "mask": mask, "lc_file": os.path.abspath(lc_file), "sources": sources, "detrend": detrend,
             "t0s": epochs_in_span(planet["t0"], planet["period"], time),
             "time": time, "flux": flux, "flux_err": flux_err}
 
@@ -498,7 +515,7 @@ def _setup_logging(log_file):
 def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
              max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None,
-             null_runs=100, fap_threshold=0.01):
+             null_runs=100, fap_threshold=0.01, detrend_window=None):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -531,6 +548,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         the null distribution of the SNR for the false-alarm probability, default 100. 0 skips it.
     fap_threshold : float, optional
         False-alarm probability below which the best hypothesis is a detection, default 0.01.
+    detrend_window : float, optional
+        Biweight window in days for the EMLS detrending of lc_0.csv, default three planet durations.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -553,7 +572,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     try:
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
-                       subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold)
+                       subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold, detrend_window)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -569,7 +588,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
-         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01):
+         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -588,7 +607,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         ttv_prior_width="auto" if ttv_prior_minutes is None else (ttv_prior_minutes / 1440 if ttv_prior_minutes
                                                                   else None),
         planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,
-        fap_threshold=fap_threshold)
+        fap_threshold=fap_threshold,
+        detrend_window=(DETREND_DURATIONS * planet["duration"] if detrend_window is None else float(detrend_window))
+        if inputs["detrend"] else None)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -617,6 +638,10 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "ttv_prior_source": "auto: largest TTV of a searched moon" if ttv_prior_minutes is None
         else ("none" if not ttv_prior_minutes else "user"),
         "ephemeris_uncertainty_source": emls.ephemeris_source,
+        "detrending": {"by": "emls" if emls.detrend_window is not None else "input",
+                       "window": emls.detrend_window,
+                       "masked_half_width": emls.moon_window_half_width() if emls.detrend_window is not None else None},
+        "epoch_baseline_slopes": getattr(emls, "epoch_baseline_slopes", None),
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,

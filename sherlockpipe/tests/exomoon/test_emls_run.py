@@ -1,5 +1,6 @@
 """Tests for the EMLS entrypoint on SHERLOCK results directories (sherlockpipe.emls)."""
 import json
+import logging
 import os
 import runpy
 import sys
@@ -121,15 +122,27 @@ def test_no_fit_keeps_the_candidate_parameters(tmp_path):
     assert inputs['sources']['period'] == 'candidates.csv'
 
 
-def test_light_curve_is_the_one_the_candidate_was_found_in(tmp_path):
+def test_default_light_curve_is_the_undetrended_one(tmp_path):
+    """A1: EMLS detrends lc_0.csv itself with the moon windows masked; a SHERLOCK curve is used as is."""
     guard_directory(tmp_path)
 
-    found = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
-    chosen = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, curve=0)
+    default = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+    sherlock = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, curve=1)
 
-    assert found['lc_file'].endswith('lc_1.csv')
-    assert chosen['lc_file'].endswith('lc_0.csv')
-    assert np.median(chosen['flux']) - np.median(found['flux']) == pytest.approx(0.01, abs=1e-6)
+    assert default['lc_file'].endswith('lc_0.csv') and default['detrend'] is True
+    assert sherlock['lc_file'].endswith('lc_1.csv') and sherlock['detrend'] is False
+    assert np.median(default['flux']) - np.median(sherlock['flux']) == pytest.approx(0.01, abs=1e-6)
+
+
+def test_without_lc_0_the_candidate_curve_is_used(tmp_path, caplog):
+    guard_directory(tmp_path)
+    os.remove(tmp_path / 'lc_0.csv')
+
+    with caplog.at_level(logging.WARNING):
+        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0)
+
+    assert inputs['lc_file'].endswith('lc_1.csv') and inputs['detrend'] is False
+    assert any('No lc_0.csv' in record.getMessage() for record in caplog.records)
 
 
 def test_masked_candidate_transits_are_removed(tmp_path):
@@ -415,10 +428,11 @@ def test_fit_without_inclination_or_impact_is_reported(tmp_path, caplog):
 
 def test_sparse_epoch_is_reported_with_its_point_count(tmp_path):
     t0s, time, _ = guard_directory(tmp_path)
-    lc = pd.read_csv(tmp_path / 'lc_1.csv')
-    in_epoch = np.flatnonzero(np.abs(lc['time'] - t0s[3]) < 3.0)
-    closest = in_epoch[np.argsort(np.abs(lc['time'].to_numpy()[in_epoch] - t0s[3]))]
-    lc.drop(index=closest[5:]).to_csv(tmp_path / 'lc_1.csv', index=False)
+    for name in ('lc_0.csv', 'lc_1.csv'):
+        lc = pd.read_csv(tmp_path / name)
+        in_epoch = np.flatnonzero(np.abs(lc['time'] - t0s[3]) < 3.0)
+        closest = in_epoch[np.argsort(np.abs(lc['time'].to_numpy()[in_epoch] - t0s[3]))]
+        lc.drop(index=closest[5:]).to_csv(tmp_path / name, index=False)
 
     with mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
         exomoon_run.run_emls(str(tmp_path), 1, mask=[2], planet_mass=300.0, period_grid_size=40, radius_grid_size=4,

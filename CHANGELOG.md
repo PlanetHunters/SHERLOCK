@@ -38,6 +38,26 @@
 
 ### Fixed
 
+- EMLS detrending (audit item A1): the command now reads `lc_0.csv`, the
+  curve before SHERLOCK detrending, and EMLS detrends it with a biweight
+  (`--detrend_window`, default three planet durations) in which every point
+  within the widest moon window of each transit is masked, so neither the
+  planet nor a searched moon shapes the trend. All points are divided by the
+  trend, which is a straight line across each mask. On the audit fixture at
+  1000 ppm (2.5 R_earth moon at 0.25 and 1.5 T14) 0.99-1.00 of the moon and
+  the planet survive, against 0.24-0.46 of the moon with the unmasked
+  biweight. `--curve N` uses a SHERLOCK curve as before, and without
+  `lc_0.csv` the candidate's curve is used with a warning. On noise the
+  interpolated trend raises the median best SNR by about 9 % (2.87 to 3.12
+  over six runs); the null runs go through the same detrending.
+- EMLS injection before detrending (audit item A2): with the EMLS
+  detrending, an injected moon is added to the undetrended curve, so
+  recovery includes the detrending loss; the null pseudo-epochs are detrended
+  the same way.
+- EMLS per-epoch baseline (audit item A3): each epoch is divided by a straight
+  line fitted to the points outside the widest moon window, not by a
+  constant, so a residual slope does not move the planet mid-time (t0 rms
+  0.24 min at +-3000 ppm/d, was 1.27 min) and a moon cannot shape it.
 - EMLS SNR under correlated noise (audit item H11): the SNR is divided by a
   red-noise factor beta (Pont, Zucker & Queloz 2006), measured away from
   every transit and moon window by binning at the moon transit duration and

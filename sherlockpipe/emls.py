@@ -23,7 +23,8 @@ def parse_args(argv=None):
     ap.add_argument('--period_grid_size', type=int, default=10000, help="Number of moon periods searched.")
     ap.add_argument('--radius_grid_size', type=int, default=20, help="Number of moon radius templates.")
     ap.add_argument('--curve', type=int, default=None,
-                    help="Detrended curve number (lc_<curve>.csv). Default: the curve the candidate was found in.")
+                    help="SHERLOCK curve number (lc_<curve>.csv), used as is unless 0. Default: lc_0.csv, the curve "
+                         "before SHERLOCK detrending, detrended by EMLS with the moon windows masked.")
     ap.add_argument('--lc_file', default=None, help="Light curve CSV (time, flux, flux_err). Overrides --curve.")
     ap.add_argument('--no_fit', dest='use_fit', action='store_false',
                     help="Ignore the fit_[n] results even if they exist.")
@@ -41,6 +42,8 @@ def parse_args(argv=None):
                          "probability of the SNR. 0 skips them.")
     ap.add_argument('--fap_threshold', type=float, default=0.01,
                     help="False-alarm probability below which the best hypothesis is a detection.")
+    ap.add_argument('--detrend_window', type=float, default=None,
+                    help="Biweight window in days for the EMLS detrending of lc_0.csv. Default: 3 planet durations.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")
     return ap.parse_args(argv)
 
@@ -50,4 +53,4 @@ if __name__ == '__main__':
     run_emls(args.object_dir, args.candidate, args.mask_candidates, args.planet_mass, args.min_moon_radius,
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
              args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes,
-             args.null_runs, args.fap_threshold)
+             args.null_runs, args.fap_threshold, args.detrend_window)
