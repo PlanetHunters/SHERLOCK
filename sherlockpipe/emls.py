@@ -32,6 +32,9 @@ def parse_args(argv=None):
     ap.add_argument('--max_moon_density', type=float, default=5.5, help="Maximum moon density in g/cm3.")
     ap.add_argument('--subtract_mode', choices=['subtract', 'mask'], default='subtract',
                     help="Whether the planet transit is subtracted or masked.")
+    ap.add_argument('--ttv_prior_minutes', type=float, default=10.0,
+                    help="Timing variation in minutes allowed around the ephemeris in the per-transit t0 prior, "
+                         "on top of each transit's timing precision. 0 removes the prior.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")
     return ap.parse_args(argv)
 
@@ -40,4 +43,4 @@ if __name__ == '__main__':
     args = parse_args()
     run_emls(args.object_dir, args.candidate, args.mask_candidates, args.planet_mass, args.min_moon_radius,
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
-             args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time)
+             args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes)

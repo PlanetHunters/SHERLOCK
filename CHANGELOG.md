@@ -16,6 +16,35 @@
 
 ### Fixed
 
+- EMLS planet fit: the folded transit is fitted in duration, impact parameter
+  and radius (T14, b, rp) instead of a/R* bounded to 2 %, so a transit longer
+  than the catalog stellar density allows no longer leaves a moon-like
+  residual. On a/R* 15 % low, the fitted T14 is within 2 % and the stacked
+  residual below 5 % of the depth. The fit starts from several impact
+  parameters, because b, rp and T14 are degenerate for grazing transits.
+- EMLS: the moon durations and templates use the fitted a/R*, inclination
+  and impact parameter. The semi-major axis in AU still sets the Hill sphere
+  and the moon offsets.
+- EMLS: each transit's mid-time has a Gaussian prior around the linear
+  ephemeris, as wide as the transit's timing precision (Carter et al. 2008)
+  plus `--ttv_prior_minutes` (default 10). At 3 sigma per transit the timing
+  scatter falls from 1.8 to 0.7 times the Carter precision, while a 10-minute
+  TTV at SNR 30 is still fitted. Both per-transit fits bound t0 to half a
+  duration.
+- EMLS: a transit whose fit does not converge or whose t0 stops at its bound
+  is dropped and listed in `epochs_dropped_fit`. A per-transit radius at its
+  bound is kept and listed in `epochs_flagged_rp`. A fold fit at a bound is
+  warned about and recorded in `fold_fit`.
+- EMLS: a transit with a high in-transit residual RMS is kept and listed in
+  `epochs_flagged_rms` instead of being dropped, because a moon dip inside
+  the transit also raises it.
+- EMLS: the run measures how much of the best moon signal the planet fit
+  absorbs, by injecting it before the fit and repeating the fit, and records
+  it as `planet_fit_absorbed_fraction`. A moon within 0.3 T14 of the planet
+  loses 21 % of its depth with a radius bound of 0.05 R_earth, 63 % with
+  0.5 R_earth and 70 % with 2 R_earth, so the `fit_[N]` radius error, which
+  bounds the fold radius, matters.
+
 - EMLS: the planet fits and moon templates are averaged over the exposure
   (`exposure_time` in `ExoMoonLeastSquares`; in `sherlockpipe.emls`,
   `--exposure_time` or the median point spacing of the light curve). On

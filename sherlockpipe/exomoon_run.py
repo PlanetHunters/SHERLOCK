@@ -484,7 +484,7 @@ def _setup_logging(log_file):
 
 def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
-             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None):
+             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=10.0):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -508,6 +508,9 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         'subtract' or 'mask' for the planet transit, default 'subtract'.
     exposure_time : float, optional
         Exposure time in seconds. The median point spacing of the light curve when missing.
+    ttv_prior_minutes : float, optional
+        Timing variation in minutes allowed around the linear ephemeris, on top of each epoch's
+        timing precision, in the prior on the per-epoch t0. Default 10. None or 0 removes the prior.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -530,7 +533,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     try:
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
-                       subtract_mode, exposure_time)
+                       subtract_mode, exposure_time, ttv_prior_minutes)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -545,7 +548,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
-         radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time):
+         radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
+         ttv_prior_minutes=10.0):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -560,7 +564,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         moon["min_radius"], moon["max_radius"], inputs["t0s"], inputs["time"], inputs["flux"], inputs["flux_err"],
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
         subtract_mode=subtract_mode,
-        exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400)
+        exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400,
+        ttv_prior_width=ttv_prior_minutes / 1440 if ttv_prior_minutes else None)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -575,14 +580,21 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
     emls.run(plot=True)
     results = {
         "object_dir": os.path.abspath(object_dir), "candidate": candidate, "light_curve": inputs["lc_file"],
-        "masked_candidates": inputs["mask"], "star": star, "exposure_time_s": inputs["exposure_time"],
+        "masked_candidates": inputs["mask"], "ttv_prior_minutes": ttv_prior_minutes or None, "star": star,
+        "exposure_time_s": inputs["exposure_time"],
         "cadences": inputs["cadences"],
         "mixed_cadence": len(significant_cadences(inputs["cadences"])) > 1,
         "planet": planet,
         "moon_radius_range": moon, "sources": inputs["sources"], "period_grid_size": period_grid_size,
         "radius_grid_size": radius_grid_size, "epochs_in_span": len(inputs["t0s"]),
         "min_points_per_epoch": min_points, "epochs_kept": len(kept), "epochs_skipped": skipped,
-        "epochs_used": len(emls.bary_t0s), "max_snr": emls.max_snr, "max_sde": emls.max_sde,
+        "epochs_used": len(emls.bary_t0s), "epochs_dropped_fit": emls.epochs_dropped_fit,
+        "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
+        "planet_fit_absorbed_fraction": emls.absorbed_fraction,
+        "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,
+                     "impact": emls.planet_impact_param, "inc": emls.planet_inc,
+                     "a_over_rstar": emls.planet_a_over_rstar},
+        "max_snr": emls.max_snr, "max_sde": emls.max_sde,
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
         "best_radius": float(emls.best_snr_radius),
         "best_radius_above_range": bool(emls.best_snr_radius_above_range),

@@ -317,7 +317,7 @@ def test_nan_radius_error_gets_a_logged_default(tmp_path, caplog):
 def test_nan_radius_error_does_not_freeze_rp(tmp_path):
     curve = light_curve()
     fits = []
-    original = ExoMoonLeastSquares.fit_single_transit
+    original = ExoMoonLeastSquares.fit_fold_shape
 
     def spy(*args, **kwargs):
         result = original(*args, **kwargs)
@@ -326,7 +326,7 @@ def test_nan_radius_error_does_not_freeze_rp(tmp_path):
 
     emls = system(tmp_path, curve, radius_err=float('nan'))
     emls.planet_radius = PLANET_RADIUS * 1.05
-    with mock.patch.object(ExoMoonLeastSquares, 'fit_single_transit', staticmethod(spy)):
+    with mock.patch.object(ExoMoonLeastSquares, 'fit_fold_shape', staticmethod(spy)):
         emls.subtract_planet_transit(curve[1], curve[2], curve[3])
 
     assert fits[0][1] != fits[0][0]
@@ -335,14 +335,14 @@ def test_nan_radius_error_does_not_freeze_rp(tmp_path):
 def test_radius_error_above_the_radius_keeps_rp_positive(tmp_path):
     curve = light_curve()
     bounds = []
-    original = ExoMoonLeastSquares.fit_single_transit
+    original = ExoMoonLeastSquares.fit_fold_shape
 
     def spy(*args, **kwargs):
         bounds.append(args[4][3])
         return original(*args, **kwargs)
 
     emls = system(tmp_path, curve, radius_err=2 * PLANET_RADIUS)
-    with mock.patch.object(ExoMoonLeastSquares, 'fit_single_transit', staticmethod(spy)):
+    with mock.patch.object(ExoMoonLeastSquares, 'fit_fold_shape', staticmethod(spy)):
         emls.subtract_planet_transit(curve[1], curve[2], curve[3])
 
     assert bounds[0][0] > 0
@@ -359,7 +359,7 @@ def test_no_epochs_gives_an_explicit_error(tmp_path):
 
 
 def test_all_epochs_rejected_gives_the_same_error(tmp_path):
-    emls = system(tmp_path, max_subtraction_rms_ratio=1e-6)
+    emls = system(tmp_path, min_transit_completeness=1e6)
 
     with pytest.raises(exomoon.NoUsableEpochsError):
         emls.run()
@@ -421,7 +421,8 @@ def test_moon_orbit_follows_the_mass_in_the_grid(tmp_path):
     light = inputs[len(inputs) // 2]
     a_moon = ExoMoonLeastSquares.compute_semimajor_axis(37.5 * M_earth_to_M_sun, light.moon_period) * AU_TO_RSUN
     expected = ExoMoonLeastSquares.compute_moon_orbit_transit_duration(1.0, SMA * AU_TO_RSUN, PERIOD, a_moon,
-                                                                       4.0 * R_earth_to_R_sun, light.impact_param)
+                                                                       4.0 * R_earth_to_R_sun, light.impact_param,
+                                                                       emls.transit_semimajor_axis())
     assert light.half_moon_orbit_transit_duration == pytest.approx(expected / 2)
 
 
@@ -441,9 +442,11 @@ def grazing_fit(b):
     params.limb_dark = 'quadratic'
     time = np.arange(-0.4, 0.4, 2 / 1440)
     truth = batman.TransitModel(params, time).light_curve(params)
-    guess = [0.0, a, np.rad2deg(np.arccos(0.9 / a)), k]
-    bounds = [(-0.1, 0.1), (a * 0.98, a * 1.02), (85.0, 90.0), (k * 0.8, k * 1.2)]
-    _, model = ExoMoonLeastSquares.fit_single_transit(time, truth, np.full(len(time), 1e-4), guess, bounds, params)
+    t14 = ExoMoonLeastSquares.model_transit_duration(params, 0.4)
+    guess = [0.0, t14, 0.9, k]
+    bounds = [(-0.1, 0.1), (t14 / 2, 2 * t14), (0.0, 1 + 1.2 * k), (k * 0.8, k * 1.2)]
+    _, model, _, _ = ExoMoonLeastSquares.fit_fold_shape(time, truth, np.full(len(time), 1e-4), guess, bounds,
+                                                        params)
     return np.max(np.abs(model - truth)) / (1 - truth.min())
 
 
@@ -461,24 +464,22 @@ def test_lower_inclination_is_the_physical_limit():
     assert limit == pytest.approx(np.rad2deg(np.arccos(1.1 / 40.0)))
 
 
-def test_fold_inclination_bound_contains_the_guess_and_is_physical(tmp_path):
+def test_fold_bounds_contain_the_guess_and_reach_grazing(tmp_path):
     curve = light_curve()
     seen = []
-    original = ExoMoonLeastSquares.fit_single_transit
+    original = ExoMoonLeastSquares.fit_fold_shape
 
     def spy(*args, **kwargs):
         seen.append((args[3], args[4]))
         return original(*args, **kwargs)
 
     emls = system(tmp_path, curve, inc=87.0)
-    emls.planet_inc_err = 80.0
-    with mock.patch.object(ExoMoonLeastSquares, 'fit_single_transit', staticmethod(spy)):
+    with mock.patch.object(ExoMoonLeastSquares, 'fit_fold_shape', staticmethod(spy)):
         emls.subtract_planet_transit(curve[1], curve[2], curve[3])
 
     guess, bounds = seen[0]
-    limit = ExoMoonLeastSquares.min_transit_inclination(guess[1], guess[3], 0.0, 90.0)
-    assert bounds[2][0] <= guess[2] <= bounds[2][1]
-    assert bounds[2][0] == pytest.approx(min(guess[2], limit))
+    assert all(lower <= value <= upper for value, (lower, upper) in zip(guess, bounds))
+    assert bounds[2] == (0.0, pytest.approx(1 + bounds[3][1]))
 
 
 # --- H6, J1, J2: diagnostics -------------------------------------------------------------------------------------

@@ -65,7 +65,8 @@ def test_moon_templates_match_the_integrated_moon_at_30_minutes():
         assert np.max(np.abs(flux - truth)) < 0.01 * depth, f"radius {radius}"
 
 
-def in_transit_residual_rms(tmp_path, exposure):
+def subtract_30_minute_transits(tmp_path, exposure):
+    """Run the planet fit on 30-minute data; return the in-transit residual RMS, the noise and the fit."""
     noise = 5e-5
     params = planet_params()
     t0s = np.arange(6) * PERIOD
@@ -78,19 +79,23 @@ def in_transit_residual_rms(tmp_path, exposure):
     run_to_search(emls)
 
     in_transit = np.any([np.abs(emls.time - t0) < duration / 2 for t0 in emls.bary_t0s], axis=0)
-    return np.std(emls.flux[in_transit]), noise
+    return np.std(emls.flux[in_transit]), noise, emls
 
 
-def test_planet_subtraction_leaves_noise_on_30_minute_data(tmp_path):
-    """Without the exposure, part of a 30-minute transit is left in the data after subtraction."""
+def test_planet_fit_on_30_minute_data_needs_the_exposure(tmp_path):
+    """The free-shape fold fit (B1) hides most of the smearing in its residuals, but not in its geometry."""
     (tmp_path / 'averaged').mkdir()
     (tmp_path / 'instantaneous').mkdir()
+    true_t14 = ExoMoonLeastSquares.model_transit_duration(planet_params(), 1.0)
 
-    averaged, noise = in_transit_residual_rms(tmp_path / 'averaged', THIRTY_MINUTES)
-    instantaneous, _ = in_transit_residual_rms(tmp_path / 'instantaneous', None)
+    averaged, noise, with_exposure = subtract_30_minute_transits(tmp_path / 'averaged', THIRTY_MINUTES)
+    _, _, without_exposure = subtract_30_minute_transits(tmp_path / 'instantaneous', None)
 
     assert averaged < 1.15 * noise, f"averaged model leaves {averaged * 1e6:.1f} ppm"
-    assert instantaneous > 1.2 * averaged, f"instantaneous {instantaneous * 1e6:.1f} ppm"
+    averaged_error = abs(with_exposure.planet_duration / true_t14 - 1)
+    instantaneous_error = abs(without_exposure.planet_duration / true_t14 - 1)
+    assert averaged_error < 0.02
+    assert instantaneous_error > 2 * averaged_error
 
 
 def curve_with_spacing(directory, guard_time, spacings_s):
