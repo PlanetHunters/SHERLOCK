@@ -1,8 +1,3 @@
 include tox.ini sherlockpipe/properties.yaml sherlockpipe/maxsector.py
 graft sherlockpipe/resources
-graft sherlockpipe/ellc
-prune sherlockpipe/ellc/doc
-prune sherlockpipe/ellc/examples
-exclude sherlockpipe/ellc/.git
-exclude sherlockpipe/ellc/.gitignore
 global-exclude *.py[cod]

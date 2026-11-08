@@ -55,7 +55,7 @@ Always understand the user's question or command fully before writing any code. 
 
 ```
 sherlockpipe/
-├── __init__.py              # Builds ellc shared lib, patches SSL/requests
+├── __init__.py              # Patches SSL/requests
 ├── __main__.py              # Main CLI entrypoint
 ├── properties.yaml          # Default configuration template
 ├── search/
@@ -77,7 +77,6 @@ sherlockpipe/
 ├── search_zones/            # Habitable zone definitions
 ├── plot/                    # Plotting utilities
 ├── catalog/                 # Catalog helpers (MAST)
-├── ellc/                    # Bundled Fortran library (compiled to libellc.so)
 └── tests/ & regression_tests/
 ```
 
@@ -143,7 +142,7 @@ Sherlock([target]).run()
 ### Prerequisites
 
 - Python `>= 3.11`
-- System build tools: `make`, `gfortran`, `gcc` (to compile the bundled `ellc` Fortran library)
+- A Fortran compiler (`gfortran`): `ellc==1.9.0` is installed from its PyPI sdist and builds `libellc.so` with meson at install time
 - `conda` (tox-conda is used for tests)
 
 ### Conda Environment Setup
@@ -153,7 +152,7 @@ cd /path/to/SHERLOCK
 conda create -n sherlock311 python=3.11
 conda activate sherlock311
 
-# Install the package (triggers make for libellc.so)
+# Install the package (builds the ellc dependency, needs gfortran)
 pip install -e .
 # or install pinned deps first
 pip install -r requirements.txt

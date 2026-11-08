@@ -3,20 +3,10 @@ from setuptools.command.install import install
 import platform
 import os
 import shutil
-version = "1.6.1"
-import subprocess
+version = "1.6.2"
 
 with open("README.md", "r") as fh:
     long_description = fh.read()
-
-class CustomInstall(install):
-    def run(self):
-        here = os.path.abspath(os.path.dirname(__file__))
-        ellc_dir = os.path.join(here, 'sherlockpipe', 'ellc')
-        print(f"=== Running make in {ellc_dir} ===")
-        subprocess.check_call(['make', '-B'], cwd=ellc_dir)
-        shutil.copy(ellc_dir + '/libellc.so', os.path.join(ellc_dir, 'ellc') + '/libellc.so')
-        super().run()
 
 setuptools.setup(
     name="sherlockpipe", # Replace with your own username
@@ -27,7 +17,7 @@ setuptools.setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/franpoz/SHERLOCK",
-    packages=setuptools.find_packages() + ['sherlockpipe.ellc'],
+    packages=setuptools.find_packages(),
     include_package_data=True,
     license_files=['LICENSE'],
     classifiers=[
@@ -35,13 +25,13 @@ setuptools.setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
     ],
-    cmdclass={'install': CustomInstall},
     python_requires='>=3.11',
     install_requires=[
         "pandoramoon==1.3",
                         'astroplan==0.10.1',
-                        "alexfitter==1.2.20", # Fit
+                        "alexfitter==1.2.21", # Fit
                         'argparse==1.4.0', # All modules
+                        "ellc==1.9.0", # Light curve / RV models (Fortran, built with gfortran at install time)
                         'batman-package', # Single-transit models
                         "celerite==0.4.3", # Allesfitter dependency
                         "corner==2.2.3", # Allesfitter dependency
