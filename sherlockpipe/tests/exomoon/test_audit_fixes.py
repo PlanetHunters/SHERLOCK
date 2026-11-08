@@ -388,7 +388,8 @@ def test_alias_search_survives_a_period_commensurate_with_the_planet():
 
 
 def test_no_alias_keeps_the_starting_error():
-    assert ExoMoonLeastSquares.find_period_alias(10.0, 100.0, 50.0, 0.01) == (None, None, 0.01)
+    # 50 d is the k = -8 alias of 10 d around a 100 d planet; 10.37 d is no alias up to |k| = 30.
+    assert ExoMoonLeastSquares.find_period_alias(10.0, 100.0, 10.37, 0.01) == (None, None, 0.01)
 
 
 # --- G10: moon template geometry ---------------------------------------------------------------------------------

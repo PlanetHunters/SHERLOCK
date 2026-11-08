@@ -72,8 +72,7 @@ def test_reported_statistics_come_from_one_search(moon_run):
                              emls.planet_impact_param)
     result = emls.search(best, return_lc=True)
     assert result[3] == pytest.approx(emls.max_snr, rel=1e-9)
-    radius = ExoMoonLeastSquares.depth_to_radius(1 - np.min(result[-1]), emls.star_radius)
-    assert radius == pytest.approx(emls.best_snr_radius, rel=1e-9)
+    assert result[2] == pytest.approx(emls.best_snr_radius, rel=1e-9)
     assert emls.sde is not None and emls.sde > 0
 
 

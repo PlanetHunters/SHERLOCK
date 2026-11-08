@@ -629,6 +629,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "detected": emls.detected,
         "null_runs_requested": null_runs, "null_runs_completed": len(emls.null_snrs or []),
         "null_independent_offsets": emls.null_independent_offsets, "null_snrs": emls.null_snrs,
+        "alias_family": (emls.aliases or [])[:10],
+        "red_noise_factor": emls.red_noise_factor, "red_noise_measured": emls.red_noise_measured,
         "single_event": emls.single_event, "loo_snr_min": emls.loo_snr_min, "epoch_stats": emls.epoch_stats,
         "best_radius": float(emls.best_snr_radius),
         "best_radius_above_range": bool(emls.best_snr_radius_above_range),
@@ -640,8 +642,10 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "detected is fap < fap_threshold, or null without enough null runs. single_event flags a "
                  "signal that one transit carries (leaving one out keeps less than half the SNR); it does not "
                  "change detected. sde (SNR spectrum at the selected period) and max_sde (residual spectrum) "
-                 "are diagnostics that do not separate moons from noise. best_radius comes from the mean "
-                 "in-window depth and reads about 20 % low (audit item H13).",
+                 "are diagnostics that do not separate moons from noise. best_radius inverts the "
+                 "least-squares template amplitude through the template set (audit items H13, H14). The "
+                 "planet fit can absorb part of a moon inside the planet transit; see "
+                 "planet_fit_absorbed_fraction.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
         json.dump(_json_safe(results), file, indent=2, allow_nan=False)

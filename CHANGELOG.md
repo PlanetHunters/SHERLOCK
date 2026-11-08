@@ -17,6 +17,11 @@
   leave-one-out SNR at the best hypothesis are stored in `epoch_stats`.
   `single_event` is set when leaving one transit out keeps less than half the
   SNR, or with one transit; it does not change `detected`.
+- EMLS period aliases (audit item H9): `alias_family` in
+  `emls_results.json` lists the sampling aliases 1/P' = 1/P + k/P_planet of
+  the selected period inside the grid, |k| up to 30, with their SNR and SNR
+  below the best, and the log names those within 1 SNR. The injection alias
+  check also goes to |k| = 30.
 - `emls_results.json` records `fap`, `fap_empirical`, `fap_threshold`,
   `detected`, the null runs and their SNRs, `single_event`, `loo_snr_min`,
   `epoch_stats`, `sde` and the `sherlockpipe_version` (audit item I8).
@@ -33,6 +38,19 @@
 
 ### Fixed
 
+- EMLS SNR under correlated noise (audit item H11): the SNR is divided by a
+  red-noise factor beta (Pont, Zucker & Queloz 2006), measured away from
+  every transit and moon window by binning at the moon transit duration and
+  comparing adjacent bins with the white-noise expectation; beta below one is
+  set to one. With 20 % of the variance in AR(1) noise (0.1 d), runs above
+  SNR 5 fell from 19/20 to 0/20; white noise is unchanged (beta 1.03).
+  `emls_results.json` records `red_noise_factor` and `red_noise_measured`.
+- EMLS template amplitude and moon radius (audit items H13, H14): the
+  template amplitude is the weighted least-squares value, not the template
+  peak set to the mean depth (about 12 % low), and the radius is inverted
+  from it through the template set instead of sqrt(mean depth), which was
+  19 % low at b = 0.9. Noiseless moons now give the amplitude within 1 % and
+  the radius within 0.1 % for b up to 0.9.
 - EMLS reports one hypothesis (audit items H7, H8): the SNR selects the
   period and phase, and the SNR, the SDE of the SNR spectrum (`sde`, a
   diagnostic) and the radius all come from that hypothesis, so they reproduce
@@ -131,6 +149,14 @@
   hides a period; and the planet duration comes from the fitted model rather
   than from the data sampling.
 - EMLS catalog driver: KOI targets load and reach the search.
+
+### Removed
+
+- `sherlockpipe/resources/emls_ir/` (audit item I7): the EMLS injection-recovery
+  calibration built with the search before the audit fixes, with no provenance,
+  100 nulls per set behind 99.9 % thresholds, and no code reading it. EMLS now
+  computes a per-target false-alarm probability (`--null_runs`). The files,
+  including the injection grid `grid.json`, remain in the git history.
 
 ### Known limitations
 

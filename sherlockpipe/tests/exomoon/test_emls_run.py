@@ -266,6 +266,8 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
     assert len(results['epoch_stats']) == results['epochs_used']
     assert results['sde'] > 0
     assert results['sherlockpipe_version']
+    assert results['red_noise_factor'] >= 1
+    assert results['alias_family'][0]['period'] == pytest.approx(results['best_period'], rel=1e-9)
     assert results['best_radius_above_range'] is False
     assert results['best_radius_below_range'] is False
     assert not (tmp_path / 'emls_1' / 'stale.txt').exists()

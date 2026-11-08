@@ -91,6 +91,7 @@ class NoUsableEpochsError(ValueError):
 
 class ExoMoonLeastSquares:
     RECOVERY_PERIOD_TOLERANCE = 0.05
+    MAX_ALIAS_ORDER = 30
     SINGLE_EVENT_SNR_FRACTION = 0.5
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
@@ -273,6 +274,9 @@ class ExoMoonLeastSquares:
         self.recovered = None
         self.recovered_alias = None
         self.planet_rp_over_rstar = None
+        self.aliases = None
+        self.red_noise_factor = 1.0
+        self.red_noise_measured = None
         self.fold_fit_status = None
         self.planet_a_over_rstar = None
         self.absorbed_fraction = None
@@ -1602,7 +1606,7 @@ class ExoMoonLeastSquares:
                                          self.max_radius, self.star_radius, self.radius_grid_size))
         #oot_noise = np.std(oot_flux)
         #oot_noise = np.sqrt(np.std(oot_flux) * (np.sqrt(np.sum(oot_flux_err ** 2) / len(oot_flux_err))))
-        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux)
+        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux) / self.red_noise_factor
         if return_lc:
             return residual_calculation, residual_baseline, residual_radius, model_snr, it_time, it_flux, oot_time, oot_flux, residual_model
         else:
@@ -1769,20 +1773,37 @@ class ExoMoonLeastSquares:
         best_residual = residuals_baseline
         best_model = model_baseline
         if t0_flux_mean_value < 1:
+            # H13: the template amplitude is the weighted least-squares value against the deficit
+            # below the surrounding level, not the template peak forced to the mean depth.
+            # H14: the radius follows from that amplitude through the template set (depth scales
+            # with r^2 for a template of the same geometry and limb darkening), refined by moving
+            # to the template closest to the estimate, so impact parameter and limb darkening are
+            # inverted with the template, not assumed away by r = sqrt(mean depth).
+            deficit = (1 - t0_flux_mean_value) + np.mean(it_flux) - it_flux
+            weights = 1 / it_flux_err ** 2
             radius = np.sqrt(1 - t0_flux_mean_value) * star_radius / R_earth_to_R_sun
-            _, template_time, closest_model = min(models, key=lambda x: abs(x[0] - radius))
-            if len(closest_model) < 2 or len(template_time) != len(closest_model):
-                raise ValueError(f"Template time and flux must be aligned with at least two samples, got "
-                                 f"{len(template_time)} and {len(closest_model)}")
-            model_sample = np.interp(it_time, template_time, closest_model, left=1.0, right=1.0)
-            model_depth = 1.0 - np.min(model_sample)
-            if model_depth <= 0.0:
-                return residuals_baseline, residuals_baseline, 0.0, model_baseline, True
-            scale_factor = (t0_flux_mean_value - 1) / (np.min(model_sample) - 1)
-            model_sample_scaled = 1 + (model_sample - 1) * scale_factor
+            amplitude, shape = None, None
+            for _ in range(4):
+                template_radius, template_time, closest_model = min(models, key=lambda x: abs(x[0] - radius))
+                if len(closest_model) < 2 or len(template_time) != len(closest_model):
+                    raise ValueError(f"Template time and flux must be aligned with at least two samples, got "
+                                     f"{len(template_time)} and {len(closest_model)}")
+                shape = 1.0 - np.interp(it_time, template_time, closest_model, left=1.0, right=1.0)
+                norm = np.sum(weights * shape ** 2)
+                if not norm > 0:
+                    return residuals_baseline, residuals_baseline, 0.0, model_baseline, True
+                amplitude = np.sum(weights * deficit * shape) / norm
+                if not amplitude > 0:
+                    return residuals_baseline, residuals_baseline, 0.0, model_baseline, False
+                new_radius = template_radius * np.sqrt(amplitude)
+                if abs(new_radius - radius) < 1e-3 * radius:
+                    radius = new_radius
+                    break
+                radius = new_radius
+            model_sample_scaled = 1 - amplitude * shape
             it_radius_residuals = np.sum(((it_flux - model_sample_scaled) / it_flux_err) ** 2)
             best_residual = it_radius_residuals + oot_radius_residuals
-            best_radius = radius
+            best_radius = float(radius)
             best_model = model_sample_scaled
         return best_residual, residuals_baseline, best_radius, best_model, False
 
@@ -2221,7 +2242,7 @@ class ExoMoonLeastSquares:
             no alias beats start_error, and relative_error is then start_error.
         """
         alias_period, alias_k, min_error = None, None, start_error
-        for k in range(-5, 6):
+        for k in range(-ExoMoonLeastSquares.MAX_ALIAS_ORDER, ExoMoonLeastSquares.MAX_ALIAS_ORDER + 1):
             frequency = 1 / moon_period + k / planet_period
             if frequency <= 0:
                 continue
@@ -2441,6 +2462,113 @@ class ExoMoonLeastSquares:
                 alpha, snr = refined, float(refined_snr)
         return int(period_index), period, alpha, snr
 
+    def measure_red_noise(self, time, flux, exclusion, bin_width):
+        """Return the red-noise factor beta on the moon-window time scale (audit item H11).
+
+        The search SNR divides the depth by the point scatter over sqrt(N), which assumes
+        independent points. Following Pont, Zucker & Queloz (2006), the data away from every
+        planet epoch (by more than exclusion, so neither the planet nor a searched moon is
+        there) are binned at the moon transit duration, and beta is the scatter of the
+        differences between adjacent bins, over sqrt(2), divided by the white-noise expectation
+        sigma / sqrt(n). Adjacent differences ignore variability slower than two windows, which
+        the comparison of the moon window with its surroundings also cancels.
+
+        Parameters
+        ----------
+        time, flux : numpy.ndarray
+            Light curve, normalised to one.
+        exclusion : float
+            Half-width in days excluded around each planet epoch.
+        bin_width : float
+            Bin width in days, the moon transit duration.
+
+        Returns
+        -------
+        float or None
+            beta, or None when fewer than 10 pairs of adjacent bins are available.
+        """
+        order = np.argsort(time)
+        time, flux = np.asarray(time, dtype=float)[order], np.asarray(flux, dtype=float)[order]
+        epochs = self.planet_t0 + self.planet_period * np.arange(
+            np.floor((time[0] - self.planet_t0) / self.planet_period) - 1,
+            np.ceil((time[-1] - self.planet_t0) / self.planet_period) + 2)
+        nearest = np.min(np.abs(time[:, None] - epochs[None, :]), axis=1) if len(time) else np.array([])
+        keep = (nearest >= exclusion) & np.isfinite(flux)
+        time, flux = time[keep], flux[keep]
+        if len(time) < 20 or not bin_width > 0:
+            return None
+        index = np.floor((time - time[0]) / bin_width).astype(int)
+        bins, start, counts = np.unique(index, return_index=True, return_counts=True)
+        sums = np.add.reduceat(flux, start)
+        full = counts >= max(2, 0.5 * np.median(counts))
+        means = sums / counts
+        adjacent = full[:-1] & full[1:] & (np.diff(bins) == 1)
+        if np.count_nonzero(adjacent) < 10:
+            return None
+        binned_scatter = np.std(np.diff(means)[adjacent]) / np.sqrt(2)
+        sigma = np.std(flux)
+        if not sigma > 0:
+            return None
+        white = sigma / np.sqrt(np.mean(counts[full]))
+        return float(binned_scatter / white)
+
+    def set_red_noise_factor(self, before_trim):
+        """Measure beta (see `measure_red_noise`) on the light curve before trimming and set red_noise_factor.
+
+        The data within the widest moon window of every epoch are excluded. beta below one is
+        set to one, so the SNR is never raised. Without enough data the factor stays one.
+        """
+        max_period = self.au_to_period(np.max(self.planet_mass_grid) * M_earth_to_M_sun, self.compute_hill_radius(
+            self.star_mass, np.max(self.planet_mass_grid) * M_earth_to_M_sun, self.planet_semimajor_axis)) * 0.5
+        window = self.search_input(max_period, 0.0, self.planet_mass, max_period, self.planet_impact_param)
+        self.red_noise_measured = self.measure_red_noise(before_trim.time, before_trim.flux,
+                                                         window.half_moon_max_orbit_transit_duration,
+                                                         window.moon_transit_duration)
+        if self.red_noise_measured is None:
+            self.red_noise_factor = 1.0
+            logging.warning("Red-noise factor not measured: too little data away from the transits; the SNR "
+                            "assumes white noise")
+        else:
+            self.red_noise_factor = max(1.0, self.red_noise_measured)
+            logging.info("Red-noise factor beta = %.2f on the %.2f h moon-window scale (measured %.2f); the SNR "
+                         "is divided by it", self.red_noise_factor, window.moon_transit_duration * 24,
+                         self.red_noise_measured)
+
+    def alias_family(self, period_grid, snr_spectrum, best_period):
+        """Return the sampling aliases of the selected period with their SNR (audit item H9).
+
+        With one look per planet orbit, the moon phase at epoch n is alpha + 2 pi n P_p / P, so
+        every P' with 1 / P' = 1 / P + k / P_p gives the same phases and differs only through
+        the timing offsets; in close-in geometry the data barely prefer one of them. Each alias
+        inside the grid, |k| up to MAX_ALIAS_ORDER, is listed with the best SNR over alpha at
+        the nearest grid period and its SNR below the selected one, highest SNR first.
+
+        Returns
+        -------
+        list of dict
+            {"k", "period", "grid_period", "snr", "snr_below_best"} per alias, k = 0 included.
+        """
+        period_grid = np.asarray(period_grid, dtype=float)
+        snr_spectrum = np.asarray(snr_spectrum, dtype=float)
+        best_index = int(np.argmin(np.abs(np.log(period_grid / best_period))))
+        best_snr = snr_spectrum[best_index]
+        family = []
+        for k in range(-ExoMoonLeastSquares.MAX_ALIAS_ORDER, ExoMoonLeastSquares.MAX_ALIAS_ORDER + 1):
+            frequency = 1 / best_period + k / self.planet_period
+            if frequency <= 0:
+                continue
+            period = 1 / frequency
+            if not period_grid[0] <= period <= period_grid[-1]:
+                continue
+            index = int(np.argmin(np.abs(np.log(period_grid / period))))
+            snr = snr_spectrum[index]
+            family.append({"k": k, "period": float(period), "grid_period": float(period_grid[index]),
+                           "snr": float(snr) if np.isfinite(snr) else None,
+                           "snr_below_best": float(best_snr - snr) if np.isfinite(snr) and np.isfinite(best_snr)
+                           else None})
+        family.sort(key=lambda alias: -np.inf if alias["snr"] is None else -alias["snr"])
+        return family
+
     def null_offsets(self, trim_half_window, exclusion):
         """Offsets from each planet epoch, in days, at which a pseudo-epoch holds neither planet nor moon."""
         step = trim_half_window / 4
@@ -2533,6 +2661,7 @@ class ExoMoonLeastSquares:
         null.bary_t0s = list(epochs)
         null.null_runs = 0
         null.skip_fold_fit = True
+        null.red_noise_factor = self.red_noise_factor
         for name in ("planet_inc", "planet_impact_param", "planet_a_over_rstar", "planet_rp_over_rstar",
                      "planet_duration"):
             setattr(null, name, getattr(self, name))
@@ -2646,7 +2775,8 @@ class ExoMoonLeastSquares:
             split = self.split_scenarios(search_input, self.time, self.flux, self.flux_err, epochs) if epochs else None
             if split is None or len(split[2]) == 0 or len(split[5]) < 2:
                 return None, None
-            return float(np.mean(split[5]) - np.mean(split[2])), ExoMoonLeastSquares.box_snr(split[2], split[5])
+            return (float(np.mean(split[5]) - np.mean(split[2])),
+                    ExoMoonLeastSquares.box_snr(split[2], split[5]) / self.red_noise_factor)
 
         self.epoch_stats = []
         for t0 in self.bary_t0s:
@@ -2775,6 +2905,7 @@ class ExoMoonLeastSquares:
         before_planet_fit = copy.copy(self)
         self.time, self.flux, self.flux_err = self.subtract_planet_transit(self.time, self.flux, self.flux_err, mode=self.subtract_mode, plot=plot)
         self.build_search_templates()
+        self.set_red_noise_factor(before_trim)
         period_grid, alpha_grid, search_inputs, all_residuals = self.grid_search()
         alpha_grid_size = len(alpha_grid)
         no_data_count = sum(bool(np.isnan(all_residual[3])) for all_residual in all_residuals)
@@ -2995,24 +3126,21 @@ class ExoMoonLeastSquares:
         best_input = self.search_input(best_snr_period, best_snr_alpha, self.planet_mass, period_grid[-1],
                                        self.planet_impact_param)
         # The radius comes from the same hypothesis as the SNR and the SDE (audit item H8).
-        best_model = self.search(best_input, return_lc=True)[-1]
-        moon_radius = ExoMoonLeastSquares.depth_to_radius(1 - np.min(best_model), self.star_radius) \
-            if len(best_model) else 0.0
+        # H14: it is the template-inverted radius of the least-squares amplitude.
+        best_result = self.search(best_input, return_lc=True)
+        moon_radius = float(best_result[2]) if len(best_result[-1]) else 0.0
         self.best_snr_radius = moon_radius
-        # H15: the radius comes from the depth, so a dip deeper than the searched range is
+        # H15: the radius comes from the amplitude, so a dip deeper than the searched range is
         # reported as measured and flagged, not limited to max_radius.
         self.best_snr_radius_above_range = bool(moon_radius > self.max_radius)
         self.best_snr_radius_below_range = bool(0 < moon_radius < self.min_radius)
         if self.best_snr_radius_below_range:
             logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
-                            "dip is shallower than the smallest moon searched for. The radius is a mean-depth "
-                            "estimate that reads about 20%% low (audit item H13), so a moon just above the "
-                            "minimum can be flagged", moon_radius, self.min_radius)
+                            "dip is shallower than the smallest moon searched for", moon_radius, self.min_radius)
         if self.best_snr_radius_above_range:
             logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
                             "dip is deeper than any moon searched for, for example a planet residual or a "
-                            "stellar companion. The radius is a mean-depth estimate that reads about 20%% "
-                            "low (audit item H13)", moon_radius, self.max_radius)
+                            "stellar companion", moon_radius, self.max_radius)
         # The SDE of the SNR spectrum at the selected period, a diagnostic only (audit item H7).
         snr_spectrum_std = np.nanstd(snr_spectrum - snr_median)
         self.sde = float((snr_spectrum[best_snr_idx] - snr_median[best_snr_idx]) / snr_spectrum_std) \
@@ -3121,6 +3249,14 @@ class ExoMoonLeastSquares:
 
         self.max_snr = float(selected_snr)
         self.max_sde = float(SDE)
+        self.aliases = self.alias_family(period_grid, snr_spectrum, best_snr_period)
+        close = [alias for alias in self.aliases if alias["k"] != 0 and alias["snr_below_best"] is not None
+                 and alias["snr_below_best"] < 1]
+        if close:
+            logging.info("Period aliases within 1 SNR of the best (P=%.4f d): %s; the period is not identified "
+                         "among them (audit item H9)", best_snr_period,
+                         ", ".join(f"k={alias['k']} P={alias['period']:.4f} d SNR {alias['snr']:.2f}"
+                                   for alias in close[:5]))
         self.absorbed_fraction = self.measure_absorbed_fraction(before_planet_fit, best_input, rec_t0s)
         self.assess_single_event(best_input)
         if null_snrs is not None:

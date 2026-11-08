@@ -15,12 +15,14 @@ PERIOD = 10.0
 A_OVER_RSTAR = 20.0
 
 
-def evaluate_model(times, t0_flux_mean_value=0.9, template_time=V_TEMPLATE_TIME, template_flux=V_TEMPLATE_FLUX):
-    """Return the template fitted to flat data at the given timestamps."""
+def evaluate_model(times, t0_flux_mean_value=0.9, template_time=V_TEMPLATE_TIME, template_flux=V_TEMPLATE_FLUX,
+                   flux=None):
+    """Return the template fitted to the data at the given timestamps, flat at t0_flux_mean_value by default."""
     times = np.asarray(times, dtype=float)
+    flux = np.full(len(times), t0_flux_mean_value) if flux is None else np.asarray(flux, dtype=float)
     return ExoMoonLeastSquares.calculate_residuals(
         it_time=times,
-        it_flux=np.full(len(times), t0_flux_mean_value),
+        it_flux=flux,
         it_flux_err=np.full(len(times), 0.01),
         oot_time=np.array([]),
         oot_flux=np.array([]),
@@ -67,8 +69,15 @@ def test_identical_observation_times_receive_identical_template_flux():
     np.testing.assert_allclose(model, [0.9, 0.9, 0.9])
 
 
+def v_data(times):
+    """V-shaped data, so the least-squares template amplitude (audit item H13) is exactly the V's."""
+    flux = v_shape(np.asarray(times, dtype=float))
+    return dict(flux=flux, t0_flux_mean_value=float(np.mean(flux)))
+
+
 def test_template_is_evaluated_at_physical_timestamps():
-    model = evaluate_model([-2.0, -0.5, 0.0, 0.5, 2.0])[3]
+    times = [-2.0, -0.5, 0.0, 0.5, 2.0]
+    model = evaluate_model(times, **v_data(times))[3]
 
     np.testing.assert_allclose(model, [1.0, 0.95, 0.9, 0.95, 1.0])
 
@@ -83,8 +92,8 @@ def test_gaps_do_not_compress_templates():
     times = np.linspace(-1.5, 1.5, 61)
     retained = (times < 0.2) | (times > 0.9)
 
-    full_model = evaluate_model(times)[3]
-    gapped_model = evaluate_model(times[retained])[3]
+    full_model = evaluate_model(times, **v_data(times))[3]
+    gapped_model = evaluate_model(times[retained], **v_data(times[retained]))[3]
 
     np.testing.assert_allclose(full_model, v_shape(times), atol=1e-12)
     np.testing.assert_allclose(gapped_model, v_shape(times[retained]), atol=1e-12)

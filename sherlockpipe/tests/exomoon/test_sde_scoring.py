@@ -38,9 +38,16 @@ def test_no_dip_or_a_brightening_scores_as_the_null(mean_in_window):
 
 
 def test_dip_shallower_than_the_smallest_moon_is_fitted():
-    depth = (0.95 * R_earth_to_R_sun) ** 2  # shallower than min_radius = 1 R_earth around a 1 R_sun star
-
-    residual, baseline, radius, _, unusable = residuals_for(1 - depth)
+    # A dip with the template's shape at 0.95^2 of its depth: a 0.95 R_earth moon for the
+    # 1 R_earth template, below min_radius = 1 R_earth. The radius comes from the least-squares
+    # amplitude through the template (audit items H13, H14).
+    it_time = np.linspace(-0.1, 0.1, 200)
+    template_time = np.linspace(-0.2, 0.2, 401)
+    template = 1 - 1e-4 * np.clip(1 - np.abs(template_time) / 0.2, 0, None)
+    it_flux = 1 - 0.95 ** 2 * (1 - np.interp(it_time, template_time, template))
+    residual, baseline, radius, _, unusable = ExoMoonLeastSquares.calculate_residuals(
+        it_time, it_flux, np.full(len(it_time), 1e-4), np.linspace(0.2, 0.6, 400), np.ones(400), np.full(400, 1e-4),
+        float(np.mean(it_flux)), 600, [(1.0, template_time, template)], 1.0, 4.0, 1.0, 4)
 
     assert radius == pytest.approx(0.95, rel=1e-6)
     assert np.isfinite(residual) and residual < baseline
