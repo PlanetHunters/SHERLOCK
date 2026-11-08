@@ -251,8 +251,10 @@ def estimate_exposure_time(time, lc_file, exposure_time=None):
     The exposure is the median spacing between consecutive points of the whole curve. Mission
     exposures span their cadence, and a binned point spans its bin, so the spacing measures the
     exposure without the SHERLOCK configuration, whose EXPTIME only selects the downloaded data.
-    A curve that mixes cadences gets the cadence with the most points, and a warning names every
-    cadence that holds more than MIXED_CADENCE_SHARE of the points or of the time.
+    A curve that mixes cadences gets its median spacing, which follows the cadence with the most
+    points, and a warning names every cadence that holds more than MIXED_CADENCE_SHARE of the
+    points or of the time. With more than about half of the points removed at random, the median
+    can be twice the cadence; the warning then names both.
 
     Parameters
     ----------

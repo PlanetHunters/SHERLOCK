@@ -30,11 +30,11 @@
   The command measures one exposure for the whole curve as its median point
   spacing, which also covers binned curves. It does not read `EXPTIME` from
   `properties.yaml`, which only selects the downloaded cadences. A curve that
-  mixes cadences is modelled with the cadence that has the most points. The
-  run then warns and names each cadence with its share of the points and of
-  the time, which `emls_results.json` records as `cadences` and
-  `mixed_cadence`. A `--exposure_time` that matches none of the cadences is
-  warned about too.
+  mixes cadences is modelled with its median spacing, which follows the
+  cadence with the most points. The run then warns and names each cadence
+  with its share of the points and of the time, which `emls_results.json`
+  records as `cadences` and `mixed_cadence`. A `--exposure_time` that
+  matches none of the cadences is warned about too.
 - EMLS: the SDE spectrum no longer contains placeholder scores. A hypothesis
   without a dip, or with a brightening, scores exactly as the null, and every
   positive dip is fitted, including dips shallower than `min_radius`. A
