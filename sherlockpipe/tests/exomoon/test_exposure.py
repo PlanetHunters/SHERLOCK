@@ -134,16 +134,61 @@ def test_gaps_do_not_change_the_exposure(tmp_path):
         pytest.approx(600.0, rel=1e-6)
 
 
-def test_mixed_cadences_use_the_most_common_one(tmp_path, caplog):
+def sector(start, days, cadence_s):
+    return start + np.arange(0, days, cadence_s / 86400)
+
+
+@pytest.mark.parametrize('segments, median_s, other_s', [
+    # Kepler long cadence for four quarters and short cadence for one: the median follows the short one.
+    ([(0, 360, 1765.5), (400, 90, 58.85)], 58.85, 1765.5),
+    # TESS FFI at 600 s and 1800 s, as in a SHERLOCK run with EXPTIME [600, 1800].
+    ([(0, 36, 600.0), (40, 62, 1800.0)], 600.0, 1800.0),
+    # TESS 2 min for one sector and 30-minute FFIs for three.
+    ([(0, 27, 120.0), (30, 81, 1800.0)], 120.0, 1800.0),
+])
+def test_mixed_cadences_are_warned_and_recorded(segments, median_s, other_s, caplog):
+    time = np.concatenate([sector(*segment) for segment in segments])
+
+    with caplog.at_level(logging.INFO):
+        seconds, _, cadences = exomoon_run.estimate_exposure_time(time, 'lc_1.csv')
+
+    assert seconds == pytest.approx(median_s, rel=1e-3)
+    assert sorted(cadence['seconds'] for cadence in cadences) == pytest.approx(sorted([median_s, other_s]), rel=1e-3)
+    assert len(exomoon_run.significant_cadences(cadences)) == 2
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert any('mixes cadences' in message and f'{other_s:.1f} s' in message for message in warnings)
+
+
+def test_removed_points_and_gaps_are_not_cadences(caplog):
+    time = sector(0, 27, 120.0)
+    time = np.sort(np.random.default_rng(0).choice(time, int(0.7 * len(time)), replace=False))
+    time = time[(time % 13.7) > 1.0]  # a one-day gap every 13.7 days
+
+    with caplog.at_level(logging.WARNING):
+        seconds, _, cadences = exomoon_run.estimate_exposure_time(time, 'lc_1.csv')
+
+    assert seconds == pytest.approx(120.0, rel=1e-3)
+    assert [round(cadence['seconds']) for cadence in exomoon_run.significant_cadences(cadences)] == [120]
+    assert not caplog.records
+
+
+def test_single_cadence_is_not_warned(caplog):
+    with caplog.at_level(logging.WARNING):
+        seconds, _, cadences = exomoon_run.estimate_exposure_time(sector(0, 90, 1765.5), 'lc_1.csv')
+
+    assert seconds == pytest.approx(1765.5, rel=1e-6)
+    assert len(cadences) == 1 and cadences[0]['points_share'] == pytest.approx(1.0)
+    assert not caplog.records
+
+
+def test_results_record_the_cadences(tmp_path):
     _, time, _ = guard_directory(tmp_path)
     lc_file = curve_with_spacing(tmp_path, time, [120.0, 1800.0])
 
-    with caplog.at_level(logging.INFO):
-        inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
+    inputs = exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
 
     assert inputs['exposure_time'] == pytest.approx(120.0, rel=1e-6)
-    assert any(record.getMessage().startswith('Exposure time 120.0 s from the median point spacing')
-               for record in caplog.records)
+    assert [round(cadence['seconds']) for cadence in inputs['cadences']] == [120, 1800]
 
 
 def test_irregular_spacing_is_warned(tmp_path, caplog):
@@ -155,7 +200,15 @@ def test_irregular_spacing_is_warned(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         exomoon_run.build_inputs(str(tmp_path), 1, planet_mass=300.0, lc_file=lc_file)
 
-    assert any('may mix cadences' in record.getMessage() for record in caplog.records)
+    assert any('no regular cadence' in record.getMessage() for record in caplog.records)
+
+
+def test_user_exposure_off_the_data_is_warned(caplog):
+    with caplog.at_level(logging.WARNING):
+        seconds, source, _ = exomoon_run.estimate_exposure_time(sector(0, 27, 1800.0), 'lc_1.csv', 30)
+
+    assert (seconds, source) == (30.0, 'user')
+    assert any('matches none of the cadences' in record.getMessage() for record in caplog.records)
 
 
 def test_user_exposure_takes_precedence(tmp_path):
