@@ -2133,7 +2133,8 @@ class ExoMoonLeastSquares:
                 logging.disable(previous_disable)
             logging.info("Absorbed-fraction test: fold fit converged=%s, at bound: %s; %d of %d transits kept",
                          injected.fold_fit_status["converged"] if injected.fold_fit_status else None,
-                         ", ".join(injected.fold_fit_status["at_bound"]) if injected.fold_fit_status else "-",
+                         (", ".join(injected.fold_fit_status["at_bound"]) or "none") if injected.fold_fit_status
+                         else "-",
                          len(injected.bary_t0s), len(before_planet_fit.bary_t0s))
             # All three depths cover the epochs both fits kept.
             epochs = [t0 for t0 in self.bary_t0s if t0 in set(injected.bary_t0s)]
