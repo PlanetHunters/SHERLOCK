@@ -27,9 +27,13 @@
   and the moon offsets.
 - EMLS: each transit's mid-time has a Gaussian prior around the linear
   ephemeris, as wide as the transit's timing precision (Carter et al. 2008)
-  plus `--ttv_prior_minutes` (default 10). At 3 sigma per transit the timing
-  scatter falls from 1.8 to 0.7 times the Carter precision, while a 10-minute
-  TTV at SNR 30 is still fitted. Both per-transit fits bound t0 to half a
+  plus the largest planet TTV a searched moon can cause: the heaviest moon
+  (largest radius at the largest density) on the widest searched orbit
+  (half the Hill period) moves the planet a_m M_m / (M_p + M_m) from the
+  barycentre. `--ttv_prior_minutes` overrides it, and 0 removes the prior;
+  `emls_results.json` records the value used. With a 10-minute allowance,
+  the timing scatter at 3 sigma per transit falls from 1.8 to 0.7 times the
+  Carter precision, while a 10-minute TTV at SNR 30 is still fitted. Both per-transit fits bound t0 to half a
   duration. The width counts the measurement noise in the prior as well as in
   the likelihood, so it is a heuristic regularisation: a low-SNR transit is
   pulled about halfway to the ephemeris.

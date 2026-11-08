@@ -32,9 +32,10 @@ def parse_args(argv=None):
     ap.add_argument('--max_moon_density', type=float, default=5.5, help="Maximum moon density in g/cm3.")
     ap.add_argument('--subtract_mode', choices=['subtract', 'mask'], default='subtract',
                     help="Whether the planet transit is subtracted or masked.")
-    ap.add_argument('--ttv_prior_minutes', type=float, default=10.0,
+    ap.add_argument('--ttv_prior_minutes', type=float, default=None,
                     help="Timing variation in minutes allowed around the ephemeris in the per-transit t0 prior, "
-                         "on top of each transit's timing precision. 0 removes the prior.")
+                         "on top of each transit's timing precision. Default: the largest planet TTV a searched "
+                         "moon can cause. 0 removes the prior.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")
     return ap.parse_args(argv)
 

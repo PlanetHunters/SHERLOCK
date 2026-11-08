@@ -484,7 +484,7 @@ def _setup_logging(log_file):
 
 def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
-             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=10.0):
+             max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -510,7 +510,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         Exposure time in seconds. The median point spacing of the light curve when missing.
     ttv_prior_minutes : float, optional
         Timing variation in minutes allowed around the linear ephemeris, on top of each epoch's
-        timing precision, in the prior on the per-epoch t0. Default 10. None or 0 removes the prior.
+        timing precision, in the prior on the per-epoch t0. Default None: the largest planet TTV
+        a searched moon can cause. 0 removes the prior.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -549,7 +550,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
-         ttv_prior_minutes=10.0):
+         ttv_prior_minutes=None):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -565,7 +566,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
         subtract_mode=subtract_mode,
         exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400,
-        ttv_prior_width=ttv_prior_minutes / 1440 if ttv_prior_minutes else None)
+        ttv_prior_width="auto" if ttv_prior_minutes is None else (ttv_prior_minutes / 1440 if ttv_prior_minutes
+                                                                  else None))
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -580,7 +582,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
     emls.run(plot=True)
     results = {
         "object_dir": os.path.abspath(object_dir), "candidate": candidate, "light_curve": inputs["lc_file"],
-        "masked_candidates": inputs["mask"], "ttv_prior_minutes": ttv_prior_minutes or None, "star": star,
+        "masked_candidates": inputs["mask"], "star": star,
         "exposure_time_s": inputs["exposure_time"],
         "cadences": inputs["cadences"],
         "mixed_cadence": len(significant_cadences(inputs["cadences"])) > 1,
@@ -590,6 +592,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "min_points_per_epoch": min_points, "epochs_kept": len(kept), "epochs_skipped": skipped,
         "epochs_used": len(emls.bary_t0s), "epochs_dropped_fit": emls.epochs_dropped_fit,
         "epochs_dropped_coverage": emls.epochs_dropped_coverage,
+        "ttv_prior_minutes": None if emls.ttv_prior_width_used is None else emls.ttv_prior_width_used * 1440,
+        "ttv_prior_source": "auto: largest TTV of a searched moon" if ttv_prior_minutes is None
+        else ("none" if not ttv_prior_minutes else "user"),
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,

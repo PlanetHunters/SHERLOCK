@@ -9,6 +9,7 @@ import batman
 import numpy as np
 import pytest
 
+import sherlockpipe.exomoon as exomoon
 from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, NoUsableEpochsError, R_earth_to_R_sun
 from sherlockpipe.tests.exomoon.test_audit_fixes import LD, PERIOD, PLANET_RADIUS, SMA, run_to_search
 
@@ -118,7 +119,8 @@ def test_low_snr_epochs_stay_near_the_ephemeris(tmp_path):
     depth = truth.rp ** 2
     noise = np.sqrt(t14(truth) / CADENCE) * depth / 3  # SNR 3 per epoch
     data = curve(truth, epochs=30, noise=noise, seed=4)
-    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, min_transit_completeness=0)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, min_transit_completeness=0,
+                    ttv_prior_width=10 / 1440)
 
     emls.subtract_planet_transit(*data[1:])
 
@@ -132,11 +134,45 @@ def test_ttvs_are_still_fitted_at_high_snr(tmp_path):
     noise = np.sqrt(t14(truth) / CADENCE) * truth.rp ** 2 / 30  # SNR 30 per epoch
     shifts = np.where(np.arange(12) % 2 == 0, 10, -10) / 1440
     data = curve(truth, noise=noise, shifts=shifts, seed=2)
-    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=10 / 1440)
 
     emls.subtract_planet_transit(*data[1:])
 
     assert np.median(np.abs(np.array(emls.ttvs) - shifts)) < 2 / 1440
+
+
+def test_allowed_ttv_is_the_largest_a_searched_moon_can_cause(tmp_path):
+    truth = planet_params()
+    emls = emls_for(tmp_path, curve(truth, epochs=3), t14(truth))
+    planet_mass = 300.0
+    mass = planet_mass * 3.0034893e-06
+    moon_mass = 5.5 / exomoon.EARTH_DENSITY * 4.0 ** 3
+    hill_period = ExoMoonLeastSquares.au_to_period(mass, ExoMoonLeastSquares.compute_hill_radius(1.0, mass, SMA))
+    moon_a = ExoMoonLeastSquares.compute_semimajor_axis(mass, hill_period / 2)
+    planet_shift_au = moon_a * moon_mass / (planet_mass + moon_mass)  # distance to the barycentre
+    expected = planet_shift_au * PERIOD / (2 * np.pi * SMA)
+
+    assert emls.max_moon_ttv() == pytest.approx(expected, rel=1e-6)
+    emls.max_radius = 1.0
+    assert emls.max_moon_ttv() == pytest.approx(expected * (1 / 64) * (planet_mass + moon_mass)
+                                                / (planet_mass + moon_mass / 64), rel=1e-6)
+
+
+def test_default_prior_uses_the_largest_moon_ttv(tmp_path):
+    truth = planet_params()
+    data = curve(truth, epochs=3)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True)
+
+    emls.subtract_planet_transit(*data[1:])
+
+    assert emls.ttv_prior_width_used == pytest.approx(emls.max_moon_ttv())
+
+
+@pytest.mark.parametrize('width', [0, -1.0, float('nan'), 'fixed'])
+def test_invalid_ttv_width_is_rejected(tmp_path, width):
+    truth = planet_params()
+    with pytest.raises(ValueError, match='ttv_prior_width'):
+        emls_for(tmp_path, curve(truth, epochs=3), t14(truth), ttv_prior_width=width)
 
 
 # --- C4: epochs whose t0 stops at its bound are dropped ------------------------------------------------------------

@@ -79,7 +79,7 @@ class ExoMoonLeastSquares:
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
-                  ttv_prior_width: float = 10 / 1440):
+                  ttv_prior_width="auto"):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -154,10 +154,11 @@ class ExoMoonLeastSquares:
         exposure_time : float, optional
             Exposure time of each data point in days. The planet fits and the moon
             templates are averaged over it. Default None, an instantaneous model.
-        ttv_prior_width : float, optional
+        ttv_prior_width : float, "auto" or None, optional
             Timing variation in days allowed around the linear ephemeris, on top of the
             timing precision of each epoch, in the Gaussian prior on the per-epoch t0.
-            Default 10 minutes. None fits t0 without a prior.
+            Default "auto": the largest planet TTV that a searched moon can cause (see
+            `max_moon_ttv`). None fits t0 without a prior.
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -196,9 +197,12 @@ class ExoMoonLeastSquares:
         if exposure_time is not None and not (np.isfinite(exposure_time) and 0 < exposure_time <= 1):
             raise ValueError(f"exposure_time must be a positive number of days up to 1, got {exposure_time}")
         self.exposure_time = exposure_time
-        if ttv_prior_width is not None and not (np.isfinite(ttv_prior_width) and ttv_prior_width > 0):
-            raise ValueError(f"ttv_prior_width must be a positive number of days or None, got {ttv_prior_width}")
+        if not (ttv_prior_width is None or ttv_prior_width == "auto"
+                or (isinstance(ttv_prior_width, (int, float)) and np.isfinite(ttv_prior_width) and ttv_prior_width > 0)):
+            raise ValueError(f"ttv_prior_width must be a positive number of days, 'auto' or None, got "
+                             f"{ttv_prior_width}")
         self.ttv_prior_width = ttv_prior_width
+        self.ttv_prior_width_used = None
         self.fold_fit_status = None
         self.planet_a_over_rstar = None
         self.absorbed_fraction = None
@@ -793,6 +797,33 @@ class ExoMoonLeastSquares:
         distance_factor = (1 - ecc ** 2) / (1 + ecc * np.sin(np.deg2rad(arg_periastron)))
         return np.rad2deg(np.arccos(np.clip((1 + rp_over_rstar) / (a_over_rstar * distance_factor), 0, 1)))
 
+    def max_moon_ttv(self, planet_mass=None):
+        """Return the largest planet TTV, in days, that a moon in this search can cause.
+
+        The planet orbits the planet-moon barycentre, a_m M_m / (M_p + M_m) away, so it crosses
+        the star that distance divided by its orbital velocity v_p early or late. The largest
+        moon mass is the largest searched radius at the largest moon density, and the widest
+        orbit is the outer limit of the period grid, half the Hill period.
+
+        Parameters
+        ----------
+        planet_mass : float, optional
+            Planet mass in Earth masses. Defaults to the largest of the planet mass grid.
+
+        Returns
+        -------
+        float
+            TTV amplitude in days.
+        """
+        planet_mass = np.max(self.planet_mass_grid) if planet_mass is None else planet_mass
+        mass = planet_mass * M_earth_to_M_sun
+        moon_mass = self.max_moon_density / EARTH_DENSITY * self.max_radius ** 3  # Earth masses
+        widest_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
+                                                                         self.planet_semimajor_axis)) * 0.5
+        moon_a = self.compute_semimajor_axis(mass, widest_period)
+        offset = self.compute_max_moon_offset(moon_a, self.planet_semimajor_axis, self.planet_period)
+        return float(offset * moon_mass / (planet_mass + moon_mass))
+
     @staticmethod
     def ingress_duration(transit_params, t14):
         """Return the ingress duration (T14 - T23) / 2 in days, or T14 / 2 for a grazing transit.
@@ -824,14 +855,15 @@ class ExoMoonLeastSquares:
         """Return the width of the ephemeris prior on one epoch's t0 (audit item C1).
 
         The width combines the timing precision of the epoch (Carter et al. 2008, Eq. 43:
-        sigma = T / Q * sqrt(tau / 2T), with Q = sqrt(N_in) depth / noise) with ttv_prior_width,
-        the timing variation allowed beyond it, so a moon-induced TTV is still fitted.
+        sigma = T / Q * sqrt(tau / 2T), with Q = sqrt(N_in) depth / noise) with the timing
+        variation allowed beyond it (ttv_prior_width_used, by default `max_moon_ttv`), so a
+        moon-induced TTV is still fitted.
 
         This is a heuristic regularisation, not a prior on the true mid-time: the likelihood
         already holds the measurement noise, so including it in the width counts it twice. A
         low-SNR epoch is therefore pulled about halfway to the ephemeris, not onto it, while at
         high SNR the prior has no effect. A prior on the true t0 would use the ephemeris
-        uncertainty at that epoch plus ttv_prior_width.
+        uncertainty at that epoch plus the allowed timing variation.
 
         Parameters
         ----------
@@ -847,10 +879,10 @@ class ExoMoonLeastSquares:
         Returns
         -------
         float or None
-            Width in days, or None when there is no prior (ttv_prior_width is None) or the epoch
+            Width in days, or None when there is no prior (ttv_prior_width None) or the epoch
             has too few points to measure its noise.
         """
-        if self.ttv_prior_width is None:
+        if self.ttv_prior_width_used is None:
             return None
         t14 = self.planet_duration
         in_transit = np.abs(epoch_time) < t14 / 2
@@ -862,7 +894,7 @@ class ExoMoonLeastSquares:
             return None
         q = np.sqrt(np.sum(in_transit)) * depth / noise
         timing = t14 / q * np.sqrt(ingress / (2 * t14))
-        return float(np.hypot(timing, self.ttv_prior_width))
+        return float(np.hypot(timing, self.ttv_prior_width_used))
 
     def normalise_epochs(self, time, flux, flux_err, min_points=10):
         """Divide each epoch by its out-of-transit median, so the planet fits see a unit baseline.
@@ -1032,6 +1064,15 @@ class ExoMoonLeastSquares:
         self.epochs_flagged_rp = []
         self.epochs_dropped_coverage = []
         ingress = ExoMoonLeastSquares.ingress_duration(params, self.planet_duration)
+        if self.ttv_prior_width == "auto":
+            self.ttv_prior_width_used = self.max_moon_ttv()
+            logging.info("TTV allowed by the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth "
+                         "at %.1f g/cm3 on the widest searched orbit)", self.ttv_prior_width_used * 1440,
+                         self.max_radius, self.max_moon_density)
+        else:
+            self.ttv_prior_width_used = self.ttv_prior_width
+            if self.ttv_prior_width is not None:
+                logging.info("TTV allowed by the t0 prior: %.1f min (given)", self.ttv_prior_width * 1440)
         for t0 in self.bary_t0s:
             mask = np.abs(time - t0) < duration_window
             intransit_indexes = np.argwhere(np.abs(time - t0) < duration_window).flatten()
