@@ -30,7 +30,9 @@
   plus `--ttv_prior_minutes` (default 10). At 3 sigma per transit the timing
   scatter falls from 1.8 to 0.7 times the Carter precision, while a 10-minute
   TTV at SNR 30 is still fitted. Both per-transit fits bound t0 to half a
-  duration.
+  duration. The width counts the measurement noise in the prior as well as in
+  the likelihood, so it is a heuristic regularisation: a low-SNR transit is
+  pulled about halfway to the ephemeris.
 - EMLS: a transit whose fit does not converge or whose t0 stops at its bound
   is dropped and listed in `epochs_dropped_fit`. A per-transit radius at its
   bound is kept and listed in `epochs_flagged_rp`. A fold fit at a bound is
@@ -39,8 +41,9 @@
   `epochs_flagged_rms` instead of being dropped, because a moon dip inside
   the transit also raises it.
 - EMLS: the run measures how much of the best moon signal the planet fit
-  absorbs, by injecting it before the fit and repeating the fit, and records
-  it as `planet_fit_absorbed_fraction`. A moon within 0.3 T14 of the planet
+  absorbs, by injecting it with the fitted geometry before the fit and
+  repeating the fit, and records it as `planet_fit_absorbed_fraction`. When
+  the data already contain that moon, the value is a lower bound. A moon within 0.3 T14 of the planet
   loses 21 % of its depth with a radius bound of 0.05 R_earth, 63 % with
   0.5 R_earth and 70 % with 2 R_earth, so the `fit_[N]` radius error, which
   bounds the fold radius, matters.

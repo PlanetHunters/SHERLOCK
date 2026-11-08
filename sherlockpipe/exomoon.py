@@ -205,6 +205,7 @@ class ExoMoonLeastSquares:
         self.epochs_dropped_fit = []
         self.epochs_flagged_rms = []
         self.epochs_flagged_rp = []
+        self.epochs_dropped_coverage = []
         self.bary_t0s = []
         for i, bary_t0 in enumerate(t0s):
             mask = np.abs(time - bary_t0) < self.planet_duration * 2
@@ -826,6 +827,12 @@ class ExoMoonLeastSquares:
         sigma = T / Q * sqrt(tau / 2T), with Q = sqrt(N_in) depth / noise) with ttv_prior_width,
         the timing variation allowed beyond it, so a moon-induced TTV is still fitted.
 
+        This is a heuristic regularisation, not a prior on the true mid-time: the likelihood
+        already holds the measurement noise, so including it in the width counts it twice. A
+        low-SNR epoch is therefore pulled about halfway to the ephemeris, not onto it, while at
+        high SNR the prior has no effect. A prior on the true t0 would use the ephemeris
+        uncertainty at that epoch plus ttv_prior_width.
+
         Parameters
         ----------
         epoch_time : numpy.ndarray
@@ -1023,6 +1030,7 @@ class ExoMoonLeastSquares:
         self.epochs_dropped_fit = []
         self.epochs_flagged_rms = []
         self.epochs_flagged_rp = []
+        self.epochs_dropped_coverage = []
         ingress = ExoMoonLeastSquares.ingress_duration(params, self.planet_duration)
         for t0 in self.bary_t0s:
             mask = np.abs(time - t0) < duration_window
@@ -1049,8 +1057,8 @@ class ExoMoonLeastSquares:
             # means extra depth, such as a moon inside the transit, which the bound keeps out of
             # the planet model (audit item B3).
             if status is not None and (not status["converged"] or "t0" in status["at_bound"]):
-                logging.info("  Rejecting transit T0=%.4f: epoch fit did not converge cleanly (converged=%s, "
-                             "at bound: %s)", t0, status["converged"], ", ".join(status["at_bound"]) or "none")
+                logging.info("  Rejecting transit T0=%.4f: epoch fit not usable (converged=%s, at bound: %s)", t0,
+                             status["converged"], ", ".join(status["at_bound"]) or "none")
                 rejected_t0s.append(t0)
                 self.epochs_dropped_fit.append({"t0": float(t0), "converged": status["converged"],
                                                 "at_bound": status["at_bound"]})
@@ -1082,10 +1090,14 @@ class ExoMoonLeastSquares:
                         logging.info("  Rejecting transit T0=%.4f: incomplete in-transit coverage (%d pts vs %.0f expected)",
                                      best_t0, n_in_transit, n_expected)
                         rejected_t0s.append(t0)
+                        self.epochs_dropped_coverage.append({"t0": float(t0), "points": int(n_in_transit),
+                                                             "expected": float(n_expected)})
                 elif incomplete and t0 not in rejected_t0s:
                     logging.info("  Rejecting transit T0=%.4f: incomplete in-transit coverage (%d pts vs %.0f expected)",
                                  best_t0, n_in_transit, n_expected)
                     rejected_t0s.append(t0)
+                    self.epochs_dropped_coverage.append({"t0": float(t0), "points": int(n_in_transit),
+                                                         "expected": float(n_expected)})
                 if plot:
                     suffix = "_rejected" if t0 in rejected_t0s else "_sub"
                     view_dir = os.path.join(self.object_dir, "t0s_view")
@@ -1136,9 +1148,12 @@ class ExoMoonLeastSquares:
                 result_model = result_model[~intransit_mask_local]
                 if result_flux_err is not None:
                     result_flux_err = result_flux_err[~intransit_mask_local]
+        if len(rejected_t0s) > 0 or self.epochs_flagged_rms or self.epochs_flagged_rp:
+            logging.info("Dropped %d/%d transits: %d epoch fits at a bound or not converged, %d with incomplete "
+                         "coverage; kept and flagged: %d for the residual RMS, %d for rp at its bound",
+                         len(rejected_t0s), len(self.bary_t0s), len(self.epochs_dropped_fit),
+                         len(self.epochs_dropped_coverage), len(self.epochs_flagged_rms), len(self.epochs_flagged_rp))
         if len(rejected_t0s) > 0:
-            logging.info("Rejected %d/%d transits due to poor subtraction quality",
-                         len(rejected_t0s), len(self.bary_t0s))
             self.bary_t0s = [t0 for t0 in self.bary_t0s if t0 not in rejected_t0s]
             self.ttvs = [ttv for t0, ttv in zip(ttv_t0s, self.ttvs) if t0 not in rejected_t0s]
             self.require_usable_epochs()
@@ -2075,9 +2090,12 @@ class ExoMoonLeastSquares:
         """Measure the fraction of the best moon signal that the planet fit absorbs (audit item B3).
 
         A moon that stays inside the planet transit looks like extra planet depth, so the planet
-        fit takes part of it. The best hypothesis is injected into the data before the planet fit
-        and the fit is repeated. The absorbed fraction is one minus the depth gained in the moon
-        window after the fit, over the depth gained when the moon is added after the fit.
+        fit takes part of it. The best hypothesis, with the fitted transit geometry, is injected into
+        the data before the planet fit and the fit is repeated. The absorbed fraction is one minus
+        the depth gained in the moon window after the fit, over the depth gained when the moon is
+        added after the fit, over the epochs both fits kept. It assumes the absorption is linear.
+        When the data already contain this moon, it measures the absorption of a second copy, which
+        is a lower bound once the first copy has pushed the planet radius to its bound.
 
         Parameters
         ----------
@@ -2097,18 +2115,32 @@ class ExoMoonLeastSquares:
             else self.min_radius
         radius = max(radius, self.min_radius)
         try:
-            original = self.window_depth(best_input, self.time, self.flux, self.flux_err, self.bary_t0s)
-            added = self.window_depth(best_input, self.time, self.flux + self.moon_signal(self.time, moon_t0s, radius)
-                                      - 1, self.flux_err, self.bary_t0s)
             injected = copy.copy(before_planet_fit)
-            with tempfile.TemporaryDirectory() as plots_dir:
-                injected.object_dir = plots_dir
-                flux = before_planet_fit.flux + before_planet_fit.moon_signal(before_planet_fit.time, moon_t0s,
-                                                                              radius) - 1
-                time, flux, flux_err = injected.subtract_planet_transit(before_planet_fit.time, flux,
-                                                                        before_planet_fit.flux_err,
-                                                                        mode=self.subtract_mode)
-            fitted = self.window_depth(best_input, time, flux, flux_err, injected.bary_t0s)
+            logging.info("Absorbed-fraction test: repeating the planet fit with the best moon (%.2f R_earth) "
+                         "injected; its own fit messages are not logged", radius)
+            previous_disable = logging.root.manager.disable
+            logging.disable(logging.WARNING)
+            try:
+                with tempfile.TemporaryDirectory() as plots_dir:
+                    injected.object_dir = plots_dir
+                    # The injected and the reference moon both use the fitted geometry, so they are
+                    # the same signal; the copy still holds the input geometry.
+                    flux = before_planet_fit.flux + self.moon_signal(before_planet_fit.time, moon_t0s, radius) - 1
+                    time, flux, flux_err = injected.subtract_planet_transit(before_planet_fit.time, flux,
+                                                                            before_planet_fit.flux_err,
+                                                                            mode=self.subtract_mode)
+            finally:
+                logging.disable(previous_disable)
+            logging.info("Absorbed-fraction test: fold fit converged=%s, at bound: %s; %d of %d transits kept",
+                         injected.fold_fit_status["converged"] if injected.fold_fit_status else None,
+                         ", ".join(injected.fold_fit_status["at_bound"]) if injected.fold_fit_status else "-",
+                         len(injected.bary_t0s), len(before_planet_fit.bary_t0s))
+            # All three depths cover the epochs both fits kept.
+            epochs = [t0 for t0 in self.bary_t0s if t0 in set(injected.bary_t0s)]
+            original = self.window_depth(best_input, self.time, self.flux, self.flux_err, epochs)
+            added = self.window_depth(best_input, self.time, self.flux + self.moon_signal(self.time, moon_t0s, radius)
+                                      - 1, self.flux_err, epochs)
+            fitted = self.window_depth(best_input, time, flux, flux_err, epochs)
         except Exception as error:
             logging.warning("Could not measure the moon fraction absorbed by the planet fit: %s", error)
             return None
@@ -2117,8 +2149,9 @@ class ExoMoonLeastSquares:
             return None
         absorbed = float(1 - (fitted - original) / (added - original))
         logging.info("The planet fit absorbs %.0f%% of the best moon signal (%.2f R_earth, injected at the best "
-                     "period and phase); the reported radius and SNR are biased low by that much in depth",
-                     100 * absorbed, radius)
+                     "period and phase); the reported radius and SNR are biased low by that much in depth. If the "
+                     "data already hold this moon, the value is a lower bound, because the planet radius may "
+                     "already sit at its bound", 100 * absorbed, radius)
         return absorbed
 
     def transit_semimajor_axis(self):

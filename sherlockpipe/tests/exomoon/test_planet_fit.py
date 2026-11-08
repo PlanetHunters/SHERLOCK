@@ -9,7 +9,7 @@ import batman
 import numpy as np
 import pytest
 
-from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, R_earth_to_R_sun
+from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, NoUsableEpochsError, R_earth_to_R_sun
 from sherlockpipe.tests.exomoon.test_audit_fixes import LD, PERIOD, PLANET_RADIUS, SMA, run_to_search
 
 CADENCE = 4 / 1440
@@ -193,18 +193,28 @@ def moon_times(emls, search_input):
     return times
 
 
-def absorbed_fraction(tmp_path, offset_t14, radius_err, moon_radius=3.0):
-    """Absorbed fraction for a moon whose largest offset from the planet is offset_t14 transit durations."""
-    truth = planet_params()
+def absorbed_fraction(tmp_path, offset_t14, radius_err, moon_radius=3.0, impact=0.0, catalog_impact=None):
+    """Absorbed fraction for a moon whose largest offset from the planet is offset_t14 transit durations.
+
+    The data follow `impact`; the search is given `catalog_impact` (default: the truth).
+    """
+    truth = planet_params(impact=impact)
     duration = t14(truth)
     planet_a = SMA * AU_TO_RSUN
     moon_a = offset_t14 * duration * 2 * np.pi * planet_a / PERIOD / AU_TO_RSUN
     moon_period = ExoMoonLeastSquares.au_to_period(300.0 * 3.0034893e-06, moon_a)
     data = curve(truth, epochs=24, noise=3e-4)
-    emls = emls_for(tmp_path, data, duration)
+    catalog_impact = impact if catalog_impact is None else catalog_impact
+    emls = emls_for(tmp_path, data, t14(planet_params(impact=catalog_impact)),
+                    inc=np.rad2deg(np.arccos(catalog_impact / planet_a)), impact=catalog_impact)
     emls.planet_radius_err = radius_err
-    hypothesis = emls.search_input(moon_period, 1.0, 300.0, moon_period, 0.0)
-    flux = data[2] + emls.moon_signal(data[1], moon_times(emls, hypothesis), moon_radius) - 1
+    hypothesis = emls.search_input(moon_period, 1.0, 300.0, moon_period, impact)
+    moon = planet_params(impact=impact, rp=moon_radius * R_earth_to_R_sun)
+    flux = data[2].copy()
+    for moon_t0 in moon_times(emls, hypothesis):
+        window = np.abs(data[1] - moon_t0) < PERIOD / 2
+        moon.t0 = moon_t0
+        flux[window] *= batman.TransitModel(moon, data[1][window]).light_curve(moon)
     emls.flux = flux
     before = __import__('copy').copy(emls)
     emls.time, emls.flux, emls.flux_err = emls.subtract_planet_transit(data[1], flux, data[3])
@@ -221,8 +231,40 @@ def test_planet_fit_absorbs_a_close_moon_more_than_a_wide_one(tmp_path):
     assert wide < 0.5 * close
 
 
+def test_absorbed_fraction_does_not_depend_on_the_catalog_geometry(tmp_path):
+    (tmp_path / 'known').mkdir()
+    (tmp_path / 'central').mkdir()
+    known = absorbed_fraction(tmp_path / 'known', 0.3, 0.5, impact=0.6)
+    central = absorbed_fraction(tmp_path / 'central', 0.3, 0.5, impact=0.6, catalog_impact=0.0)
+
+    assert central == pytest.approx(known, abs=0.03)
+
+
 def test_tighter_radius_bound_absorbs_less(tmp_path):
     tight = absorbed_fraction(tmp_path, 0.3, 0.05)
     loose = absorbed_fraction(tmp_path, 0.3, 2.0)
 
     assert tight < loose
+
+
+def test_coverage_drops_are_listed_with_their_reason(tmp_path):
+    truth = planet_params()
+    data = curve(truth)
+    emls = emls_for(tmp_path, data, t14(truth), min_transit_completeness=1e6)
+
+    with pytest.raises(NoUsableEpochsError):
+        emls.subtract_planet_transit(*data[1:])
+
+    assert len(emls.epochs_dropped_coverage) == 12
+    assert all(epoch['points'] < epoch['expected'] for epoch in emls.epochs_dropped_coverage)
+
+
+def test_absorbed_fraction_run_does_not_log_its_own_fit(tmp_path, caplog):
+    import logging
+    with caplog.at_level(logging.INFO):
+        absorbed_fraction(tmp_path, 1.5, 0.5)
+
+    messages = [record.getMessage() for record in caplog.records]
+    start = next(i for i, message in enumerate(messages) if message.startswith('Absorbed-fraction test: repeating'))
+    assert messages[start + 1].startswith('Absorbed-fraction test: fold fit')
+    assert logging.root.manager.disable == logging.NOTSET
