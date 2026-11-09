@@ -586,6 +586,25 @@ class ExoMoonLeastSquares:
                     ", so the input eccentricity or periastron does not match the transit" if level == logging.WARNING
                     else "")
 
+    def injection_a_over_rstar(self):
+        """Return the a / R* for the Pandora injection, so that its planet crosses the star at `planet_speed`.
+
+        Pandora moves the planet at 2 pi a / P over `conjunction_time_factor` at conjunction (same e and w
+        convention), so a = v_p P ctf / (2 pi) gives the injected planet the input T14 and b, and the
+        injected moon the offsets a_m / v_p that the search assumes. With the input a, e and w the injected
+        moon would orbit a planet faster or slower than the one in the light curve. Without a transit speed
+        (no chord or duration) this is the input a.
+        """
+        input_a = self.planet_semimajor_axis * AU_TO_RSUN / self.star_radius
+        a_over_rstar = self.planet_speed() / self.star_radius * self.planet_period * \
+            self.conjunction_time_factor() / (2 * np.pi)
+        ratio = a_over_rstar / input_a
+        level = logging.WARNING if abs(ratio - 1) > ExoMoonLeastSquares.SPEED_MISMATCH else logging.INFO
+        logging.log(level, "Pandora injection a/R* %.2f from the transit planet speed; the input a gives %.2f "
+                    "(ratio %.2f)%s", a_over_rstar, input_a, ratio,
+                    ", so the input a, e or w does not match the transit" if level == logging.WARNING else "")
+        return float(a_over_rstar)
+
     def check_fitted_duration(self):
         """Warn when the fold-fitted T14 differs from the input one, which sets the planet speed."""
         self._speed_logged = False  # the speed may change with the fitted geometry, so it is logged again
@@ -2428,8 +2447,7 @@ class ExoMoonLeastSquares:
         params.u2 = self.ab[1]
         # planet parameters
         params.per_bary = self.planet_period  # [days]
-        params.a_bary = self.planet_semimajor_axis / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun,
-                                                                                     u.au)  # [R_star]
+        params.a_bary = self.injection_a_over_rstar()  # [R_star]
         params.r_planet = self.planet_radius / star_radius_rearth  # [R_star]
         params.b_bary = self.planet_impact_param  # [0..1]
         params.t0_bary = self.planet_t0  # [days]

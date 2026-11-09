@@ -117,6 +117,25 @@ def test_moon_offsets_follow_the_transit_duration_not_the_input_eccentricity(tmp
     assert any(r.levelno == logging.WARNING and 'does not match the transit' in r.getMessage() for r in caplog.records)
 
 
+@pytest.mark.parametrize('ecc, w, warned', [(0.15, 0.0, True), (0.46, 270.0, False)])
+def test_pandora_injection_crosses_the_star_in_the_input_t14(tmp_path, caplog, ecc, w, warned):
+    """Kepler-1514 b case again: with the assumed e = 0.15 the input a would make the injected planet
+    1.65 times too fast. The injection a/R* follows the transit speed, so Pandora's planet has the input
+    T14 and its moon the offsets the search assumes."""
+    true_t14 = planet_t14(11.2, 217.8, 0.46, 270.0)
+    emls = system(tmp_path, JUPITER, 11.2, 217.8, ecc=ecc, w=w, duration=true_t14)
+    time = np.linspace(-1.0, 1.0, 40001)
+
+    with caplog.at_level(logging.INFO):
+        emls.inject_moon(time, np.ones_like(time), np.full(len(time), 1e-4), emls.bary_t0s,
+                         emls.planet_semimajor_axis, ecc, 1.0, 5.0, 0.1, inject_planet=False, inject_moon=True)
+
+    in_transit = time[np.asarray(emls.injected_flux_planet_pandora) < 1 - 1e-9]
+    assert in_transit.max() - in_transit.min() == pytest.approx(true_t14, rel=0.01)
+    assert any((r.levelno == logging.WARNING) == warned and 'Pandora injection a/R*' in r.getMessage()
+               for r in caplog.records)
+
+
 def test_fitted_duration_far_from_the_input_is_flagged(tmp_path, caplog):
     emls = system(tmp_path, NEPTUNE, 3.9, 30.0)
     emls.planet_duration = emls.catalog_planet_duration * 1.2

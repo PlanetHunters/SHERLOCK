@@ -62,6 +62,14 @@
   regression now injects its Pandora moon on the orbit the observed T14 and
   b give (a/R* 67.7), not on the logg-based one (62.2), whose speed the
   planet in the data does not have.
+- EMLS injection geometry: `inject_moon` sets Pandora's a/R* to
+  v_p P sqrt(1 - e^2) / (1 + e sin w) / (2 pi) with the same transit planet
+  speed, so the injected planet crosses the star in the input T14 and the
+  injected moon has the offsets a_m / v_p the search assumes, for any e and
+  w (checked against Pandora to 0.1 %). With the input a, an assumed e or w
+  injected a moon around a planet faster or slower than the one in the light
+  curve (1.65 times faster on Kepler-1514 b), so injection-recovery tested
+  another system. The log gives both a/R* and warns above 10 %.
 - EMLS moon window on the planet transit (audit item G17):
   `planet_overlap_fraction` (share of epochs where the best moon window
   touches the planet transit), `planet_overlap_mean`, `best_tau` and
