@@ -424,7 +424,8 @@ def test_moon_orbit_follows_the_mass_in_the_grid(tmp_path):
     expected = ExoMoonLeastSquares.compute_moon_orbit_transit_duration(1.0, SMA * AU_TO_RSUN, PERIOD, a_moon,
                                                                        4.0 * R_earth_to_R_sun, light.impact_param,
                                                                        emls.transit_semimajor_axis())
-    assert light.half_moon_orbit_transit_duration == pytest.approx(expected / 2)
+    # The offsets use the chord over the input T14, within 1e-3 of the circular speed here.
+    assert light.half_moon_orbit_transit_duration == pytest.approx(expected / 2, rel=1e-3)
 
 
 # --- B10, B9: grazing geometry -----------------------------------------------------------------------------------

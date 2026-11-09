@@ -46,6 +46,22 @@
   moon offsets a_m / v_p scale with the planet speed at conjunction,
   sqrt(1 - e^2) / (1 + e sin w), so the window matches the eccentric template
   (within 2 % of batman T14 at e = 0.3).
+- EMLS moon offsets a_m / v_p use the planet speed measured by the input
+  transit fit, v_p = 2 R* sqrt((1 + Rp/R*)^2 - b^2) / T14, instead of
+  2 pi a / P with the input e and w, which catalogs rarely fit. On
+  Kepler-1514 b the catalog duration is 1.65 times what the assumed e = 0.15,
+  w = 0 give, so the offsets were 1.65 times too short and an injected 10 d
+  moon was found at 19-21 d; it is now found at 9.6-9.8 d or a sampling
+  alias of 10 d. The log compares this speed with the one from a, e and w
+  and warns above 10 %; the fold-fitted T14 only checks the input one and
+  warns above 10 %. A search duration is no T14 (`duration_from_fit=False`,
+  set by `python -m sherlockpipe.emls` when the duration comes from
+  candidates.csv and not from a fit): then the speed is 2 pi a / P with e and
+  w until the fold fit, and the fold fit's T14 and b after it. The
+  eccentricity still sets the Domingos stability limit. The real Kepler-706 b
+  regression now injects its Pandora moon on the orbit the observed T14 and
+  b give (a/R* 67.7), not on the logg-based one (62.2), whose speed the
+  planet in the data does not have.
 - EMLS moon window on the planet transit (audit item G17):
   `planet_overlap_fraction` (share of epochs where the best moon window
   touches the planet transit), `planet_overlap_mean`, `best_tau` and

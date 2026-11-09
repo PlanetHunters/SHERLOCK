@@ -607,7 +607,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         ttv_prior_width="auto" if ttv_prior_minutes is None else (ttv_prior_minutes / 1440 if ttv_prior_minutes
                                                                   else None),
         planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,
-        fap_threshold=fap_threshold,
+        fap_threshold=fap_threshold, duration_from_fit=inputs["sources"].get("duration") != "candidates.csv",
         detrend_window=(DETREND_DURATIONS * planet["duration"] if detrend_window is None else float(detrend_window))
         if inputs["detrend"] else None)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.

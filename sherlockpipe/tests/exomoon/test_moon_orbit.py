@@ -1,8 +1,8 @@
 """Moon orbit model: audit items G3, G4, G5, G6, G11, G12, G14, G17 and G19.
 
 G5/G6: the outer moon orbit is the Domingos et al. (2006) prograde limit with the planet
-eccentricity. G11: moon durations and offsets scale with the eccentric planet speed at
-conjunction. G12: the dead moon inclination, eccentricity and periastron fields are gone; the
+eccentricity. G11: moon durations follow the eccentric transit geometry and the offsets a_m / v_p use the planet
+speed measured by the input T14 and b. G12: the dead moon inclination, eccentricity and periastron fields are gone; the
 model is coplanar and circular. G3/G4/G14: the run logs where that screening model stops holding.
 G17: the best window's overlap with the planet transit and whether its period is constrained.
 G19: the default period grid is 10000 periods.
@@ -20,11 +20,12 @@ SUN = 1.0
 JUPITER, NEPTUNE = 317.8, 17.15
 
 
-def system(tmp_path, planet_mass, planet_radius, period, ecc=0.0, w=90.0, max_radius=None):
+def system(tmp_path, planet_mass, planet_radius, period, ecc=0.0, w=90.0, max_radius=None, duration=None):
     """An EMLS instance around the Sun with data only to satisfy the constructor."""
     a_au = ExoMoonLeastSquares.compute_semimajor_axis(SUN, period)
     a_over_rstar = a_au * AU_TO_RSUN
-    duration = period / np.pi * np.arcsin((1 + planet_radius * R_earth_to_R_sun) / a_over_rstar)
+    if duration is None:
+        duration = period / np.pi * np.arcsin((1 + planet_radius * R_earth_to_R_sun) / a_over_rstar)
     t0s = np.arange(4) * period
     time = np.concatenate([t0 + np.arange(-2.0, 2.0, 10 / 1440) for t0 in t0s])
     flux = np.ones_like(time)
@@ -67,10 +68,20 @@ def test_no_stable_orbit_for_a_very_eccentric_planet():
 
 # --- G11 ---------------------------------------------------------------------------------------------------------
 
+def planet_t14(planet_radius, period, ecc, w):
+    """The batman T14 of a planet around the Sun on the given orbit."""
+    params = batman.TransitParams()
+    params.t0, params.per, params.rp = 0.0, period, planet_radius * R_earth_to_R_sun
+    params.a = ExoMoonLeastSquares.compute_semimajor_axis(SUN, period) * AU_TO_RSUN
+    params.inc, params.ecc, params.w, params.u, params.limb_dark = 90.0, ecc, w, [0.4, 0.2], 'quadratic'
+    return ExoMoonLeastSquares.model_transit_duration(params, 1.0)
+
+
 @pytest.mark.parametrize('ecc, w', [(0.3, 90.0), (0.3, 270.0), (0.15, 90.0)])
 def test_moon_window_follows_the_eccentric_planet_speed(tmp_path, ecc, w):
-    """Acceptance (0.3, 90): the window is within 2 % of the batman T14 with the same orbit."""
-    emls = system(tmp_path, NEPTUNE, 3.9, 30.0, ecc=ecc, w=w)
+    """Acceptance (0.3, 90): the window is within 2 % of the batman T14 with the same orbit, and the
+    offset is a_m over the eccentric planet speed when the input T14 is the true one."""
+    emls = system(tmp_path, NEPTUNE, 3.9, 30.0, ecc=ecc, w=w, duration=planet_t14(3.9, 30.0, ecc, w))
     period = emls.max_moon_period(NEPTUNE)
     hypothesis = emls.search_input(period, 0.0, NEPTUNE, period, 0.0)
     moon = batman.TransitParams()
@@ -80,11 +91,40 @@ def test_moon_window_follows_the_eccentric_planet_speed(tmp_path, ecc, w):
     true_duration = ExoMoonLeastSquares.model_transit_duration(moon, 1.0)
 
     assert hypothesis.moon_transit_duration == pytest.approx(true_duration, rel=0.02)
-    # The offset is a_m over the planet speed at conjunction.
     a_moon = ExoMoonLeastSquares.compute_semimajor_axis(NEPTUNE * M_earth_to_M_sun, period)
     speed = 2 * np.pi * emls.planet_semimajor_axis / 30.0 * (1 + ecc * np.sin(np.deg2rad(w))) / np.sqrt(1 - ecc ** 2)
     tau = hypothesis.half_moon_orbit_transit_duration - hypothesis.half_moon_transit_duration
-    assert tau == pytest.approx(a_moon / speed, rel=1e-6)
+    # The transit speed is the chord over T14, which the sampled batman T14 gives to about 1 %.
+    assert tau == pytest.approx(a_moon / speed, rel=0.015)
+
+
+def test_moon_offsets_follow_the_transit_duration_not_the_input_eccentricity(tmp_path, caplog):
+    """Kepler-1514 b case: the catalog e and w are assumed, and the observed T14 is 1.65 times what they
+    give. The offsets use the planet speed from T14 and b, and the mismatch is logged."""
+    true_t14 = planet_t14(11.2, 217.8, 0.46, 270.0)
+    assumed = system(tmp_path, JUPITER, 11.2, 217.8, ecc=0.15, w=0.0, duration=true_t14)
+    truth = system(tmp_path, JUPITER, 11.2, 217.8, ecc=0.46, w=270.0, duration=true_t14)
+    period = 10.0
+
+    with caplog.at_level(logging.INFO):
+        offsets = [emls.moon_offset(ExoMoonLeastSquares.compute_semimajor_axis(JUPITER * M_earth_to_M_sun, period))
+                   for emls in (assumed, truth)]
+        assumed.log_planet_speed()
+
+    assert offsets[0] == pytest.approx(offsets[1], rel=1e-9)
+    assert assumed.keplerian_planet_speed() / assumed.planet_speed() == pytest.approx(1.65, abs=0.05)
+    assert truth.keplerian_planet_speed() / truth.planet_speed() == pytest.approx(1.0, abs=0.02)
+    assert any(r.levelno == logging.WARNING and 'does not match the transit' in r.getMessage() for r in caplog.records)
+
+
+def test_fitted_duration_far_from_the_input_is_flagged(tmp_path, caplog):
+    emls = system(tmp_path, NEPTUNE, 3.9, 30.0)
+    emls.planet_duration = emls.catalog_planet_duration * 1.2
+
+    with caplog.at_level(logging.INFO):
+        emls.check_fitted_duration()
+
+    assert any(r.levelno == logging.WARNING and 'Fitted T14' in r.getMessage() for r in caplog.records)
 
 
 # --- G12 ---------------------------------------------------------------------------------------------------------
@@ -151,3 +191,16 @@ def test_default_period_grid_is_10000(tmp_path):
                                   0.2, 2.0, emls.bary_t0s, emls.time, emls.flux, emls.flux_err, 5.5)
 
     assert default.period_grid_size == 10000
+
+
+def test_search_duration_gives_way_to_the_fold_fit(tmp_path):
+    """A TLS search duration (about 0.8 T14) is no T14: the speed is Keplerian until the fold fit,
+    then the fitted T14 and b."""
+    true_t14 = planet_t14(3.9, 30.0, 0.0, 90.0)
+    emls = system(tmp_path, NEPTUNE, 3.9, 30.0, duration=0.8 * true_t14)
+    emls.duration_from_fit = False
+
+    assert emls.planet_speed() == pytest.approx(emls.keplerian_planet_speed(), rel=1e-12)
+    emls.planet_a_over_rstar, emls.planet_rp_over_rstar = 60.0, 3.9 * R_earth_to_R_sun
+    emls.planet_duration, emls.planet_impact_param = true_t14, 0.0
+    assert emls.planet_speed() == pytest.approx(emls.keplerian_planet_speed(), rel=0.01)

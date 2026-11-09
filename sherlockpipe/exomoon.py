@@ -93,6 +93,7 @@ class NoUsableEpochsError(ValueError):
 class ExoMoonLeastSquares:
     RECOVERY_PERIOD_TOLERANCE = 0.05
     MAX_ALIAS_ORDER = 30
+    SPEED_MISMATCH = 0.1
     SINGLE_EVENT_SNR_FRACTION = 0.5
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
@@ -111,7 +112,7 @@ class ExoMoonLeastSquares:
                   min_transit_completeness: float = 0.5,
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
-                  fap_threshold=0.01, null_seed=0, detrend_window=None):
+                  fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -215,6 +216,11 @@ class ExoMoonLeastSquares:
             Biweight window in days. When given, the light curve is taken as undetrended and
             `run` detrends it with every moon window masked (audit item A1), after any injected
             moon is added (audit item A2). Default None: the curve is already detrended.
+        duration_from_fit : bool, optional
+            True (default) when planet_duration and planet_impact_param come from a transit fit,
+            such as a catalog: their speed across the star sets the moon offsets. False for a
+            search duration, such as a TLS one: the offsets use 2 pi a / P with e and w until the
+            fold fit, then its T14 and b.
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -238,6 +244,11 @@ class ExoMoonLeastSquares:
         self.planet_ecc_err = planet_ecc_err
         self.planet_arg_periastron = planet_arg_periastron
         self.planet_impact_param = planet_impact_param
+        # The input (catalog) transit fit sets the planet speed across the star for the moon offsets.
+        self.catalog_planet_duration = planet_duration
+        self.catalog_impact_param = planet_impact_param
+        self.duration_from_fit = bool(duration_from_fit)
+        self._speed_logged = False
         self.time = time
         self.flux = flux
         self.flux_err = flux_err
@@ -469,11 +480,9 @@ class ExoMoonLeastSquares:
         mass = planet_mass * M_earth_to_M_sun
         widest = self.max_moon_period(planet_mass)
         moon_a = self.compute_semimajor_axis(mass, widest)
-        tau = self.conjunction_time_factor() * self.compute_max_moon_offset(moon_a, self.planet_semimajor_axis,
-                                                                            self.planet_period)
-        speed_ratio = (moon_a / widest) / (self.planet_semimajor_axis / self.planet_period)
-        # The planet moves 1 / factor faster at conjunction, so the moon/planet speed ratio scales by it.
-        epsilon = float(tau * speed_ratio * self.conjunction_time_factor() / self.planet_duration)
+        tau = self.moon_offset(moon_a)
+        speed_ratio = 2 * np.pi * moon_a * AU_TO_RSUN / widest / self.planet_speed()
+        epsilon = float(tau * speed_ratio / self.planet_duration)
         q = forecast_moon_mass(self.max_radius, self.max_moon_density) / planet_mass
         offset_error = float(1 - (1 + q) ** (-2 / 3))
         self.model_validity = {"epsilon": epsilon, "q": float(q), "offset_error": offset_error}
@@ -522,6 +531,71 @@ class ExoMoonLeastSquares:
         """
         ecc = self.planet_ecc or 0.0
         return float(np.sqrt(1 - ecc ** 2) / (1 + ecc * np.sin(np.deg2rad(self.planet_arg_periastron or 0.0))))
+
+    def planet_speed(self):
+        """Return the planet speed across the star at mid-transit, in solar radii per day.
+
+        It comes from the input (catalog) transit fit: the planet crosses the chord
+        2 R* sqrt((1 + Rp/R*)^2 - b^2) in the transit duration T14. With a search duration
+        (duration_from_fit False) the fold fit's T14 and b are used once it has run. That speed is what the
+        catalog fit measured, whatever the eccentricity, while 2 pi a / P times
+        `conjunction_time_factor` needs e and w, which catalogs rarely fit. If the inputs give no
+        chord or duration, the Keplerian speed with e and w is used instead.
+        """
+        k = self.planet_radius * R_earth_to_R_sun / self.star_radius
+        if self.duration_from_fit:
+            b, duration = self.catalog_impact_param or 0.0, self.catalog_planet_duration
+        elif self.planet_a_over_rstar is not None:
+            # A search duration is no T14: after the fold fit, its T14 and b measure the speed.
+            b, duration = self.planet_impact_param or 0.0, self.planet_duration
+            k = self.planet_rp_over_rstar or k
+        else:
+            return self.keplerian_planet_speed()
+        chord_sq = (1 + k) ** 2 - b ** 2
+        if duration is not None and duration > 0 and chord_sq > 0:
+            return 2 * self.star_radius * np.sqrt(chord_sq) / duration
+        return self.keplerian_planet_speed()
+
+    def keplerian_planet_speed(self):
+        """Return 2 pi a / P over `conjunction_time_factor`, the speed the input a, e and w imply, in R_sun per day."""
+        return 2 * np.pi * self.planet_semimajor_axis * AU_TO_RSUN / self.planet_period / \
+            self.conjunction_time_factor()
+
+    def moon_offset(self, moon_semimajor_axis):
+        """Return the largest moon-planet transit time offset a_m / v_p in days, a_m in AU."""
+        return moon_semimajor_axis * AU_TO_RSUN / self.planet_speed()
+
+    def log_planet_speed(self):
+        """Log the planet speed from the transit duration and how far the input a, e and w are from it."""
+        if self._speed_logged:
+            return
+        self._speed_logged = True
+        speed, keplerian = self.planet_speed(), self.keplerian_planet_speed()
+        ratio = keplerian / speed
+        level = logging.WARNING if abs(ratio - 1) > ExoMoonLeastSquares.SPEED_MISMATCH else logging.INFO
+        if self.duration_from_fit:
+            source = "the input T14 %.4f d and b %.3f" % (self.catalog_planet_duration, self.catalog_impact_param or 0.0)
+        elif self.planet_a_over_rstar is not None:
+            source = "the fold-fitted T14 %.4f d and b %.3f (the input duration is a search duration)" % (
+                self.planet_duration, self.planet_impact_param or 0.0)
+        else:
+            source = "2 pi a / P with e and w until the fold fit (the input duration is a search duration)"
+        logging.log(level, "Planet speed across the star from %s: %.3f R_sun/d; the input a, e = %.2f and w = %.0f deg "
+                    "imply %.3f R_sun/d (ratio %.2f)%s. Moon offsets a_m / v_p use the transit speed", source, speed,
+                    self.planet_ecc or 0.0, self.planet_arg_periastron or 0.0, keplerian, ratio,
+                    ", so the input eccentricity or periastron does not match the transit" if level == logging.WARNING
+                    else "")
+
+    def check_fitted_duration(self):
+        """Warn when the fold-fitted T14 differs from the input one, which sets the planet speed."""
+        self._speed_logged = False  # the speed may change with the fitted geometry, so it is logged again
+        if not self.duration_from_fit or self.catalog_planet_duration is None or self.catalog_planet_duration <= 0:
+            return
+        difference = self.planet_duration / self.catalog_planet_duration - 1
+        level = logging.WARNING if abs(difference) > ExoMoonLeastSquares.SPEED_MISMATCH else logging.INFO
+        logging.log(level, "Fitted T14 %.4f d against the input %.4f d (%+.1f%%)%s", self.planet_duration,
+                    self.catalog_planet_duration, 100 * difference,
+                    "; the moon offsets use the input duration, so check it" if level == logging.WARNING else "")
 
     def max_moon_period(self, planet_mass):
         """Return the period in days of the widest stable prograde moon orbit for a planet mass in Earth masses."""
@@ -1488,7 +1562,9 @@ class ExoMoonLeastSquares:
                 self.planet_duration = fitted_duration
             # B4: the moon stage uses the fitted transit geometry (a/R*, inclination, b) for durations
             # and templates. The semi-major axis in AU, from Kepler's third law, still sets the
-            # Hill sphere and the moon offsets a_m / v_p, which do not depend on the stellar radius.
+            # Hill sphere; the moon offsets a_m / v_p use the input transit duration (`planet_speed`),
+            # and the fitted duration only checks it.
+            self.check_fitted_duration()
             self.planet_inc = float(fold_inc)
             self.planet_impact_param = float(fold_theta[2])
             self.planet_a_over_rstar = float(fold_a)
@@ -2527,9 +2603,12 @@ class ExoMoonLeastSquares:
         """Return the half-width in days of the data kept around each epoch (see `remove_non_transit_flux`)."""
         max_period = self.au_to_period(max_planet_mass * M_earth_to_M_sun, self.compute_hill_radius(self.star_mass, max_planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis))
         moon_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun, max_period)
-        return max(1.0, self.conjunction_time_factor()) * self.compute_transit_duration(
+        keplerian = max(1.0, self.conjunction_time_factor()) * self.compute_transit_duration(
             self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN, self.planet_period,
             moon_semimajor_axis * AU_TO_RSUN)
+        # The planet crosses R* + a_m on each side at the measured transit speed.
+        measured = 2 * (self.star_radius + moon_semimajor_axis * AU_TO_RSUN) / self.planet_speed()
+        return max(keplerian, measured)
 
     @staticmethod
     def depth_to_radius(depth, star_radius):
@@ -2800,20 +2879,17 @@ class ExoMoonLeastSquares:
         list of SearchInput
             One hypothesis per phase, with the moon offset limited to a_m / v_p.
         """
-        planet_a = self.planet_semimajor_axis * AU_TO_RSUN
         transit_a = self.transit_semimajor_axis()
         moon_radius = self.max_radius * R_earth_to_R_sun
         mass = planet_mass * M_earth_to_M_sun
-        # G11: durations and offsets scale with the planet speed at conjunction.
-        speed = self.conjunction_time_factor()
-        moon_transit_duration = speed * self.compute_transit_duration(self.star_radius, transit_a, self.planet_period,
-                                                                      moon_radius, impact_param)
-        orbit_duration = speed * self.compute_moon_orbit_transit_duration(
-            self.star_radius, planet_a, self.planet_period,
-            self.compute_semimajor_axis(mass, moon_period) * AU_TO_RSUN, moon_radius, impact_param, transit_a)
-        max_orbit_duration = speed * self.compute_moon_orbit_transit_duration(
-            self.star_radius, planet_a, self.planet_period,
-            self.compute_semimajor_axis(mass, max_moon_period) * AU_TO_RSUN, moon_radius, impact_param, transit_a)
+        # G11: the moon transit duration follows the transit geometry (the fitted one after the fold
+        # fit). The offsets a_m / v_p use the planet speed measured by the input transit duration.
+        moon_transit_duration = self.conjunction_time_factor() * self.compute_transit_duration(
+            self.star_radius, transit_a, self.planet_period, moon_radius, impact_param)
+        self.log_planet_speed()
+        orbit_duration = moon_transit_duration + 2 * self.moon_offset(self.compute_semimajor_axis(mass, moon_period))
+        max_orbit_duration = moon_transit_duration + 2 * self.moon_offset(
+            self.compute_semimajor_axis(mass, max_moon_period))
         return [SearchInput(moon_period, moon_alpha, self.min_radius,
                             impact_param, max_orbit_duration, moon_transit_duration, orbit_duration,
                             moon_transit_duration / 2, orbit_duration / 2, max_orbit_duration / 2)
@@ -3280,12 +3356,12 @@ class ExoMoonLeastSquares:
             min_period = ExoMoonLeastSquares.compute_min_moon_period(self.max_moon_density, planet_mass,
                                                                      self.planet_radius, self.max_radius)
             if self.min_orbit_window > 0:
-                a_norm = self.planet_semimajor_axis * AU_TO_RSUN / self.star_radius
-                p_min_win = ExoMoonLeastSquares.min_period_for_orbit_duration(
-                    self.star_radius, a_norm, self.planet_period,
-                    planet_mass * M_earth_to_M_sun,
-                    self.planet_duration * self.min_orbit_window,
-                    self.planet_impact_param, self.max_radius * R_earth_to_R_sun)
+                widest = self.max_moon_period(planet_mass)
+                moon_transit = self.search_input(widest, 0.0, planet_mass, widest,
+                                                 self.planet_impact_param).moon_transit_duration
+                a_moon_rsun = (self.planet_duration * self.min_orbit_window - moon_transit) / 2 * self.planet_speed()
+                p_min_win = 0.0 if a_moon_rsun <= 0 else ExoMoonLeastSquares.au_to_period(
+                    planet_mass * M_earth_to_M_sun, a_moon_rsun / AU_TO_RSUN)
                 min_period = max(min_period, p_min_win)
             # O3: the minimum is no longer only the Roche limit.
             logging.info("Minimum moon period: %s d (largest of Roche limit, planet contact%s)", min_period,

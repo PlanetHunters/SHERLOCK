@@ -81,7 +81,9 @@ def test_search_hypotheses_use_the_moon_offset(tmp_path, b):
         tau = ExoMoonLeastSquares.compute_moon_ts(0.0, item.half_moon_orbit_transit_duration,
                                                   item.half_moon_transit_duration)
         a_moon = ExoMoonLeastSquares.compute_semimajor_axis(300.0 * M_earth_to_M_sun, item.moon_period) * AU_TO_RSUN
-        assert tau == pytest.approx(a_moon * PERIOD / (2 * np.pi * a_planet), rel=1e-9)
+        # The speed is the chord over the input T14, a straight-line crossing, so it agrees with
+        # the circular 2 pi a / P to (R* / a)^2 / 6, below 1e-3 here.
+        assert tau == pytest.approx(a_moon * PERIOD / (2 * np.pi * a_planet), rel=1e-3)
 
 
 def test_data_window_holds_the_widest_moon_transit(tmp_path):

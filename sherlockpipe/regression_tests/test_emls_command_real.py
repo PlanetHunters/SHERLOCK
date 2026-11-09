@@ -5,7 +5,8 @@ The light curve is the real PDCSAP flux of Kepler-706 b (KOI K00855.01, KIC 6522
 ``emls_data/make_kepler706_fixture.py``). Unlike the synthetic tests, it has real noise, gaps and
 systematics, and the moon comes from an independent model:
 
-1. A Pandora moon is added to the raw flux, averaged over the Kepler long-cadence exposure.
+1. A Pandora moon is added to the raw flux, averaged over the Kepler long-cadence exposure, on the
+   planet orbit the observed T14 and b give, so the moon moves as the planet in the data does.
 2. The raw curve is written as ``lc_0.csv``, which the command detrends itself with a biweight that
    masks every moon window (audit item A1). The SHERLOCK-style unmasked biweight is written as
    ``lc_1.csv``, the curve the candidate was found in.
@@ -37,7 +38,7 @@ import pytest
 import wotan
 from astropy import constants as ac
 
-from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, M_earth_to_M_sun
+from sherlockpipe.exomoon import ExoMoonLeastSquares, M_earth_to_M_sun, R_earth_to_R_sun
 
 DATA = os.path.join(os.path.dirname(__file__), 'emls_data', 'kepler706_pdcsap_windows.csv.gz')
 PERIOD = 41.408316686
@@ -71,13 +72,22 @@ def moon_period():
     return MOON_PERIOD_FRACTION * ExoMoonLeastSquares.au_to_period(mass, widest)
 
 
+def transit_a_over_rstar():
+    """The circular a/R* that gives the observed T14 with the catalog b: the planet speed the data show.
+
+    The logg-based stellar density gives a/R* = 62.2, a T14 9 % longer than the observed one, so a moon
+    on that orbit would move at a speed the planet in the data does not have.
+    """
+    k = PLANET_RADIUS * R_earth_to_R_sun / STAR_RADIUS
+    return np.sqrt((1 + k) ** 2 - IMPACT ** 2) / np.sin(np.pi * T14 / PERIOD)
+
+
 def pandora_moon(time):
     """Pandora moon flux for Kepler-706 b, averaged over the Kepler long-cadence exposure."""
-    a_au = ExoMoonLeastSquares.compute_semimajor_axis(star_mass(), PERIOD)
     params = pandora.model_params()
     params.R_star = STAR_RADIUS * ac.R_sun.value
     params.u1, params.u2 = LD
-    params.per_bary, params.a_bary = PERIOD, a_au * AU_TO_RSUN / STAR_RADIUS
+    params.per_bary, params.a_bary = PERIOD, transit_a_over_rstar()
     params.r_planet, params.b_bary = 1e-6, IMPACT  # the planet is already in the data
     params.t0_bary, params.t0_bary_offset = EPOCH, 0
     params.M_planet, params.w_bary, params.ecc_bary = JUPITER_MASS * ac.M_earth.value, 0, 0
