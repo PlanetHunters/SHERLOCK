@@ -38,6 +38,22 @@
 
 ### Fixed
 
+- EMLS outer moon orbit (audit items G5, G6): the widest searched orbit is the
+  Domingos et al. (2006) prograde limit a = 0.4895 (1 - 1.0305 e_p) r_H, with
+  the planet eccentricity, instead of half the Hill period (0.63 r_H, above
+  every published prograde limit). The log states a/r_H and the period.
+- EMLS eccentric planets (audit item G11): moon transit durations and the
+  moon offsets a_m / v_p scale with the planet speed at conjunction,
+  sqrt(1 - e^2) / (1 + e sin w), so the window matches the eccentric template
+  (within 2 % of batman T14 at e = 0.3).
+- EMLS moon window on the planet transit (audit item G17):
+  `planet_overlap_fraction` (share of epochs where the best moon window
+  touches the planet transit), `planet_overlap_mean`, `best_tau` and
+  `period_constrained` in `emls_results.json`; with an offset below T14/4 the
+  period is flagged as not constrained by the data, and the log says the
+  signal rests on the planet subtraction.
+- EMLS default period grid (audit item G19): 10000 periods for the class too,
+  as for the command (2000 captured 0.90-0.93 of moons at their period).
 - EMLS fold fit (audit item B8): it ends with a bounded least-squares run on
   the residuals, so it converges on large folds where Powell's relative
   tolerance stopped early; chi2 is within 0.1 of a least-squares fit from the
@@ -203,11 +219,23 @@
 
 ### Known limitations
 
+- EMLS is a screening search with a coplanar, circular, prograde moon orbit
+  (audit item G12: the unused moon inclination, eccentricity and periastron
+  fields are removed). Its moon phase is frozen at the planet mid-transit and
+  every moon transit has one duration (audit items G3, G4), its moon orbit is
+  planet-only rather than barycentric (G14, negligible for q = M_m/M_p below
+  0.01), and planet-moon overlaps are not modelled (G16: up to 40 % of a
+  single epoch's moon deficit near P_m = 5-20 d for giants). Each run logs
+  tau v_m / (v_p T), the scale of the timing errors, and q for the largest
+  searched moons, with a warning above 0.1 and 0.01. Candidates should be
+  confirmed with a photodynamical fit such as Pandora.
+
 - EMLS `sde` and `max_sde` are diagnostics: neither separates moons from
   noise (audit item H7). Use `max_snr` with `fap`.
 - The EMLS null runs reuse the same light curve, so they are not independent:
   `null_independent_offsets` gives the number of independent pseudo-epoch
-  positions per epoch, and the log warns below 3. Curves cut around the
+  positions with data per epoch; below 3 no null runs are made and no
+  false-alarm probability is given. Curves cut around the
   transits, such as the Kepler-706 regression fixture, have no pseudo-epochs
   and get no false-alarm probability.
 

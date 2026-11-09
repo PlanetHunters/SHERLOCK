@@ -188,8 +188,7 @@ def test_allowed_ttv_is_the_largest_a_searched_moon_can_cause(tmp_path):
     planet_mass = 300.0
     mass = planet_mass * 3.0034893e-06
     moon_mass = exomoon.forecast_moon_mass(4.0, 5.5)
-    hill_period = ExoMoonLeastSquares.au_to_period(mass, ExoMoonLeastSquares.compute_hill_radius(1.0, mass, SMA))
-    moon_a = ExoMoonLeastSquares.compute_semimajor_axis(mass, hill_period / 2)
+    moon_a = ExoMoonLeastSquares.max_moon_semimajor_axis(1.0, mass, SMA)  # the widest stable prograde orbit
     planet_shift_au = moon_a * moon_mass / (planet_mass + moon_mass)  # distance to the barycentre
     expected = planet_shift_au * PERIOD / (2 * np.pi * SMA)
 

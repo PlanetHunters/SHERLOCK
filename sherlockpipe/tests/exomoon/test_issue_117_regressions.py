@@ -187,7 +187,7 @@ def build_search(tmp_path, moon_depth=0.0, flux_time=None):
 
 
 def scenario_input(half_transit=0.05):
-    return SearchInput(1.0, 0.0, 0, 90, 0, 0.3, 0.0, 0.6, 2 * half_transit, 0.1, half_transit, 0.05, 0.3)
+    return SearchInput(1.0, 0.0, 0.3, 0.0, 0.6, 2 * half_transit, 0.1, half_transit, 0.05, 0.3)
 
 
 def test_search_reports_template_outcome(tmp_path):

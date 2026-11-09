@@ -63,14 +63,15 @@ def test_noise_sde_does_not_sit_at_the_single_period_cap(seed, tmp_path):
     assert emls.max_sde < SDE_CAP
 
 
-def test_moon_sde_rises_above_the_noise_median(tmp_path):
+def test_moon_sde_rises_above_the_noise_runs(tmp_path):
+    """The residual SDE is a diagnostic only (audit item H7); a moon should still rank above noise."""
     folders = {name: tmp_path / name for name in ('noise1', 'noise2', 'noise3', 'moon')}
     for folder in folders.values():
         folder.mkdir()
     noise = [guard.execute(folders[f'noise{seed}'], seed=seed).max_sde for seed in (1, 2, 3)]
     moon = guard.execute(folders['moon'], moon_radius=3.0).max_sde
 
-    assert moon > 1.5 * np.median(noise)
+    assert moon > max(noise)
 
 
 def test_shallow_moon_is_reported_and_flagged_below_the_range(tmp_path, monkeypatch, caplog):

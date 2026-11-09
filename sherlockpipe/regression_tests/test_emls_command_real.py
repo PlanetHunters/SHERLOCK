@@ -14,7 +14,7 @@ systematics, and the moon comes from an independent model:
 
 The same steps without a moon give the control.
 
-Scope: one wide-orbit moon near the outer period limit (0.9 of half the Hill period), 2 R_earth,
+Scope: one wide-orbit moon near the outer period limit (0.9 of the Domingos et al. 2006 prograde period limit), 2 R_earth,
 about SNR 16. That is the easiest regime for EMLS: the largest timing offset, well outside the
 planet transit. It shows that the command works end to end on real data, not that EMLS recovers
 moons in general. Close moons that transit during the planet are still absorbed by the planet fit
@@ -67,8 +67,8 @@ def star_mass():
 def moon_period():
     mass = JUPITER_MASS * M_earth_to_M_sun
     a_au = ExoMoonLeastSquares.compute_semimajor_axis(star_mass(), PERIOD)
-    hill = ExoMoonLeastSquares.compute_hill_radius(star_mass(), mass, a_au)
-    return MOON_PERIOD_FRACTION * 0.5 * ExoMoonLeastSquares.au_to_period(mass, hill)
+    widest = ExoMoonLeastSquares.max_moon_semimajor_axis(star_mass(), mass, a_au)
+    return MOON_PERIOD_FRACTION * ExoMoonLeastSquares.au_to_period(mass, widest)
 
 
 def pandora_moon(time):

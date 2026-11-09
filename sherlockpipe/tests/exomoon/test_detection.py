@@ -64,10 +64,7 @@ def moon_run(tmp_path_factory):
 def test_reported_statistics_come_from_one_search(moon_run):
     emls = moon_run
     # The selected (P, alpha) reproduces the reported SNR and radius in a single search call.
-    grid_max = ExoMoonLeastSquares.au_to_period(
-        guard.PLANET_MASS * exomoon.M_earth_to_M_sun,
-        ExoMoonLeastSquares.compute_hill_radius(1.0, guard.PLANET_MASS * exomoon.M_earth_to_M_sun,
-                                                guard.PLANET_SEMIMAJOR_AXIS)) * 0.5
+    grid_max = emls.max_moon_period(emls.planet_mass)
     best = emls.search_input(emls.recovered_period, emls.recovered_alpha, emls.planet_mass, grid_max,
                              emls.planet_impact_param)
     result = emls.search(best, return_lc=True)

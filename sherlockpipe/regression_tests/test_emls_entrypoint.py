@@ -87,20 +87,21 @@ def test_injected_moon_raises_the_detection_statistic(executions):
     assert len(moon.bary_t0s) >= EPOCHS // 2
 
 
-def test_detected_period_matches_the_expected_alias_of_the_injected_moon(executions):
-    """A regression pin on this fixture, which detects the k=-5 alias of the moon period.
-
-    Sampling once per planet orbit aliases the period. Chance also lands here
-    in some runs without an orbit, so this is neither proof of an orbit nor a
-    claim that the true period was recovered.
-    """
+def test_detected_period_is_the_injected_one_or_its_alias(executions):
+    """Sampling once per planet orbit aliases the period, 1/P' = 1/P + k/P_planet, so the detected
+    period must be the injected one or one of its aliases (it was the k = -5 alias before the
+    Domingos outer limit, and is the injected period since), and the reported alias family must
+    hold the injected period (audit item H9). Neither is proof of an orbit."""
     moon = executions[1]
-    alias = 1 / (1 / MOON['moon_period'] - 5 / PLANET_PERIOD)
+    injected = MOON['moon_period']
+    aliases = [1 / (1 / injected + k / PLANET_PERIOD) for k in range(-30, 31)
+               if 1 / injected + k / PLANET_PERIOD > 0]
 
-    error = abs(alias - moon.recovered_period) / alias
+    error = min(abs(alias - moon.recovered_period) / alias for alias in aliases)
 
     assert error < 0.01, (f"detected P={moon.recovered_period:.4f} d, alpha={moon.recovered_alpha:.4f} rad, "
-                          f"expected alias {alias:.4f} d of injected P={MOON['moon_period']} d")
+                          f"not an alias of the injected P={injected} d")
+    assert any(abs(alias['period'] - injected) / injected < 0.01 for alias in moon.aliases)
 
 
 def test_best_scenario_is_a_dimming(executions):

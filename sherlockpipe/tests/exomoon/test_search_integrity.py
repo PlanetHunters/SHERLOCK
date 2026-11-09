@@ -57,9 +57,9 @@ def planet_curve(seed):
 def moon_period():
     """Return a period on the search grid, wide enough to be identifiable."""
     limits = ExoMoonLeastSquares
-    a_hill = limits.compute_hill_radius(1.0, PLANET_MASS * M_earth_to_M_sun, PLANET_SEMIMAJOR_AXIS)
-    hill_period = limits.au_to_period(PLANET_MASS * M_earth_to_M_sun, a_hill)
-    grid = np.logspace(np.log10(limits.compute_roche_period(5.5)), np.log10(hill_period * 0.5), PERIOD_GRID)
+    mass = PLANET_MASS * M_earth_to_M_sun
+    widest = limits.au_to_period(mass, limits.max_moon_semimajor_axis(1.0, mass, PLANET_SEMIMAJOR_AXIS))
+    grid = np.logspace(np.log10(limits.compute_roche_period(5.5)), np.log10(widest), PERIOD_GRID)
     return grid[MOON_PERIOD_INDEX]
 
 

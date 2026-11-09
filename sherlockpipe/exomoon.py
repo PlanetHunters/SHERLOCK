@@ -40,6 +40,7 @@ R_earth_to_R_sun = (ac.R_earth / ac.R_sun).value
 EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  # g/cm3
 MIN_RP_OVER_RSTAR = 1e-5
 MIN_NULL_RUNS = 20
+MIN_INDEPENDENT_OFFSETS = 3
 MOON_MASS_FORECAST_SEED = 0
 _moon_mass_cache = {}
 
@@ -103,7 +104,7 @@ class ExoMoonLeastSquares:
                  planet_mass, planet_period,
                  planet_t0, planet_duration, planet_semimajor_axis, planet_inc, planet_inc_err, planet_ecc,
                  planet_ecc_err, planet_arg_periastron, planet_impact_param, min_radius, max_radius, t0s, time, flux,
-                 flux_err, max_moon_density, period_grid_size=2000, radius_grid_size=10,
+                 flux_err, max_moon_density, period_grid_size=10000, radius_grid_size=10,
                  min_cadences_per_t0: bool = 20, min_orbit_window: float = 0,
                   subtract_mode: str = "subtract", mask_duration_factor: float = None,
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
@@ -166,7 +167,9 @@ class ExoMoonLeastSquares:
         max_moon_density : float
             Maximum moon density in g/cm^3.
         period_grid_size : int, optional
-            Number of grid points for period search, default 2000.
+            Number of grid points for period search, default 10000, which captured at least 0.96
+            of moons with tau >= T at their true period in the audit fixtures (audit item G19;
+            2000 gave 0.90-0.93).
         radius_grid_size : int, optional
             Number of grid points for radius search, default 10.
         min_cadences_per_t0 : bool, optional
@@ -285,6 +288,11 @@ class ExoMoonLeastSquares:
         self.recovered_alias = None
         self.planet_rp_over_rstar = None
         self.fold_realigned = False
+        self.model_validity = None
+        self.planet_overlap_fraction = None
+        self.planet_overlap_mean = None
+        self.best_tau = None
+        self.period_constrained = None
         self.planet_shape_check = None
         self.mask_mode_survival = None
         self.aliases = None
@@ -313,9 +321,6 @@ class ExoMoonLeastSquares:
         self.period_grid_size = period_grid_size
         self.radius_grid_size = radius_grid_size
         self.planet_mass_grid = [planet_mass]
-        self.moon_inc_grid = [90]
-        self.moon_ecc_grid = [0]
-        self.moon_arg_periastron_grid = [0]
 
     @staticmethod
     def compute_semimajor_axis(major_mass, minor_period):
@@ -409,6 +414,119 @@ class ExoMoonLeastSquares:
         :return: the hill radius of the minor body in the same units than the semimajor_axis
         """
         return semimajor_axis * (1 - eccentricity) * ((minor_mass / (3 * major_mass)) ** (1 / 3))
+
+    # Domingos, Winter & Yokoyama (2006), prograde: a_max = 0.4895 (1 - 1.0305 e_p) r_H, with r_H
+    # without the (1 - e_p) factor, as quoted by Rosario-Franco et al. (2020, Table 1) and
+    # Heller et al. (2014).
+    DOMINGOS_PROGRADE = (0.4895, 1.0305)
+
+    @staticmethod
+    def max_moon_semimajor_axis(star_mass, planet_mass, planet_semimajor_axis, planet_ecc=0.0):
+        """Return the widest stable prograde moon orbit in AU (audit items G5, G6).
+
+        a_max = 0.4895 (1 - 1.0305 e_p) r_H (Domingos et al. 2006), with the Hill radius of a
+        circular orbit, so the eccentricity is counted once: 0.49 r_H for a circular planet orbit
+        and 0.34 r_H at e_p = 0.3.
+
+        Parameters
+        ----------
+        star_mass, planet_mass : float
+            Masses in solar masses.
+        planet_semimajor_axis : float
+            Planet semi-major axis in AU.
+        planet_ecc : float, optional
+            Planet eccentricity, default 0.
+
+        Returns
+        -------
+        float
+            Semi-major axis in AU.
+        """
+        coefficient, slope = ExoMoonLeastSquares.DOMINGOS_PROGRADE
+        factor = coefficient * (1 - slope * planet_ecc)
+        if not factor > 0:
+            raise ValueError(f"No stable prograde moon orbit for a planet eccentricity of {planet_ecc}")
+        return factor * ExoMoonLeastSquares.compute_hill_radius(star_mass, planet_mass, planet_semimajor_axis)
+
+    def check_model_validity(self):
+        """Log where the screening moon model stops holding (audit items G3, G4, G14, G16).
+
+        The moon model is coplanar, circular and prograde, with the moon phase frozen at the
+        planet mid-transit, one transit duration, a planet-only (not barycentric) moon orbit and
+        no mutual planet-moon events. A photodynamical fit (Pandora) should confirm and refine a
+        candidate. This logs, for the widest searched moons:
+
+        - epsilon = tau v_m / (v_p T), the scale of the timing and duration errors in units of the
+          planet duration T (G3, G4): small up to Neptune mass, about 0.5 for wide moons of
+          Jupiter at 300 d, where the audit measured median timing errors of 0.15-0.19 T;
+        - q = M_m / M_p for the Chen & Kipping mass of the largest searched radius (G14): the
+          offsets are off by 1 - (1 + q)^(-2/3), negligible below q = 0.01.
+
+        Sets model_validity to {"epsilon", "q", "offset_error"}.
+        """
+        planet_mass = np.max(self.planet_mass_grid)
+        mass = planet_mass * M_earth_to_M_sun
+        widest = self.max_moon_period(planet_mass)
+        moon_a = self.compute_semimajor_axis(mass, widest)
+        tau = self.conjunction_time_factor() * self.compute_max_moon_offset(moon_a, self.planet_semimajor_axis,
+                                                                            self.planet_period)
+        speed_ratio = (moon_a / widest) / (self.planet_semimajor_axis / self.planet_period)
+        # The planet moves 1 / factor faster at conjunction, so the moon/planet speed ratio scales by it.
+        epsilon = float(tau * speed_ratio * self.conjunction_time_factor() / self.planet_duration)
+        q = forecast_moon_mass(self.max_radius, self.max_moon_density) / planet_mass
+        offset_error = float(1 - (1 + q) ** (-2 / 3))
+        self.model_validity = {"epsilon": epsilon, "q": float(q), "offset_error": offset_error}
+        if epsilon > 0.1:
+            logging.warning("Moon timing model: for the widest searched moons (P = %.2f d) the moon moves during the "
+                            "planet-moon offset, so moon transit times and durations can be off by up to about %.2f "
+                            "planet durations (tau v_m / (v_p T), audit items G3, G4). Confirm candidates with a "
+                            "photodynamical fit", widest, epsilon)
+        else:
+            logging.info("Moon timing model valid for the searched moons: tau v_m / (v_p T) = %.3f", epsilon)
+        if q > 0.01:
+            logging.warning("The largest searched moons have q = M_m / M_p = %.3f (Chen & Kipping mass), so the "
+                            "planet-only moon orbit puts their offsets %.1f%% too far (audit item G14)", q,
+                            offset_error * 100)
+
+    def assess_planet_overlap(self, moon_t0s, half_orbit_duration, half_moon_duration):
+        """Measure how much the best moon window sits on the planet transit (audit item G17).
+
+        Sets planet_overlap_fraction, the share of epochs whose moon window overlaps the planet
+        transit at all, planet_overlap_mean, the mean fraction of the moon window inside it, best_tau, the largest moon offset of the best period, and
+        period_constrained, False when that offset is below T/4: then the moon window barely
+        moves between periods, the signal rests on the planet subtraction, and the period is not
+        constrained by the data even if the dip is detected.
+        """
+        overlaps = []
+        for t0, moon_t0 in zip(self.bary_t0s, moon_t0s):
+            start = max(moon_t0 - half_moon_duration, t0 - self.planet_duration / 2)
+            end = min(moon_t0 + half_moon_duration, t0 + self.planet_duration / 2)
+            overlaps.append(max(0.0, end - start) / (2 * half_moon_duration) if half_moon_duration > 0 else 1.0)
+        self.planet_overlap_fraction = float(np.mean(np.array(overlaps) > 0)) if overlaps else None
+        self.planet_overlap_mean = float(np.mean(overlaps)) if overlaps else None
+        self.best_tau = float(half_orbit_duration - half_moon_duration)
+        self.period_constrained = bool(self.best_tau >= self.planet_duration / 4)
+        logging.log(logging.INFO if self.period_constrained else logging.WARNING,
+                    "Best moon window: overlaps the planet transit in %.0f%% of the epochs (%.0f%% of the window on "
+                    "average), offset up to %.3f d (T14 %.3f d)%s", 100 * (self.planet_overlap_fraction or 0),
+                    100 * (self.planet_overlap_mean or 0), self.best_tau, self.planet_duration,
+                    "" if self.period_constrained else "; below T14/4, so the period is not constrained by the "
+                    "data and the signal rests on the planet subtraction (audit item G17)")
+
+    def conjunction_time_factor(self):
+        """Return sqrt(1 - e^2) / (1 + e sin w), the transit-time scale of an eccentric planet orbit (audit item G11).
+
+        The planet moves faster than on a circular orbit by the inverse of this factor at
+        conjunction, so the moon transit duration and the moon offset a_m / v_p scale with it.
+        """
+        ecc = self.planet_ecc or 0.0
+        return float(np.sqrt(1 - ecc ** 2) / (1 + ecc * np.sin(np.deg2rad(self.planet_arg_periastron or 0.0))))
+
+    def max_moon_period(self, planet_mass):
+        """Return the period in days of the widest stable prograde moon orbit for a planet mass in Earth masses."""
+        mass = planet_mass * M_earth_to_M_sun
+        return self.au_to_period(mass, self.max_moon_semimajor_axis(self.star_mass, mass, self.planet_semimajor_axis,
+                                                                    self.planet_ecc))
 
     @staticmethod
     def au_to_period(mass, au):
@@ -927,8 +1045,7 @@ class ExoMoonLeastSquares:
         planet_mass = np.max(self.planet_mass_grid) if planet_mass is None else planet_mass
         mass = planet_mass * M_earth_to_M_sun
         moon_mass = forecast_moon_mass(self.max_radius, self.max_moon_density)  # Earth masses
-        widest_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
-                                                                         self.planet_semimajor_axis)) * 0.5
+        widest_period = self.max_moon_period(planet_mass)
         moon_a = self.compute_semimajor_axis(mass, widest_period)
         offset = self.compute_max_moon_offset(moon_a, self.planet_semimajor_axis, self.planet_period)
         return float(offset * moon_mass / (planet_mass + moon_mass))
@@ -1066,8 +1183,7 @@ class ExoMoonLeastSquares:
     def warn_mask_mode_survival(self, threshold=0.5):
         """Warn when mask mode removes most of the signal of the widest searched moons (audit item E3)."""
         mass = np.max(self.planet_mass_grid) * M_earth_to_M_sun
-        max_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
-                                                                       self.planet_semimajor_axis)) * 0.5
+        max_period = self.max_moon_period(np.max(self.planet_mass_grid))
         max_offset = self.compute_max_moon_offset(self.compute_semimajor_axis(mass, max_period),
                                                   self.planet_semimajor_axis, self.planet_period)
         half_duration = self.planet_duration / 2
@@ -2410,8 +2526,9 @@ class ExoMoonLeastSquares:
         """Return the half-width in days of the data kept around each epoch (see `remove_non_transit_flux`)."""
         max_period = self.au_to_period(max_planet_mass * M_earth_to_M_sun, self.compute_hill_radius(self.star_mass, max_planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis))
         moon_semimajor_axis = self.compute_semimajor_axis(self.planet_mass * M_earth_to_M_sun, max_period)
-        return self.compute_transit_duration(self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN,
-                                             self.planet_period, moon_semimajor_axis * AU_TO_RSUN)
+        return max(1.0, self.conjunction_time_factor()) * self.compute_transit_duration(
+            self.star_radius, self.planet_semimajor_axis * AU_TO_RSUN, self.planet_period,
+            moon_semimajor_axis * AU_TO_RSUN)
 
     @staticmethod
     def depth_to_radius(depth, star_radius):
@@ -2620,17 +2737,14 @@ class ExoMoonLeastSquares:
         params.limb_dark = "quadratic"
         return params
 
-    def search_input(self, moon_period, moon_alpha, planet_mass, max_moon_period, impact_param, moon_ecc=0,
-                     moon_inc=90, moon_arg_periastron=0):
+    def search_input(self, moon_period, moon_alpha, planet_mass, max_moon_period, impact_param):
         """Build the search hypothesis for one moon period and initial phase.
 
         See `search_inputs` for the parameters.
         """
-        return self.search_inputs(moon_period, [moon_alpha], planet_mass, max_moon_period, impact_param, moon_ecc,
-                                  moon_inc, moon_arg_periastron)[0]
+        return self.search_inputs(moon_period, [moon_alpha], planet_mass, max_moon_period, impact_param)[0]
 
-    def search_inputs(self, moon_period, moon_alphas, planet_mass, max_moon_period, impact_param, moon_ecc=0,
-                      moon_inc=90, moon_arg_periastron=0):
+    def search_inputs(self, moon_period, moon_alphas, planet_mass, max_moon_period, impact_param):
         """Build the search hypotheses for one moon period and several initial phases.
 
         The durations do not depend on the phase, so they are computed once.
@@ -2647,8 +2761,6 @@ class ExoMoonLeastSquares:
             Largest moon period searched, which sets the data window.
         impact_param : float
             Planet impact parameter.
-        moon_ecc, moon_inc, moon_arg_periastron : float, optional
-            Moon orbit parameters carried with the hypothesis.
 
         Returns
         -------
@@ -2659,15 +2771,17 @@ class ExoMoonLeastSquares:
         transit_a = self.transit_semimajor_axis()
         moon_radius = self.max_radius * R_earth_to_R_sun
         mass = planet_mass * M_earth_to_M_sun
-        moon_transit_duration = self.compute_transit_duration(self.star_radius, transit_a, self.planet_period,
-                                                              moon_radius, impact_param)
-        orbit_duration = self.compute_moon_orbit_transit_duration(
+        # G11: durations and offsets scale with the planet speed at conjunction.
+        speed = self.conjunction_time_factor()
+        moon_transit_duration = speed * self.compute_transit_duration(self.star_radius, transit_a, self.planet_period,
+                                                                      moon_radius, impact_param)
+        orbit_duration = speed * self.compute_moon_orbit_transit_duration(
             self.star_radius, planet_a, self.planet_period,
             self.compute_semimajor_axis(mass, moon_period) * AU_TO_RSUN, moon_radius, impact_param, transit_a)
-        max_orbit_duration = self.compute_moon_orbit_transit_duration(
+        max_orbit_duration = speed * self.compute_moon_orbit_transit_duration(
             self.star_radius, planet_a, self.planet_period,
             self.compute_semimajor_axis(mass, max_moon_period) * AU_TO_RSUN, moon_radius, impact_param, transit_a)
-        return [SearchInput(moon_period, moon_alpha, moon_ecc, moon_inc, moon_arg_periastron, self.min_radius,
+        return [SearchInput(moon_period, moon_alpha, self.min_radius,
                             impact_param, max_orbit_duration, moon_transit_duration, orbit_duration,
                             moon_transit_duration / 2, orbit_duration / 2, max_orbit_duration / 2)
                 for moon_alpha in moon_alphas]
@@ -2762,8 +2876,7 @@ class ExoMoonLeastSquares:
     def moon_window_half_width(self):
         """Return the half-width in days of the widest searched moon window around each epoch."""
         mass = np.max(self.planet_mass_grid) * M_earth_to_M_sun
-        max_period = self.au_to_period(mass, self.compute_hill_radius(self.star_mass, mass,
-                                                                       self.planet_semimajor_axis)) * 0.5
+        max_period = self.max_moon_period(np.max(self.planet_mass_grid))
         return self.search_input(max_period, 0.0, self.planet_mass, max_period,
                                  self.planet_impact_param).half_moon_max_orbit_transit_duration
 
@@ -2809,8 +2922,7 @@ class ExoMoonLeastSquares:
         The data within the widest moon window of every epoch are excluded. beta below one is
         set to one, so the SNR is never raised. Without enough data the factor stays one.
         """
-        max_period = self.au_to_period(np.max(self.planet_mass_grid) * M_earth_to_M_sun, self.compute_hill_radius(
-            self.star_mass, np.max(self.planet_mass_grid) * M_earth_to_M_sun, self.planet_semimajor_axis)) * 0.5
+        max_period = self.max_moon_period(np.max(self.planet_mass_grid))
         window = self.search_input(max_period, 0.0, self.planet_mass, max_period, self.planet_impact_param)
         time, flux = before_trim.time, before_trim.flux
         if self.detrend_window is not None:
@@ -3006,9 +3118,11 @@ class ExoMoonLeastSquares:
         logging.info("Null distribution: %d searches on pseudo-epochs offset %.2f-%.2f d from each transit "
                      "(%d independent offsets with data per epoch)", self.null_runs, offsets[0], offsets[-1],
                      self.null_independent_offsets)
-        if self.null_independent_offsets < 3:
-            logging.warning("Only %d independent pseudo-epoch offsets with data per epoch: the null runs reuse the "
-                            "same data, so the false-alarm probability is uncertain", self.null_independent_offsets)
+        if self.null_independent_offsets < MIN_INDEPENDENT_OFFSETS:
+            logging.warning("No null runs: only %d independent pseudo-epoch offsets with data per epoch (at least %d "
+                            "needed), so the null searches would reuse the same data and no false-alarm "
+                            "probability is given", self.null_independent_offsets, MIN_INDEPENDENT_OFFSETS)
+            return []
         rng = np.random.default_rng(self.null_seed)
         snrs, failed = [], 0
         previous_disable = logging.root.manager.disable
@@ -3116,9 +3230,6 @@ class ExoMoonLeastSquares:
             fastest in search_inputs and all_residuals.
         """
         planet_mass_grid = self.planet_mass_grid
-        moon_inc_grid = self.moon_inc_grid
-        moon_ecc_grid = self.moon_ecc_grid
-        moon_arg_periastron_grid = self.moon_arg_periastron_grid
         search_inputs = []
         if len(self.models) == 0:
             logging.warning("No moon radius produced a transit template, using a flat fallback template")
@@ -3146,18 +3257,18 @@ class ExoMoonLeastSquares:
             # O3: the minimum is no longer only the Roche limit.
             logging.info("Minimum moon period: %s d (largest of Roche limit, planet contact%s)", min_period,
                          " and orbit window" if self.min_orbit_window > 0 else "")
-            max_period = self.au_to_period(planet_mass * M_earth_to_M_sun, self.compute_hill_radius(self.star_mass, planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis)) * 0.5
-            logging.info(f"Hill Limit Period: {max_period}")
+            max_period = self.max_moon_period(planet_mass)
+            a_max = self.max_moon_semimajor_axis(self.star_mass, planet_mass * M_earth_to_M_sun,
+                                                 self.planet_semimajor_axis, self.planet_ecc)
+            hill = self.compute_hill_radius(self.star_mass, planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis)
+            logging.info("Outer moon limit: a = %.3f r_H (Domingos et al. 2006, prograde, e_p = %.2f), P = %.4f d",
+                         a_max / hill, self.planet_ecc, max_period)
             period_grid = self.compute_moon_period_grid(min_period, max_period, samples=self.period_grid_size, mode="log")
             #period_grid = [2.5, 50]
-            for moon_inc in moon_inc_grid:
-                for moon_ecc in moon_ecc_grid:
-                    for moon_arg_periastron in moon_arg_periastron_grid:
-                        for impact_param in impact_params_grid:
-                            for moon_period in period_grid:
-                                search_inputs.extend(self.search_inputs(
-                                    moon_period, alpha_grid, planet_mass, max_period, impact_param,
-                                    moon_ecc, moon_inc, moon_arg_periastron))
+            for impact_param in impact_params_grid:
+                for moon_period in period_grid:
+                    search_inputs.extend(self.search_inputs(moon_period, alpha_grid, planet_mass, max_period,
+                                                            impact_param))
         with Pool(processes=self.cpus, maxtasksperchild=500) as pool:
             all_residuals = list(
                 tqdm(pool.imap(self.search, search_inputs, chunksize=100),
@@ -3182,9 +3293,6 @@ class ExoMoonLeastSquares:
         """
         self.require_usable_epochs()
         planet_mass_grid = self.planet_mass_grid
-        moon_inc_grid = self.moon_inc_grid
-        moon_ecc_grid = self.moon_ecc_grid
-        moon_arg_periastron_grid = self.moon_arg_periastron_grid
         self.inject_flux_time = self.time.copy()  # save full time before trimming
         before_trim = copy.copy(self)  # the whole light curve, without an injected moon, for the nulls
         if self.detrend_window is not None:
@@ -3218,6 +3326,7 @@ class ExoMoonLeastSquares:
         before_planet_fit = copy.copy(self)
         self.time, self.flux, self.flux_err = self.subtract_planet_transit(self.time, self.flux, self.flux_err, mode=self.subtract_mode, plot=plot)
         self.build_search_templates()
+        self.check_model_validity()
         self.set_red_noise_factor(before_trim)
         period_grid, alpha_grid, search_inputs, all_residuals = self.grid_search()
         alpha_grid_size = len(alpha_grid)
@@ -3474,6 +3583,7 @@ class ExoMoonLeastSquares:
                 # One entry per epoch, so injected and recovered times stay paired by epoch.
                 inj_t0s.append(self.inject_flux_time[mask_w][np.argmin(inj_flux)] if np.any(inj_flux < 1.0) else None)
         self.recovered_t0s = rec_t0s
+        self.assess_planet_overlap(rec_t0s, half_orbit_dur_rec, half_moon_dur)
         self.injected_t0s = inj_t0s if any(t0 is not None for t0 in inj_t0s) else None
         self.recovered_period = float(best_snr_period)
         self.recovered_alpha = float(best_snr_alpha)
@@ -3604,8 +3714,12 @@ class ExoMoonLeastSquares:
 
 
 class SearchInput:
-    """Container for moon search input parameters."""
-    def __init__(self, moon_period, moon_alpha, moon_ecc, moon_inc, moon_arg_periastron, min_radius, impact_param,
+    """Container for moon search input parameters.
+
+    EMLS searches coplanar, circular, prograde moon orbits (audit item G12): only the moon period
+    and its phase at the reference epoch vary.
+    """
+    def __init__(self, moon_period, moon_alpha, min_radius, impact_param,
                  moon_max_orbit_transit_duration, moon_transit_duration, moon_orbit_transit_duration,
                  half_moon_transit_duration, half_moon_orbit_transit_duration, half_moon_max_orbit_transit_duration) -> None:
         """Initialize search input parameters for a single moon search scenario.
@@ -3616,12 +3730,6 @@ class SearchInput:
             Moon orbital period in days.
         moon_alpha : float
             Moon initial orbital phase in radians.
-        moon_ecc : float
-            Moon orbital eccentricity.
-        moon_inc : float
-            Moon orbital inclination in degrees.
-        moon_arg_periastron : float
-            Moon argument of periastron in degrees.
         min_radius : float
             Minimum moon radius in Earth radii.
         impact_param : float
@@ -3641,9 +3749,6 @@ class SearchInput:
         """
         self.moon_period = moon_period
         self.moon_alpha = moon_alpha
-        self.moon_ecc = moon_ecc
-        self.moon_inc = moon_inc
-        self.moon_arg_periastron = moon_arg_periastron
         self.min_radius = min_radius
         self.impact_param = impact_param
         self.moon_max_orbit_transit_duration = moon_max_orbit_transit_duration
