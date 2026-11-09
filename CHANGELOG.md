@@ -120,7 +120,11 @@
   moon transit of the injected ones, and the period within 5 %. A sampling
   alias with matching times sets `recovered_alias` instead. Without a
   false-alarm probability both are None. Before, an undetectable moon was
-  "recovered" 82 % of the time by chance.
+  "recovered" 82 % of the time by chance. The period counts only when the
+  injected period is the nearest member of its alias family
+  1/P' = 1/P + k/P_planet: with the 5 % tolerance alone, the k = 1 alias of a
+  10 d moon of Kepler-1514 b (217.8 d), 4.4 % away, was counted as the
+  period. The nearest alias order is logged and kept as `injection_alias_k`.
 - EMLS planet fit: the folded transit is fitted in duration, impact parameter
   and radius (T14, b, rp) instead of a/R* bounded to 2 %, so a transit longer
   than the catalog stellar density allows no longer leaves a moon-like

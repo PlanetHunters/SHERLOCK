@@ -199,6 +199,29 @@ def test_repeating_moon_is_not_a_single_event(moon_run):
 
 # --- I1: recovery ------------------------------------------------------------------------------------------------
 
+@pytest.mark.parametrize('found, expected', [
+    (10.0, (True, False, 0)),
+    (10.2, (True, False, 0)),
+    # Kepler-1514 b injection: the k = 1 alias of a 10 d moon of a 217.83 d planet is 4.4 % away,
+    # inside the 5 % tolerance, and was counted as the period.
+    (9.5558, (False, True, 1)),
+    (8.1299, (False, True, 5)),
+])
+def test_recovered_period_is_the_nearest_alias(found, expected):
+    period_match, alias_match, k, _, _ = ExoMoonLeastSquares.classify_recovered_period(10.0, 217.83, found)
+
+    assert (period_match, alias_match, k) == expected
+
+
+def test_period_tolerance_still_applies_without_close_aliases():
+    # A 10 d moon of a 30 d planet: the nearest aliases are 7.5 d and 15 d, so 11 d is the
+    # injected period's family member but 10 % off, which is neither a match nor an alias.
+    period_match, alias_match, k, _, error = ExoMoonLeastSquares.classify_recovered_period(10.0, 30.0, 11.0)
+
+    assert k == 0 and error == pytest.approx(0.1)
+    assert (period_match, alias_match) == (False, False)
+
+
 def test_undetectable_moon_is_not_recovered(tmp_path):
     t0s, time, flux, flux_err, duration, _ = guard.planet_curve(5)
     emls = guard.build(flux, time, flux_err, tmp_path, t0s, duration)

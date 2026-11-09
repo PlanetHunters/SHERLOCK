@@ -286,6 +286,7 @@ class ExoMoonLeastSquares:
         self.single_event = None
         self.recovered = None
         self.recovered_alias = None
+        self.injection_alias_k = None
         self.planet_rp_over_rstar = None
         self.fold_realigned = False
         self.model_validity = None
@@ -2615,6 +2616,38 @@ class ExoMoonLeastSquares:
                 alias_period, alias_k, min_error = 1 / frequency, k, error
         return alias_period, alias_k, min_error
 
+    @staticmethod
+    def classify_recovered_period(moon_period, planet_period, found_period):
+        """Classify a found period as the injected moon period, one of its sampling aliases, or neither.
+
+        The found period is assigned to the nearest member of the alias family
+        1/P' = 1/P + k/P_planet, |k| up to MAX_ALIAS_ORDER, and must lie within
+        RECOVERY_PERIOD_TOLERANCE of it. A fixed tolerance around the injected period alone
+        counts a neighbouring alias as the period whenever the alias spacing, about
+        P^2 / P_planet, is below the tolerance: a 10 d moon of a 218 d planet has its k = 1
+        alias 4.4 % away.
+
+        Parameters
+        ----------
+        moon_period : float
+            Injected moon period in days.
+        planet_period : float
+            Planet period in days.
+        found_period : float
+            Recovered period in days.
+
+        Returns
+        -------
+        tuple
+            (period_match, alias_match, k, alias_period, relative_error): k is the order of the
+            nearest alias (0 for the injected period) and relative_error its distance to the
+            found period over the moon period. period_match needs k = 0, alias_match k != 0.
+        """
+        alias_period, k, error = ExoMoonLeastSquares.find_period_alias(moon_period, planet_period, found_period,
+                                                                       np.inf)
+        close = k is not None and error < ExoMoonLeastSquares.RECOVERY_PERIOD_TOLERANCE
+        return bool(close and k == 0), bool(close and k != 0), k, alias_period, error
+
     def require_usable_epochs(self):
         """Stop with an explicit error when no transit epoch is left to search.
 
@@ -3591,8 +3624,10 @@ class ExoMoonLeastSquares:
         if inject_params is not None:
             period_err = abs(best_snr_period - inject_params['moon_period']) / inject_params['moon_period']
             alpha_err = abs(np.cos(best_snr_alpha) - np.cos(inject_params['initial_alpha']))
-            alias_period, alias_k, min_alias_err = ExoMoonLeastSquares.find_period_alias(
-                inject_params['moon_period'], self.planet_period, best_snr_period, period_err)
+            period_match, alias_match, alias_k, alias_period, min_alias_err = \
+                ExoMoonLeastSquares.classify_recovered_period(inject_params['moon_period'], self.planet_period,
+                                                              best_snr_period)
+            self.injection_alias_k = alias_k
             logging.info("INJECTION RECOVERY (SNR): injected P=%.4f d, alpha=%.4f rad -> recovered P=%.4f d, alpha=%.4f rad (delta_P=%.2f%%, delta_cos-alpha=%.4f)",
                          inject_params['moon_period'], inject_params['initial_alpha'],
                          best_snr_period, best_snr_alpha, period_err * 100, alpha_err)
@@ -3602,7 +3637,8 @@ class ExoMoonLeastSquares:
             self.recovered_period = float(best_snr_period)
             self.recovered_alpha = float(best_snr_alpha)
             # I1: recovered needs a detection, the moon times within half a moon transit, and the
-            # period; a sampling alias with matching times is reported apart.
+            # period; a sampling alias with matching times is reported apart. The period counts as
+            # recovered only when the injected period itself (k = 0) is the nearest alias.
             self.injection_period_error = float(period_err)
             self.injection_timing_error = None
             timing_match = None
@@ -3610,8 +3646,7 @@ class ExoMoonLeastSquares:
                 diffs = np.abs([rec - inj for rec, inj in zip(rec_t0s, self.injected_t0s) if inj is not None])
                 self.injection_timing_error = float(np.median(diffs))
                 timing_match = bool(self.injection_timing_error < half_moon_dur)
-            pending_recovery = (timing_match, period_err < ExoMoonLeastSquares.RECOVERY_PERIOD_TOLERANCE,
-                                alias_k not in (None, 0) and min_alias_err < ExoMoonLeastSquares.RECOVERY_PERIOD_TOLERANCE)
+            pending_recovery = (timing_match, period_match, alias_match)
         # Plot best moon model on each single transit
         try:
             has_injected_plot = hasattr(self, 'injected_flux_moon_pandora')
@@ -3707,10 +3742,10 @@ class ExoMoonLeastSquares:
                 self.recovered = bool(self.detected and times_ok and period_match)
                 self.recovered_alias = bool(self.detected and times_ok and not period_match and alias_match)
                 logging.info("Injection recovery: detected=%s, moon times %s (median error %s d, tolerance %.4f d), "
-                             "period match=%s, alias=%s -> recovered=%s", self.detected,
+                             "period match=%s, alias=%s (nearest alias k=%s) -> recovered=%s", self.detected,
                              "match" if timing_match else ("not checked" if timing_match is None else "differ"),
                              None if self.injection_timing_error is None else round(self.injection_timing_error, 4),
-                             half_moon_dur, period_match, alias_match, self.recovered)
+                             half_moon_dur, period_match, alias_match, self.injection_alias_k, self.recovered)
 
 
 class SearchInput:
