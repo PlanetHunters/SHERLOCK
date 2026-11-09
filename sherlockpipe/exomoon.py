@@ -40,6 +40,8 @@ R_earth_to_R_sun = (ac.R_earth / ac.R_sun).value
 EARTH_DENSITY = Mearth_to_kg / (4 / 3 * np.pi * ac.R_earth.value ** 3) / 1000  # g/cm3
 MIN_RP_OVER_RSTAR = 1e-5
 MIN_NULL_RUNS = 20
+FAP_BOOTSTRAP_SAMPLES = 1000
+FAP_UPPER_PERCENTILE = 95
 MIN_INDEPENDENT_OFFSETS = 3
 MOON_MASS_FORECAST_SEED = 0
 _moon_mass_cache = {}
@@ -209,7 +211,8 @@ class ExoMoonLeastSquares:
             probability.
         fap_threshold : float, optional
             False-alarm probability below which the best hypothesis counts as a detection,
-            default 0.01.
+            default 0.01. The detection uses the FAP_UPPER_PERCENTILE percentile of the Gumbel
+            probability over bootstrap resamples of the nulls (see `false_alarm_upper`).
         null_seed : int, optional
             Seed of the pseudo-epoch offsets, default 0.
         detrend_window : float, optional
@@ -290,6 +293,9 @@ class ExoMoonLeastSquares:
         self.null_independent_offsets = None
         self.fap = None
         self.fap_empirical = None
+        self.fap_upper = None
+        self.fap_extrapolated = None
+        self.null_fit_rejected = None
         self.detected = None
         self.sde = None
         self.epoch_stats = None
@@ -3299,6 +3305,56 @@ class ExoMoonLeastSquares:
             fap = empirical
         return fap, empirical
 
+    def false_alarm_upper(self, snr):
+        """Return the FAP_UPPER_PERCENTILE percentile of the Gumbel false-alarm probability over bootstrap
+        resamples of the null runs, and whether an Anderson-Darling test rejects the Gumbel fit at 5 %.
+
+        With N nulls the measured probability cannot go below 1 / (N + 1), so a detection at a 0.01 threshold
+        with 100 nulls is always the Gumbel tail extrapolated past the largest null. The bootstrap measures how
+        much that extrapolation depends on which nulls were drawn, and the detection asks the upper value to be
+        below the threshold. The Gumbel (GEV shape 0) is kept rather than a free-shape GEV: the free shape
+        fitted to 100 maxima is poorly constrained, and on real nulls it comes out negative (a shorter tail),
+        so the Gumbel is the conservative tail. Returns (None, None) without enough nulls.
+        """
+        nulls = np.array([value for value in (self.null_snrs or []) if np.isfinite(value)])
+        if len(nulls) < MIN_NULL_RUNS or not np.isfinite(snr):
+            return None, None
+        rng = np.random.default_rng(self.null_seed)
+        faps = []
+        for _ in range(FAP_BOOTSTRAP_SAMPLES):
+            sample = rng.choice(nulls, len(nulls))
+            try:
+                loc, scale = stats.gumbel_r.fit(sample)
+                faps.append(float(stats.gumbel_r.sf(snr, loc, scale)) if scale > 0 else np.nan)
+            except Exception:
+                faps.append(np.nan)
+        faps = np.array(faps)
+        upper = float(np.percentile(faps[np.isfinite(faps)], FAP_UPPER_PERCENTILE)) if np.any(np.isfinite(faps)) \
+            else None
+        try:
+            test = stats.anderson(nulls, dist='gumbel_r')
+            rejected = bool(test.statistic > test.critical_values[list(test.significance_level).index(5.0)])
+        except Exception:
+            rejected = None
+        return upper, rejected
+
+    def assess_false_alarm(self, snr):
+        """Set fap, fap_empirical, fap_upper, fap_extrapolated, null_fit_rejected and detected for an SNR.
+
+        detected is fap_upper < fap_threshold, so it holds whichever nulls the bootstrap draws; all are
+        None without enough null runs.
+        """
+        self.fap, self.fap_empirical = self.false_alarm(snr)
+        if self.fap is None:
+            self.fap_upper = self.fap_extrapolated = self.null_fit_rejected = self.detected = None
+            return
+        self.fap_upper, self.null_fit_rejected = self.false_alarm_upper(snr)
+        if self.fap_upper is None:
+            self.fap_upper = self.fap
+        completed = int(np.sum(np.isfinite(np.asarray(self.null_snrs, dtype=float))))
+        self.fap_extrapolated = bool(self.fap < 1 / (completed + 1))
+        self.detected = bool(self.fap_upper < self.fap_threshold)
+
     def assess_single_event(self, search_input):
         """Measure each epoch's depth and SNR and the leave-one-out SNR at the best hypothesis (audit item H12).
 
@@ -3815,17 +3871,22 @@ class ExoMoonLeastSquares:
             self.null_snrs = [float(value) for value in null_snrs]
         elif self.null_runs > 0:
             self.null_snrs = self.run_nulls(before_trim, period_grid)
-        self.fap, self.fap_empirical = self.false_alarm(self.max_snr)
-        self.detected = None if self.fap is None else bool(self.fap < self.fap_threshold)
+        self.assess_false_alarm(self.max_snr)
         if self.fap is None:
             logging.info("No false-alarm probability: SNR %.2f at P=%.4f d, alpha=%.3f rad is a search statistic "
                          "without a calibrated significance%s", self.max_snr, best_snr_period, best_snr_alpha,
                          "" if self.null_runs or null_snrs is not None else " (no null runs requested)")
         else:
             logging.info("SNR %.2f at P=%.4f d, alpha=%.3f rad: false-alarm probability %.2g (Gumbel fit to %d "
-                         "nulls; empirical %.2g), %s at the %.2g threshold", self.max_snr, best_snr_period,
-                         best_snr_alpha, self.fap, len(self.null_snrs), self.fap_empirical,
-                         "detected" if self.detected else "not detected", self.fap_threshold)
+                         "nulls; %d%% bootstrap upper value %.2g; empirical %.2g), %s at the %.2g threshold%s",
+                         self.max_snr, best_snr_period, best_snr_alpha, self.fap, len(self.null_snrs),
+                         FAP_UPPER_PERCENTILE, self.fap_upper, self.fap_empirical,
+                         "detected" if self.detected else "not detected", self.fap_threshold,
+                         "; below 1/(N+1), so extrapolated past the largest null: confirm with more null runs "
+                         "(--null_runs 1000 measures 0.01 directly)" if self.fap_extrapolated else "")
+            if self.null_fit_rejected:
+                logging.warning("An Anderson-Darling test rejects the Gumbel fit to the %d null SNRs at 5 %%, so "
+                                "the extrapolated false-alarm probability is less reliable", len(self.null_snrs))
         if inject_params is not None:
             timing_match, period_match, alias_match = pending_recovery
             if self.detected is None:

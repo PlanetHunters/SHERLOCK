@@ -10,9 +10,19 @@
   epochs with the fitted planet injected. They keep the target's own noise,
   gaps and correlated noise and go through the same planet fit, grid and
   selection. A Gumbel fit to their SNR gives `fap`, with the empirical
-  (k+1)/(N+1) as a check; `detected` is `fap < --fap_threshold` (default
-  0.01). Without data away from the transits, or with fewer than 20 completed
-  nulls, `fap` and `detected` are null and the log says why.
+  (k+1)/(N+1) as a check; `detected` is `fap_upper < --fap_threshold`
+  (default 0.01), where `fap_upper` is the 95th percentile of the Gumbel
+  `fap` over 1000 bootstrap resamples of the nulls. With N nulls no
+  probability below 1/(N+1) is measured, so at the default 100 nulls every
+  detection extrapolates the Gumbel tail past the largest null; on
+  Kepler-1514 b the same injection gave 5.5e-5 or 7.5e-4 depending on the
+  null set. `fap_extrapolated` marks such a `fap` and the log recommends about
+  1000 nulls to confirm a candidate; `null_fit_rejected` is an
+  Anderson-Darling rejection of the Gumbel at 5 %. The Gumbel stays rather
+  than a free-shape GEV, whose shape comes out negative on the real nulls
+  (a shorter tail), so it is the conservative tail. Without data away from
+  the transits, or with fewer than 20 completed nulls, `fap` and `detected`
+  are null and the log says why.
 - EMLS single-event flag (audit item H12): each epoch's depth and SNR and the
   leave-one-out SNR at the best hypothesis are stored in `epoch_stats`.
   `single_event` is set when leaving one transit out keeps less than half the
@@ -22,7 +32,8 @@
   the selected period inside the grid, |k| up to 30, with their SNR and SNR
   below the best, and the log names those within 1 SNR. The injection alias
   check also goes to |k| = 30.
-- `emls_results.json` records `fap`, `fap_empirical`, `fap_threshold`,
+- `emls_results.json` records `fap`, `fap_upper`, `fap_empirical`,
+  `fap_extrapolated`, `null_fit_rejected`, `fap_threshold`,
   `detected`, the null runs and their SNRs, `single_event`, `loo_snr_min`,
   `epoch_stats`, `sde` and the `sherlockpipe_version` (audit item I8).
 

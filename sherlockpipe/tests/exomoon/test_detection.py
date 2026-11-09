@@ -138,6 +138,60 @@ def test_independent_offsets_count_only_data(tmp_path):
     assert max(ExoMoonLeastSquares.independent_offsets(v, trim) for v in valid) <= 2
 
 
+def gumbel_nulls(tmp_path, size, seed=1):
+    t0s, time, flux, flux_err, duration, _ = guard.planet_curve(3)
+    emls = guard.build(flux, time, flux_err, tmp_path, t0s, duration)
+    emls.null_snrs = list(stats.gumbel_r.rvs(loc=3.0, scale=0.4, size=size, random_state=np.random.default_rng(seed)))
+    return emls
+
+
+def test_detection_needs_the_bootstrap_upper_value_below_the_threshold(tmp_path):
+    """With 100 nulls a fap below 0.01 is always extrapolated past the largest null. A fap of 0.006 is
+    within the bootstrap spread of 0.01, so it is not a detection; a fap of 1e-4 is."""
+    emls = gumbel_nulls(tmp_path, 100)
+    loc, scale = stats.gumbel_r.fit(emls.null_snrs)
+
+    emls.assess_false_alarm(stats.gumbel_r.isf(0.006, loc, scale))
+    assert emls.fap == pytest.approx(0.006, rel=1e-3)
+    assert emls.fap_extrapolated is True
+    assert emls.fap_upper > emls.fap_threshold > emls.fap
+    assert emls.detected is False
+
+    emls.assess_false_alarm(stats.gumbel_r.isf(1e-4, loc, scale))
+    assert emls.fap_extrapolated is True and emls.fap_upper < emls.fap_threshold
+    assert emls.detected is True
+
+
+def test_many_nulls_measure_the_threshold_without_extrapolating(tmp_path):
+    emls = gumbel_nulls(tmp_path, 1000)
+    loc, scale = stats.gumbel_r.fit(emls.null_snrs)
+
+    emls.assess_false_alarm(stats.gumbel_r.isf(0.005, loc, scale))
+
+    assert emls.fap_extrapolated is False
+    assert emls.fap_upper < emls.fap_threshold
+    assert emls.detected is True
+    assert emls.null_fit_rejected is False
+
+
+def test_a_non_gumbel_null_distribution_is_flagged(tmp_path):
+    emls = gumbel_nulls(tmp_path, 100)
+    emls.null_snrs = list(np.concatenate([np.full(50, 2.0), np.full(50, 4.0)])
+                          + np.random.default_rng(2).normal(0, 0.05, 100))
+
+    emls.assess_false_alarm(6.0)
+
+    assert emls.null_fit_rejected is True
+
+
+def test_no_upper_value_without_enough_nulls(tmp_path):
+    emls = gumbel_nulls(tmp_path, exomoon.MIN_NULL_RUNS - 1)
+
+    emls.assess_false_alarm(5.0)
+
+    assert emls.fap is None and emls.fap_upper is None and emls.detected is None
+
+
 @pytest.fixture(scope='module')
 def noise_with_nulls(tmp_path_factory):
     return null_search(tmp_path_factory.mktemp('noise_nulls'))

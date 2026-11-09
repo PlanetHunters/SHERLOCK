@@ -39,9 +39,12 @@ def parse_args(argv=None):
                          "moon can cause. 0 removes the prior.")
     ap.add_argument('--null_runs', type=int, default=100,
                     help="Searches on pseudo-epochs away from the transits that calibrate the false-alarm "
-                         "probability of the SNR. 0 skips them.")
+                         "probability of the SNR. 0 skips them. With N nulls a probability below 1/(N+1) is the "
+                         "Gumbel tail extrapolated past the largest null, so the default 100 always extrapolates "
+                         "at the 0.01 threshold; use about 1000 to confirm a candidate.")
     ap.add_argument('--fap_threshold', type=float, default=0.01,
-                    help="False-alarm probability below which the best hypothesis is a detection.")
+                    help="False-alarm probability below which the best hypothesis is a detection; the 95th percentile "
+                         "of the false-alarm probability over bootstrap resamples of the nulls must be below it.")
     ap.add_argument('--detrend_window', type=float, default=None,
                     help="Biweight window in days for the EMLS detrending of lc_0.csv. Default: 3 planet durations.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")

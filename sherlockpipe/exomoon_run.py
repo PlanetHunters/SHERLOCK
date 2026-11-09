@@ -655,7 +655,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "sherlockpipe_version": __version__,
         "max_snr": emls.max_snr, "sde": emls.sde, "max_sde": emls.max_sde,
         "best_period": emls.recovered_period, "best_alpha": emls.recovered_alpha,
-        "fap": emls.fap, "fap_empirical": emls.fap_empirical, "fap_threshold": emls.fap_threshold,
+        "fap": emls.fap, "fap_upper": emls.fap_upper, "fap_empirical": emls.fap_empirical,
+        "fap_extrapolated": emls.fap_extrapolated, "null_fit_rejected": emls.null_fit_rejected,
+        "fap_threshold": emls.fap_threshold,
         "detected": emls.detected,
         "null_runs_requested": null_runs, "null_runs_completed": len(emls.null_snrs or []),
         "null_independent_offsets": emls.null_independent_offsets, "null_snrs": emls.null_snrs,
@@ -669,7 +671,10 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "and the epoch statistics describe that same hypothesis (audit items H7, H8). fap is the "
                  "probability that noise alone gives this SNR, from a Gumbel fit to the SNR of null searches on "
                  "pseudo-epochs of the same light curve away from the transits; fap_empirical is (k+1)/(N+1). "
-                 "detected is fap < fap_threshold, or null without enough null runs. single_event flags a "
+                 "fap_upper is the 95th percentile of the Gumbel fap over bootstrap resamples of the nulls, and "
+                 "detected is fap_upper < fap_threshold, or null without enough null runs. fap_extrapolated "
+                 "marks a fap below 1/(N+1), which no null measures: confirm such a detection with more null "
+                 "runs. null_fit_rejected is an Anderson-Darling rejection of the Gumbel fit at 5 %. single_event flags a "
                  "signal that one transit carries (leaving one out keeps less than half the SNR); it does not "
                  "change detected. sde (SNR spectrum at the selected period) and max_sde (residual spectrum) "
                  "are diagnostics that do not separate moons from noise. best_radius inverts the "
