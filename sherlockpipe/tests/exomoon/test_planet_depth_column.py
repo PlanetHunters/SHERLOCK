@@ -108,3 +108,44 @@ def test_search_measures_the_same_moon_window_whatever_the_subtracted_planet_dep
     assert abs(window_depth(shifted) - window_depth(reference)) < 1e-6
     assert abs(shifted[3] - reference[3]) < 1e-6
     assert abs(window_depth(uncorrected) - window_depth(reference)) > 20e-6
+
+
+def test_search_measures_the_same_moon_window_whatever_the_epoch_mid_time_errors(tmp_path):
+    emls = system(tmp_path)
+    inputs = run_to_search(emls)
+    emls.build_search_templates()
+    search_input = inputs[len(inputs) // 2]
+    shifted = copy.copy(emls)
+    # Each epoch's mid-time fit pulled by a different amount, as a moon at a different place does.
+    shifts = np.array([3.0, -2.0, 4.0, -1.0, 2.5, -3.5]) / 1440
+    error = np.zeros(len(emls.time))
+    for index, shift in enumerate(shifts):
+        error += np.where(emls.planet_epoch_index == index, shift * emls.planet_t0_column, 0.0)
+    shifted.flux = emls.flux - error
+    plain = copy.copy(shifted)
+    plain.fit_planet_t0 = False
+
+    reference, moved, depth_only = (e.search(search_input, return_lc=True) for e in (emls, shifted, plain))
+
+    def window_depth(result):
+        return np.mean(result[7]) - np.mean(result[5])
+
+    assert abs(window_depth(moved) - window_depth(reference)) < 1e-6
+    assert abs(moved[3] - reference[3]) < 1e-6
+    assert abs(window_depth(depth_only) - window_depth(reference)) > 5e-6
+
+
+def test_planet_t0_column_is_antisymmetric_about_each_mid_time(tmp_path):
+    emls = system(tmp_path)
+    run_to_search(emls)
+    mid_times = [t0 + ttv for t0, ttv in zip(emls.bary_t0s, emls.ttvs)]
+
+    assert emls.planet_t0_column is not None and set(np.unique(emls.planet_epoch_index)) == {-1, *range(EPOCHS)}
+    for index, mid_time in enumerate(mid_times):
+        mine = emls.planet_epoch_index == index
+        before = mine & (emls.time < mid_time)
+        after = mine & (emls.time > mid_time)
+        # A later planet leaves more flux at ingress and less at egress.
+        assert np.sum(emls.planet_t0_column[before]) > 0 > np.sum(emls.planet_t0_column[after])
+        assert abs(np.sum(emls.planet_t0_column[before]) + np.sum(emls.planet_t0_column[after])) < \
+            0.1 * np.sum(np.abs(emls.planet_t0_column[mine]))

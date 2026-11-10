@@ -660,6 +660,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
         "planet_depth_correction_ppm": emls.planet_depth_correction,
+        "planet_t0_shifts": emls.planet_t0_shifts,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,
                      "impact": emls.planet_impact_param, "inc": emls.planet_inc,
                      "a_over_rstar": emls.planet_a_over_rstar},
@@ -693,7 +694,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "planet fit can absorb part of a moon inside the planet transit; the search fits one "
                  "planet depth correction shared by all epochs with each moon hypothesis, and "
                  "planet_depth_correction_ppm is its value at the best one (negative when the fold fit "
-                 "had taken part of the moon as planet depth). planet_fit_absorbed_fraction measures what "
+                 "had taken part of the moon as planet depth), and planet_t0_shifts the mid-time shift it fits for each "
+                 "epoch with that moon. planet_fit_absorbed_fraction measures what "
                  "the fold fit absorbs before that correction.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
