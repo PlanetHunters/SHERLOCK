@@ -1,10 +1,13 @@
 """Masked detrending, injection before detrending and the per-epoch baseline: audit items A1, A2 and A3.
 
 A1: EMLS detrends the undetrended curve with every moon window masked, so neither the planet nor
-a moon shapes the trend, and joins the trend linearly across each mask. A2: an injected moon goes
+a moon shapes the trend, and joins the trend linearly across each mask. Where the moon window is
+much wider than the biweight window that line misses the stellar variability, so 'auto' masks only
+the planet transit there; 'none' masks nothing and divides the planet model out. A2: an injected moon goes
 into the curve before that detrending. A3: each epoch is divided by a straight line fitted outside
 the moon window, so a residual slope does not move the planet mid-time.
 """
+import logging
 import tempfile
 from unittest import mock
 
@@ -43,12 +46,23 @@ def audit_fixture(moon_offset, seed, noise=1e-3, trend=None):
     return t0s, time, flux, planet, moon, t14
 
 
-def emls_for(t0s, time, flux, t14, planet_mass=3000.0):
-    # A heavy planet, so the widest moon window (+-0.55 d) holds a moon at 1.5 T14.
+def emls_for(t0s, time, flux, t14, planet_mass=3000.0, detrend_mask='moon_window', detrend_window=None):
+    # A heavy planet, so the widest moon window (+-0.46 d) holds a moon at 1.5 T14.
     return ExoMoonLeastSquares(tempfile.mkdtemp(), 1, 1.0, 1.0, [0.4, 0.2], PLANET_RADIUS, 0.5, planet_mass, PERIOD,
                                0.0, t14, A_AU, 90.0, 0.5, 0.0, 0.0, 90.0, 0.0, 0.25, 2.5, list(t0s), time, flux,
                                np.full(len(time), 1e-3), 5.5, period_grid_size=40, radius_grid_size=4,
-                               detrend_window=3 * t14)
+                               detrend_window=3 * t14 if detrend_window is None else detrend_window,
+                               detrend_mask=detrend_mask)
+
+
+def window_residual(scheme, variability_period, detrend_window=None):
+    """Scatter inside the moon windows after detrending a curve with stellar variability, and the planet kept."""
+    variability = lambda time: 1 + 2e-3 * np.sin(2 * np.pi * time / variability_period)
+    t0s, time, flux, planet, moon, t14 = audit_fixture(0.25, 0, noise=3e-4, trend=variability)
+    emls = emls_for(t0s, time, flux, t14, detrend_mask=scheme, detrend_window=detrend_window)
+    _, flat, _ = emls.detrend(time, flux, None)
+    windows = emls.epoch_distance(time) < emls.moon_window_half_width()
+    return np.std((flat / (planet * moon))[windows]), amplitude(flat / moon, planet)
 
 
 def amplitude(flat, model):
@@ -105,6 +119,76 @@ def test_masks_cover_every_moon_window():
     for t0 in t0s:
         assert np.all(captured['mask'][np.abs(sorted_time - t0) < half])
     assert not np.any(captured['mask'][np.min(np.abs(sorted_time[:, None] - t0s[None, :]), axis=1) > half])
+
+
+@pytest.mark.parametrize('variability_period', [1.0, 1.5])
+def test_planet_mask_follows_the_star_across_a_wide_moon_window(variability_period):
+    """With a 0.3 d biweight against a 0.92 d moon window, the line across the window leaves
+    2.5-5.7 times the white noise of 300 ppm (1711 and 738 ppm measured); the planet mask stays
+    within 15 % of it (328 and 340 ppm) and keeps the planet."""
+    line, _ = window_residual('moon_window', variability_period, detrend_window=0.3)
+    planet_only, kept = window_residual('planet', variability_period, detrend_window=0.3)
+
+    assert line > 2 * 3e-4
+    assert planet_only < 1.15 * 3e-4
+    assert kept == pytest.approx(1.0, abs=0.01)
+
+
+def test_planet_mask_covers_only_the_planet_transit():
+    t0s, time, flux, _, _, t14 = audit_fixture(0.25, 0)
+    emls = emls_for(t0s, time, flux, t14, detrend_mask='planet')
+    captured = {}
+    real_flatten = wotan.flatten
+
+    def spy(*args, **kwargs):
+        captured['mask'] = kwargs['mask']
+        return real_flatten(*args, **kwargs)
+
+    with mock.patch.object(wotan, 'flatten', spy):
+        sorted_time = emls.detrend(time, flux, None)[0]
+    distance = emls.epoch_distance(sorted_time)
+    half = ExoMoonLeastSquares.PLANET_MASK_HALF_WIDTH * t14
+    assert np.all(captured['mask'][distance < half])
+    assert not np.any(captured['mask'][distance > half])
+
+
+def test_no_mask_divides_the_planet_out_first():
+    t0s, time, flux, planet, moon, t14 = audit_fixture(0.25, 0)
+    emls = emls_for(t0s, time, flux, t14, detrend_mask='none')
+    captured = {}
+    real_flatten = wotan.flatten
+
+    def spy(*args, **kwargs):
+        captured['flux'], captured['mask'] = np.array(args[1]), kwargs.get('mask')
+        return real_flatten(*args, **kwargs)
+
+    with mock.patch.object(wotan, 'flatten', spy):
+        _, flat, _ = emls.detrend(time, flux, None)
+
+    assert captured['mask'] is None
+    in_transit = planet < 1 - 1e-3
+    assert np.median(captured['flux'][in_transit]) == pytest.approx(1.0, abs=1e-3)
+    assert amplitude(flat / moon, planet) > 0.9
+
+
+@pytest.mark.parametrize('detrend_window, expected', [(None, 'moon_window'), (0.3, 'planet')])
+def test_auto_masks_the_planet_only_when_the_moon_window_is_wide(caplog, detrend_window, expected):
+    """The fixture's moon window is 0.92 d: 1.25 biweight windows of 3 T14, 3.1 of 0.3 d."""
+    t0s, time, flux, _, _, t14 = audit_fixture(0.25, 0)
+    emls = emls_for(t0s, time, flux, t14, detrend_mask='auto', detrend_window=detrend_window)
+
+    with caplog.at_level(logging.INFO):
+        assert emls.resolved_detrend_mask() == expected
+        emls.resolved_detrend_mask()
+
+    logged = [r.getMessage() for r in caplog.records if 'Detrending mask' in r.getMessage()]
+    assert len(logged) == 1 and f'{expected} (auto)' in logged[0]
+
+
+def test_unknown_detrend_mask_is_rejected():
+    t0s, time, flux, _, _, t14 = audit_fixture(0.25, 0)
+    with pytest.raises(ValueError, match='detrend_mask'):
+        emls_for(t0s, time, flux, t14, detrend_mask='moon')
 
 
 # --- A2 ----------------------------------------------------------------------------------------------------------

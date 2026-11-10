@@ -47,6 +47,10 @@ def parse_args(argv=None):
                          "of the false-alarm probability over bootstrap resamples of the nulls must be below it.")
     ap.add_argument('--detrend_window', type=float, default=None,
                     help="Biweight window in days for the EMLS detrending of lc_0.csv. Default: 3 planet durations.")
+    ap.add_argument('--detrend_mask', default='auto', choices=['auto', 'moon_window', 'planet', 'none'],
+                    help="What the EMLS detrending masks: the whole moon window of every epoch (moon_window), only "
+                         "the planet transit (planet), or nothing with the planet model divided out (none). auto "
+                         "takes planet when the moon window is more than twice the biweight window.")
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.")
     return ap.parse_args(argv)
 
@@ -56,4 +60,4 @@ if __name__ == '__main__':
     run_emls(args.object_dir, args.candidate, args.mask_candidates, args.planet_mass, args.min_moon_radius,
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
              args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes,
-             args.null_runs, args.fap_threshold, args.detrend_window)
+             args.null_runs, args.fap_threshold, args.detrend_window, args.detrend_mask)

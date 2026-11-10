@@ -515,7 +515,8 @@ def _setup_logging(log_file):
 def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius=None, max_moon_radius=None,
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
              max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None,
-             null_runs=100, fap_threshold=0.01, detrend_window=None):
+             null_runs=100, fap_threshold=0.01, detrend_window=None,
+             detrend_mask='auto'):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -550,6 +551,9 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         False-alarm probability below which the best hypothesis is a detection, default 0.01.
     detrend_window : float, optional
         Biweight window in days for the EMLS detrending of lc_0.csv, default three planet durations.
+    detrend_mask : str, optional
+        What that detrending masks: 'auto' (default), 'moon_window', 'planet' or 'none'; see
+        `ExoMoonLeastSquares.resolved_detrend_mask`.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -572,7 +576,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     try:
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
-                       subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold, detrend_window)
+                       subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold, detrend_window,
+                       detrend_mask)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -588,7 +593,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
-         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None):
+         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None, detrend_mask='auto'):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -609,7 +614,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,
         fap_threshold=fap_threshold, duration_from_fit=inputs["sources"].get("duration") != "candidates.csv",
         detrend_window=(DETREND_DURATIONS * planet["duration"] if detrend_window is None else float(detrend_window))
-        if inputs["detrend"] else None)
+        if inputs["detrend"] else None, detrend_mask=detrend_mask)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -640,7 +645,12 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "ephemeris_uncertainty_source": emls.ephemeris_source,
         "detrending": {"by": "emls" if emls.detrend_window is not None else "input",
                        "window": emls.detrend_window,
-                       "masked_half_width": emls.moon_window_half_width() if emls.detrend_window is not None else None},
+                       "mask": emls.resolved_detrend_mask() if emls.detrend_window is not None else None,
+                       "mask_requested": emls.detrend_mask,
+                       "masked_half_width": (emls.moon_window_half_width() if emls.resolved_detrend_mask() == "moon_window"
+                                             else ExoMoonLeastSquares.PLANET_MASK_HALF_WIDTH * emls.planet_duration
+                                             if emls.resolved_detrend_mask() == "planet" else 0.0)
+                       if emls.detrend_window is not None else None},
         "epoch_baseline_slopes": getattr(emls, "epoch_baseline_slopes", None),
         "model_validity": emls.model_validity, "planet_overlap_fraction": emls.planet_overlap_fraction,
         "planet_overlap_mean": emls.planet_overlap_mean,

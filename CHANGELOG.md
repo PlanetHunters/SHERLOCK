@@ -124,6 +124,21 @@
   `lc_0.csv` the candidate's curve is used with a warning. On noise the
   interpolated trend raises the median best SNR by about 9 % (2.87 to 3.12
   over six runs); the null runs go through the same detrending.
+- EMLS detrending mask (`--detrend_mask`, default `auto`): where the moon
+  window is more than twice the biweight window, the line across it misses
+  the stellar variability. On Kepler-1514 b with a 5.3 M_J planet (5.8 d
+  window, 2.7 d biweight) it left 222 ppm scatter and 170 ppm offsets
+  between epochs inside the windows, of the size of the moons searched for.
+  `auto` then masks only +-0.75 T14 around each epoch (`planet`): 94 ppm and
+  19 ppm there, and injected moons at Rp/3, Rp/4 and Rp/5 went from SNR
+  6.9/4.3/3.4 to 7.6/6.7/5.1 (Rp/4 now detected, FAP 5e-4), with the
+  control at FAP 0.35. The cost is the part of a moon outside the mask that
+  the biweight absorbs: about 20 % on Kepler at 30-min cadence, where the moon
+  points stand out from the noise, and up to 44 % on the audit fixture
+  (2-min cadence, moon within the point noise). So narrower windows keep the
+  whole-window mask (`moon_window`). `none` masks nothing and divides the
+  planet model out first. The choice is logged and written to
+  `emls_results.json` (`detrending.mask`).
 - EMLS injection before detrending (audit item A2): with the EMLS
   detrending, an injected moon is added to the undetrended curve, so
   recovery includes the detrending loss; the null pseudo-epochs are detrended
