@@ -333,6 +333,11 @@ class ExoMoonLeastSquares:
         self.fold_fit_status = None
         self.planet_a_over_rstar = None
         self.absorbed_fraction = None
+        # Derivative of the subtracted planet model with respect to its depth, at each kept epoch,
+        # and the depth correction the search measures with it at the best moon (see `search`).
+        self.planet_depth_column = None
+        self.planet_depth_correction = None
+        self.last_planet_depth_correction = None
         self.epochs_dropped_fit = []
         self.epochs_flagged_rms = []
         self.epochs_flagged_rp = []
@@ -1915,7 +1920,7 @@ class ExoMoonLeastSquares:
     #@njit(fastmath=True, parallel=False)
     def compute_moon_transit_scenarios(time, flux, flux_err, planet_t0, moon_initial_alpha, moon_period, bary_t0s,
                                        half_moon_orbit_transit_duration, half_moon_max_orbit_transit_duration,
-                                       half_moon_transit_duration):
+                                       half_moon_transit_duration, extra=None):
         """Compute moon transit scenarios for all barycentric transit times.
 
         Parameters
@@ -1940,12 +1945,15 @@ class ExoMoonLeastSquares:
             Half the maximum moon orbit transit duration in days.
         half_moon_transit_duration : float
             Half the moon transit duration in days.
+        extra : array_like, optional
+            A per-point column carried with the flux (the planet depth column), appended to each
+            scenario.
 
         Returns
         -------
         list
-            List of [moon_alpha, time, flux, flux_err], one for each epoch
-            with data. Empty if no epoch has data.
+            List of [moon_alpha, time, flux, flux_err] (plus the extra column when given), one for
+            each epoch with data. Empty if no epoch has data.
         """
         #TODO need to take into account "prograde" or "retrograde" orbit
         orbit_scenarios = []
@@ -1971,10 +1979,13 @@ class ExoMoonLeastSquares:
             # axs.set_ylabel('Flux')
             # fig_transit.show()
             if len(time_moon_transit) > 0:
-                orbit_scenarios.append([moon_alpha, time_moon_transit, flux_moon_transit, flux_err_moon_transit])
+                scenario = [moon_alpha, time_moon_transit, flux_moon_transit, flux_err_moon_transit]
+                if extra is not None:
+                    scenario.append(extra[time_orbit_range_args])
+                orbit_scenarios.append(scenario)
         return orbit_scenarios
 
-    def split_scenarios(self, search_input, time, flux, flux_err, bary_t0s):
+    def split_scenarios(self, search_input, time, flux, flux_err, bary_t0s, extra=None):
         """Stack the epochs of one hypothesis and split them into the moon window and its surroundings.
 
         Parameters
@@ -1985,12 +1996,17 @@ class ExoMoonLeastSquares:
             Planet-subtracted light curve.
         bary_t0s : list of float
             Planet epochs to stack.
+        extra : numpy.ndarray, optional
+            The planet depth column (see `planet_depth_derivative`). It is stacked with the flux
+            and fitted with the moon window (see `planet_depth_fit`), and the returned fluxes carry
+            the planet correction.
 
         Returns
         -------
         tuple or None
             (scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err), with
-            the times relative to the moon transit, or None when no epoch has data.
+            the times relative to the moon transit, or None when no epoch has data. With `extra`,
+            the planet depth correction and the uncertainty inflation of the moon depth follow.
         """
         # Alpha is the moon phase at self.planet_t0, the same reference inject_moon uses, so it
         # does not move when the first epoch is skipped or rejected.
@@ -1999,34 +2015,59 @@ class ExoMoonLeastSquares:
                                                                 search_input.moon_period, bary_t0s,
                                                                                search_input.half_moon_orbit_transit_duration,
                                                                 search_input.half_moon_max_orbit_transit_duration,
-                                                                               search_input.half_moon_transit_duration)
+                                                                               search_input.half_moon_transit_duration,
+                                                                               extra=extra)
         if len(transit_scenarios) == 0:
             return None
         scenario_time = []
         scenario_flux = []
         scenario_flux_err = []
+        scenario_extra = []
         for normalized_moon_transit_scenario in transit_scenarios:
             scenario_time = np.concatenate((scenario_time, normalized_moon_transit_scenario[1].flatten()))
             scenario_flux = np.concatenate((scenario_flux, normalized_moon_transit_scenario[2].flatten()))
             scenario_flux_err = np.concatenate((scenario_flux_err, normalized_moon_transit_scenario[3].flatten()))
+            if extra is not None:
+                scenario_extra = np.concatenate((scenario_extra, normalized_moon_transit_scenario[4].flatten()))
         sorted_time_args = np.argsort(scenario_time)
         scenario_time = scenario_time[sorted_time_args]
         scenario_flux = scenario_flux[sorted_time_args]
         scenario_flux_err = scenario_flux_err[sorted_time_args]
+        half_window = search_input.half_moon_transit_duration
+        correction, inflation = 0.0, 1.0
+        if extra is not None:
+            # The planet correction comes before the clipping, so a planet depth error is not
+            # clipped as upper outliers; it is fitted again on the points the clipping keeps.
+            scenario_extra = np.asarray(scenario_extra)[sorted_time_args]
+            raw_flux = scenario_flux
+            inside = np.abs(scenario_time) <= half_window
+            correction = ExoMoonLeastSquares.planet_depth_fit(raw_flux[inside], raw_flux[~inside],
+                                                              scenario_extra[inside], scenario_extra[~inside])[2]
+            scenario_flux = raw_flux - correction * scenario_extra
         outliers_args = ExoMoonLeastSquares.remove_outliers(scenario_flux, sigma_lower=float('inf'), sigma_upper=3)
         scenario_time = scenario_time[~outliers_args].flatten()
         scenario_flux = scenario_flux[~outliers_args].flatten()
         scenario_flux_err = scenario_flux_err[~outliers_args].flatten()
+        if extra is not None:
+            scenario_extra = scenario_extra[~outliers_args].flatten()
+            raw_flux = raw_flux[~outliers_args].flatten()
+            inside = np.abs(scenario_time) <= half_window
+            _, _, correction, inflation = ExoMoonLeastSquares.planet_depth_fit(
+                raw_flux[inside], raw_flux[~inside], scenario_extra[inside], scenario_extra[~inside])
+            scenario_flux = raw_flux - correction * scenario_extra
         #TODO check whether to use this mean or the real scenario_flux
         #scenario_flux = ExoMoonLeastSquares.running_mean_equal_length(scenario_flux, len(scenario_flux) // 100)
-        it_args = np.argwhere(np.abs(scenario_time) <= search_input.half_moon_transit_duration).flatten()
-        oot_args = np.argwhere(np.abs(scenario_time) > search_input.half_moon_transit_duration).flatten()
+        it_args = np.argwhere(np.abs(scenario_time) <= half_window).flatten()
+        oot_args = np.argwhere(np.abs(scenario_time) > half_window).flatten()
         it_time = scenario_time[it_args]
         oot_time = scenario_time[oot_args]
         it_flux = scenario_flux[it_args]
         oot_flux = scenario_flux[oot_args]
         it_flux_err = scenario_flux_err[it_args]
         oot_flux_err = scenario_flux_err[oot_args]
+        if extra is not None:
+            return (scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err,
+                    correction, inflation)
         return scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err
 
     def window_depth(self, search_input, time, flux, flux_err, bary_t0s):
@@ -2057,19 +2098,24 @@ class ExoMoonLeastSquares:
             template_unusable is True when a dip was seen but no template
             had depth at the observed times.
         """
-        split = self.split_scenarios(search_input, self.time, self.flux, self.flux_err, self.bary_t0s)
+        column = self.search_planet_depth_column()
+        split = self.split_scenarios(search_input, self.time, self.flux, self.flux_err, self.bary_t0s, extra=column)
         if split is None:
             no_data = np.array([])
             scores = (ExoMoonLeastSquares.MAX_RESIDUAL, ExoMoonLeastSquares.MAX_RESIDUAL, self.min_radius, np.nan)
             return scores + (no_data, no_data, no_data, no_data, no_data) if return_lc else scores + (False,)
-        scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err = split
+        scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err = split[:7]
         if len(it_flux) == 0 or len(oot_flux) < 2:
             # No in-window or out-of-window data: the depth and the noise are undefined.
             no_data = np.array([])
             scores = (ExoMoonLeastSquares.MAX_RESIDUAL, ExoMoonLeastSquares.MAX_RESIDUAL, self.min_radius, np.nan)
             return scores + (it_time, it_flux, oot_time, oot_flux, no_data) if return_lc else scores + (False,)
         # Depth is measured against the surrounding out-of-window level, so a normalisation offset
-        # or the upper-only outlier clipping does not count as signal.
+        # or the upper-only outlier clipping does not count as signal. With the planet depth column,
+        # one planet depth correction shared by all epochs is fitted with it (see planet_depth_fit).
+        inflation = 1.0
+        if column is not None:
+            self.last_planet_depth_correction, inflation = split[7], split[8]
         depth = np.mean(oot_flux) - np.mean(it_flux)
         t0_flux_mean_value = 1 - depth
         if len(self.models) == 0:
@@ -2085,11 +2131,48 @@ class ExoMoonLeastSquares:
                                          self.max_radius, self.star_radius, self.radius_grid_size))
         #oot_noise = np.std(oot_flux)
         #oot_noise = np.sqrt(np.std(oot_flux) * (np.sqrt(np.sum(oot_flux_err ** 2) / len(oot_flux_err))))
-        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux) / self.red_noise_factor
+        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux) / inflation / self.red_noise_factor
         if return_lc:
             return residual_calculation, residual_baseline, residual_radius, model_snr, it_time, it_flux, oot_time, oot_flux, residual_model
         else:
             return residual_calculation, residual_baseline, residual_radius, model_snr, template_unusable
+
+    @staticmethod
+    def planet_depth_fit(it_flux, oot_flux, it_column, oot_column):
+        """Fit the moon-window depth together with one planet depth correction, on the stacked epochs.
+
+        The stacked points are fitted with a constant, the moon window (1 inside, 0 outside) and
+        the planet depth column, the derivative of the subtracted planet model with respect to its
+        depth placed at each epoch's own mid-time. The moon window is one template in the frame of
+        the moon, the stacking of the search; the planet column is one depth change shared by all
+        epochs, in the frame of the planet. They separate because the moon sits at a different
+        place of the planet transit in each epoch. A moon inside the transit in most epochs deepens
+        the fold fit by its mean depth, and the subtraction then leaves that depth back where the
+        moon is absent; the shared correction returns it, so the moon is measured whole.
+
+        Returns
+        -------
+        tuple
+            (it_flux, oot_flux, correction, inflation): the fluxes with the planet correction
+            removed, so their window depth is the fitted moon depth; the depth correction in flux
+            units (negative when the subtracted planet was too deep); and the factor by which the
+            planet column widens the moon-depth uncertainty against the plain difference of means.
+            Without a usable column the fluxes come back unchanged, with correction 0 and
+            inflation 1.
+        """
+        n_it, n_oot = len(it_flux), len(oot_flux)
+        column = np.concatenate((it_column, oot_column))
+        if n_it == 0 or n_oot < 2 or not np.any(column != 0):
+            return it_flux, oot_flux, 0.0, 1.0
+        design = np.column_stack((np.ones(n_it + n_oot), np.concatenate((np.ones(n_it), np.zeros(n_oot))), column))
+        normal = design.T @ design
+        if np.linalg.matrix_rank(normal) < 3:
+            return it_flux, oot_flux, 0.0, 1.0
+        normal_inverse = np.linalg.inv(normal)
+        coefficients = normal_inverse @ (design.T @ np.concatenate((it_flux, oot_flux)))
+        correction = float(coefficients[2])
+        inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / n_it + 1 / n_oot)))
+        return it_flux - correction * it_column, oot_flux - correction * oot_column, correction, inflation
 
     @staticmethod
     def box_snr(it_flux, oot_flux):
@@ -3449,12 +3532,17 @@ class ExoMoonLeastSquares:
         SINGLE_EVENT_SNR_FRACTION of the SNR. A signal spread over N epochs keeps about
         sqrt((N - 1) / N) of it. The flag does not change the detection.
         """
+        column = self.search_planet_depth_column()
+
         def measure(epochs):
-            split = self.split_scenarios(search_input, self.time, self.flux, self.flux_err, epochs) if epochs else None
+            # The same statistic as `search`, planet depth correction included.
+            split = self.split_scenarios(search_input, self.time, self.flux, self.flux_err, epochs,
+                                         extra=column) if epochs else None
             if split is None or len(split[2]) == 0 or len(split[5]) < 2:
                 return None, None
+            inflation = split[8] if column is not None else 1.0
             return (float(np.mean(split[5]) - np.mean(split[2])),
-                    ExoMoonLeastSquares.box_snr(split[2], split[5]) / self.red_noise_factor)
+                    ExoMoonLeastSquares.box_snr(split[2], split[5]) / inflation / self.red_noise_factor)
 
         self.epoch_stats = []
         for t0 in self.bary_t0s:
@@ -3483,6 +3571,42 @@ class ExoMoonLeastSquares:
         self.models = ExoMoonLeastSquares.build_moon_templates(
             ma, np.linspace(self.min_radius, self.max_radius, self.radius_grid_size), self.star_radius,
             max(self.planet_duration * 0.7, search_half_window), self.exposure_time)
+        self.planet_depth_column = self.planet_depth_derivative(self.time)
+
+    def search_planet_depth_column(self):
+        """Return the planet depth column when it matches the light curve being searched, else None."""
+        column = self.planet_depth_column
+        if column is None or self.time is None or len(column) != len(self.time):
+            return None
+        return column
+
+    def planet_depth_derivative(self, time):
+        """Return the derivative of the subtracted planet model with respect to its depth at `time`.
+
+        It is evaluated with the fitted planet shape at the mid-time of each kept epoch (its TTV
+        included), so it is the same shape in every epoch, and it is zero away from the transits.
+        `search` fits one coefficient of it for all epochs (see `planet_depth_fit`). Only subtract
+        mode has a planet model to correct; mask mode and an empty curve give None.
+        """
+        if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
+            return None
+        params = self.null_planet_params()
+        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)] \
+            if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
+        step = 1e-3
+        column = np.zeros(len(time))
+        for mid_time in mid_times:
+            near = np.abs(time - mid_time) < self.planet_duration
+            if not np.any(near):
+                continue
+            nominal = copy.copy(params)
+            nominal.t0 = mid_time
+            deeper = copy.copy(nominal)
+            deeper.rp = nominal.rp * (1 + step)
+            flux = ExoMoonLeastSquares.transit_model(nominal, time[near], self.exposure_time).light_curve(nominal)
+            flux_deeper = ExoMoonLeastSquares.transit_model(deeper, time[near], self.exposure_time).light_curve(deeper)
+            column[near] = (flux_deeper - flux) / (deeper.rp ** 2 - nominal.rp ** 2)
+        return column if np.any(column != 0) else None
 
     def grid_search(self, progress=True):
         """Score every moon hypothesis of the grid.
@@ -3818,7 +3942,13 @@ class ExoMoonLeastSquares:
                                        self.planet_impact_param)
         # The radius comes from the same hypothesis as the SNR and the SDE (audit item H8).
         # H14: it is the template-inverted radius of the least-squares amplitude.
+        self.last_planet_depth_correction = None
         best_result = self.search(best_input, return_lc=True)
+        if self.planet_depth_column is not None and self.last_planet_depth_correction is not None:
+            self.planet_depth_correction = float(self.last_planet_depth_correction * 1e6)
+            logging.info("Planet depth fitted with the best moon: %+.0f ppm on the fold-fit depth %.0f ppm (negative "
+                         "when the fold fit had taken part of the moon as planet depth)",
+                         self.planet_depth_correction, self.null_planet_params().rp ** 2 * 1e6)
         moon_radius = float(best_result[2]) if len(best_result[-1]) else 0.0
         self.best_snr_radius = moon_radius
         # H15: the radius comes from the amplitude, so a dip deeper than the searched range is
@@ -3887,14 +4017,21 @@ class ExoMoonLeastSquares:
         try:
             has_injected_plot = hasattr(self, 'injected_flux_moon_pandora')
             # Get recovered radius from search at best (P, alpha)
+            self.last_planet_depth_correction = None
             _, _, recovered_radius, _, _, _, _, _, _ = self.search(best_input, return_lc=True)
             logging.info("Recovered moon radius: %.4f R_earth", recovered_radius)
+            # The points carry the planet depth correction the search fitted with this moon.
+            column = self.search_planet_depth_column()
+            planet_correction = self.last_planet_depth_correction if column is not None else None
+            shown_flux = self.flux if planet_correction is None else self.flux - planet_correction * column
+            flux_label = 'Subtracted flux' if planet_correction is None else \
+                f'Subtracted flux, planet depth {planet_correction * 1e6:+.0f} ppm'
             for i, t0 in enumerate(self.bary_t0s):
                 mask_orbit = np.abs(self.time - t0) < half_orbit_dur_max
                 if len(self.time[mask_orbit]) < self.min_cadences_per_t0:
                     continue
                 t_local = self.time[mask_orbit]
-                f_local = self.flux[mask_orbit]
+                f_local = shown_flux[mask_orbit]
                 # Use pre-computed T0s
                 moon_t0_t = rec_t0s[i]
                 moon_t0_t_inj = inj_t0s[i] if has_injected else None
@@ -3924,7 +4061,7 @@ class ExoMoonLeastSquares:
                         ax.axvline(moon_t0_t_inj, color='red', linestyle='--',
                                    label='Injected moon T0')
                 ax.scatter(t_local, f_local, color='gray', alpha=0.7, s=10,
-                           label='Subtracted flux')
+                           label=flux_label)
                 ax.plot(t_local, model_moon, color='darkorange', alpha=1,
                         label='Recovered batman model')
                 ax.axvline(moon_t0_t, color='darkorange', linestyle=':',

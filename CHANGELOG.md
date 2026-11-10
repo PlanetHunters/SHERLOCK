@@ -139,6 +139,21 @@
   whole-window mask (`moon_window`). `none` masks nothing and divides the
   planet model out first. The choice is logged and written to
   `emls_results.json` (`detrending.mask`).
+- EMLS planet depth fitted with each moon: a moon inside the planet transit
+  in most epochs deepened the fold fit by its mean depth, and the
+  subtraction left that depth back where the moon was absent (+300 ppm on
+  Kepler-1514 b, +700 ppm on KOI-189.01 with an Rp/5 moon), so the moon
+  window lost most of its depth. The search still stacks the epochs in the
+  frame of the moon with one moon template; it now fits that window together
+  with one planet depth correction shared by all epochs (the derivative of
+  the subtracted planet model, placed at each epoch's mid-time), before the
+  upper outlier clipping, and divides the SNR by the uncertainty the shared
+  correction adds. The null searches, the leave-one-out SNR and the epoch
+  figures use the same fit. Rp/5 moons went from SNR 3.96 (FAP upper 0.016,
+  not detected) to 4.97 (0.0025, detected) on Kepler-1514 b and from 6.2 to
+  10.9 on KOI-189.01, with controls at FAP 0.51 and 0.042. About half of the
+  absorbed depth comes back. `emls_results.json` gives the correction at the
+  best moon (`planet_depth_correction_ppm`).
 - EMLS injection before detrending (audit item A2): with the EMLS
   detrending, an injected moon is added to the undetrended curve, so
   recovery includes the detrending loss; the null pseudo-epochs are detrended

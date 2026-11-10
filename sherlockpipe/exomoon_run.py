@@ -659,6 +659,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "mask_mode_survival": emls.mask_mode_survival,
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
+        "planet_depth_correction_ppm": emls.planet_depth_correction,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,
                      "impact": emls.planet_impact_param, "inc": emls.planet_inc,
                      "a_over_rstar": emls.planet_a_over_rstar},
@@ -689,8 +690,11 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "change detected. sde (SNR spectrum at the selected period) and max_sde (residual spectrum) "
                  "are diagnostics that do not separate moons from noise. best_radius inverts the "
                  "least-squares template amplitude through the template set (audit items H13, H14). The "
-                 "planet fit can absorb part of a moon inside the planet transit; see "
-                 "planet_fit_absorbed_fraction.",
+                 "planet fit can absorb part of a moon inside the planet transit; the search fits one "
+                 "planet depth correction shared by all epochs with each moon hypothesis, and "
+                 "planet_depth_correction_ppm is its value at the best one (negative when the fold fit "
+                 "had taken part of the moon as planet depth). planet_fit_absorbed_fraction measures what "
+                 "the fold fit absorbs before that correction.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
         json.dump(_json_safe(results), file, indent=2, allow_nan=False)
