@@ -4,6 +4,7 @@ Long-cadence data average the flux over each exposure. The reference here averag
 batman models at 401 sub-exposure midpoints. batman's own supersample_factor is not used as the
 reference, because it is still about 9 ppm off at 101 sub-exposures.
 """
+import inspect
 import logging
 
 import batman
@@ -278,3 +279,46 @@ def test_injected_moon_is_averaged_over_the_exposure(tmp_path, monkeypatch):
     assert depth > 0
     assert np.max(np.abs(averaged - reference)) < 0.01 * depth
     assert np.max(np.abs(instantaneous - reference)) > 0.1 * depth
+
+
+# --- the class measures the exposure by default --------------------------------------------------------------------
+
+def long_cadence_curve():
+    t0s = np.arange(3) * PERIOD
+    time = np.concatenate([t0 + np.arange(-2.0, 2.0, THIRTY_MINUTES) for t0 in t0s])
+    return t0s, time, np.ones_like(time), np.full(len(time), 1e-4), 0.2
+
+
+def test_default_exposure_is_the_median_point_spacing(tmp_path, caplog):
+    with caplog.at_level(logging.INFO):
+        emls = system(tmp_path, curve=long_cadence_curve(), exposure_time='auto', min_cadences_per_t0=5)
+
+    assert inspect.signature(ExoMoonLeastSquares.__init__).parameters['exposure_time'].default == 'auto'
+    assert emls.exposure_time == pytest.approx(THIRTY_MINUTES, rel=1e-9)
+    assert emls.exposure_source == 'median point spacing'
+    assert any('Exposure time 30.00 min from the median point spacing' in r.getMessage() for r in caplog.records)
+
+
+def test_instantaneous_model_on_long_cadence_warns(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING):
+        emls = system(tmp_path, curve=long_cadence_curve(), exposure_time=None, min_cadences_per_t0=5)
+
+    assert emls.exposure_time is None
+    assert any('exposure_time=None' in r.getMessage() and '30.0 min' in r.getMessage() for r in caplog.records)
+
+
+def test_instantaneous_model_on_short_cadence_does_not_warn(caplog):
+    with caplog.at_level(logging.WARNING):
+        exposure, _ = ExoMoonLeastSquares.resolve_exposure_time(None, np.arange(0, 1, 1 / 1440))
+
+    assert exposure is None and not caplog.records
+
+
+def test_unmeasurable_spacing_gives_an_instantaneous_model(caplog):
+    with caplog.at_level(logging.WARNING):
+        exposure, source = ExoMoonLeastSquares.resolve_exposure_time('auto', np.arange(0, 30, 1.5))
+
+    assert exposure is None and source == 'none (instantaneous model)'
+    assert any('cannot be measured' in r.getMessage() for r in caplog.records)
+    with pytest.raises(ValueError, match="'auto' or None"):
+        ExoMoonLeastSquares.resolve_exposure_time('median', np.arange(10.0))

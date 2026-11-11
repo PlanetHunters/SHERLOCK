@@ -57,6 +57,15 @@
 
 ### Fixed
 
+- EMLS measures the exposure time by default. `ExoMoonLeastSquares` used an
+  instantaneous model unless `exposure_time` was given, so the catalog driver and
+  any direct use of the class modelled Kepler long cadence without smearing; only
+  `python -m sherlockpipe.emls` measured it. On KOI-686.01 (ingress about 1 h) the
+  unsmeared planet residual gave a false moon at SNR 5.7 and FAP 0.003; with the
+  29.4 min exposure it drops to SNR 4.6 and FAP 0.063, and the planet shape check
+  chi2 from 111 to 44 for 20 bins. The default is now `exposure_time="auto"`, the
+  median point spacing; `None` keeps the instantaneous model and warns when the
+  points are spaced by more than 2 min.
 - EMLS outer moon orbit (audit items G5, G6): the widest searched orbit is the
   Domingos et al. (2006) prograde limit a = 0.4895 (1 - 1.0305 e_p) r_H, with
   the planet eccentricity, instead of half the Hill period (0.63 r_H, above

@@ -9,7 +9,8 @@ Conditions (how the injected planet differs from the model EMLS subtracts):
     match  same limb darkening, no exposure smearing: EMLS can model it exactly
     ld     limb darkening u1 + 0.15, u2 - 0.15 (EMLS starts from the given values)
     smear  integrated over the exposure (--exposure-seconds, default Kepler long cadence);
-           EMLS runs without exposure_time
+           EMLS models the exposure it measures from the point spacing (exposure_time="auto").
+           --instantaneous runs EMLS without it, as the 2026-11-11 results in RESULTS.md did
 
 Inputs:
     --curve   light curve as .npz or .csv with time, flux, flux_err columns. Mask other planets
@@ -126,7 +127,7 @@ def inject_planet(time, flux, planet, star, t0, condition, exposure_seconds=KEPL
     return flux * batman.TransitModel(params, time, **kwargs).light_curve(params)
 
 
-def build_emls(out, cpus, planet, star, time, flux, flux_err, t0, null_runs):
+def build_emls(out, cpus, planet, star, time, flux, flux_err, t0, null_runs, exposure_time="auto"):
     from sherlockpipe.exomoon import ExoMoonLeastSquares
     os.makedirs(out, exist_ok=True)
     return ExoMoonLeastSquares(
@@ -137,7 +138,8 @@ def build_emls(out, cpus, planet, star, time, flux, flux_err, t0, null_runs):
         planet["min_radius"], planet["max_radius"], epochs_in_span(t0, planet["planet_period"], time),
         time, flux, flux_err, 5.5, period_grid_size=10000, radius_grid_size=20, subtract_mode="subtract",
         fit_rp_per_transit=False, min_transit_completeness=0.75, max_subtraction_rms_ratio=1.5,
-        null_runs=null_runs, detrend_window=3 * planet["planet_duration"], detrend_mask="auto", exposure_time=None)
+        null_runs=null_runs, detrend_window=3 * planet["planet_duration"], detrend_mask="auto",
+        exposure_time=exposure_time)
 
 
 def _json(value):
@@ -157,7 +159,7 @@ def nulls(args):
     planet, star = load_params(args.params)
     time, flux, flux_err = load_curve(args.curve)
     emls = build_emls(os.path.join(args.out, "nulls_search"), args.cpus, planet, star, time, flux, flux_err,
-                      planet["planet_t0"], args.null_runs)
+                      planet["planet_t0"], args.null_runs, None if args.instantaneous else "auto")
     start = clock.time()
     emls.run(plot=False)
     result = {"curve": os.path.abspath(args.curve), "params": os.path.abspath(args.params),
@@ -182,12 +184,13 @@ def run(args):
     flux = inject_planet(time, flux, planet, star, t0, args.condition, exposure)
     planet["planet_t0"] = t0
     case_dir = os.path.join(args.out, f"{args.condition}_{args.offset_index}")
-    emls = build_emls(case_dir, args.cpus, planet, star, time, flux, flux_err, t0, 0)
+    emls = build_emls(case_dir, args.cpus, planet, star, time, flux, flux_err, t0, 0,
+                      None if args.instantaneous else "auto")
     start = clock.time()
     emls.run(plot=False, null_snrs=null_snrs)
     result = {"condition": args.condition, "offset_index": args.offset_index, "offset": float(offset),
               "t0": float(t0), "epochs": len(emls.bary_t0s), "seconds": clock.time() - start,
-              "sherlockpipe_version": code_version()}
+              "sherlockpipe_version": code_version(), "exposure_time": emls.exposure_time}
     for key in ("max_snr", "fap", "fap_upper", "detected", "recovered_period", "best_snr_radius",
                 "planet_shape_check", "red_noise_factor", "planet_depth_correction", "planet_shape_corrections"):
         result[key] = getattr(emls, key, None)
@@ -206,6 +209,8 @@ def plan(args):
                        "--condition", condition, "--out", args.out, "--cpus", str(args.cpus)]
             if args.exposure_seconds:
                 command += ["--exposure-seconds", str(args.exposure_seconds)]
+            if args.instantaneous:
+                command += ["--instantaneous"]
             print(" ".join(shlex.quote(part) for part in command))
 
 
@@ -244,6 +249,8 @@ def main(argv=None):
         command.add_argument("--params", required=True)
         command.add_argument("--out", required=True)
         command.add_argument("--cpus", type=int, default=4)
+        command.add_argument("--instantaneous", action="store_true",
+                             help="run EMLS with an instantaneous model (exposure_time=None)")
 
     null = commands.add_parser("nulls", help="null SNRs of the real curve, once per target and code version")
     inputs(null)

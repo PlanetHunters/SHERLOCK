@@ -117,7 +117,7 @@ class ExoMoonLeastSquares:
                   subtract_mode: str = "subtract", mask_duration_factor: float = None,
                   skip_fold_fit: bool = False, fit_rp_per_transit: bool = True,
                   min_transit_completeness: float = 0.5,
-                  max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
+                  max_subtraction_rms_ratio: float = 3.0, exposure_time="auto",
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
                  detrend_mask='auto', fix_impact_param=False):
@@ -197,9 +197,13 @@ class ExoMoonLeastSquares:
             In-transit to out-of-transit residual RMS ratio above which an epoch is
             flagged in epochs_flagged_rms. It is kept, because a moon dip inside the
             transit also raises the ratio. Default 3.0.
-        exposure_time : float, optional
+        exposure_time : float, "auto" or None, optional
             Exposure time of each data point in days. The planet fits and the moon
-            templates are averaged over it. Default None, an instantaneous model.
+            templates are averaged over it. Default "auto": the median spacing between
+            consecutive points, which is the exposure of mission data. None gives an
+            instantaneous model, and a warning when the points are spaced by more than
+            SUBEXPOSURE_DAYS, because a long exposure smears the planet ingress and the
+            planet residual can then look like a moon.
         ttv_prior_width : float, "auto" or None, optional
             Timing variation in days allowed around the linear ephemeris, on top of the
             ephemeris uncertainty at each epoch, in the Gaussian prior on the per-epoch t0.
@@ -278,9 +282,7 @@ class ExoMoonLeastSquares:
         self.fit_rp_per_transit = fit_rp_per_transit
         self.min_transit_completeness = min_transit_completeness
         self.max_subtraction_rms_ratio = max_subtraction_rms_ratio
-        if exposure_time is not None and not (np.isfinite(exposure_time) and 0 < exposure_time <= 1):
-            raise ValueError(f"exposure_time must be a positive number of days up to 1, got {exposure_time}")
-        self.exposure_time = exposure_time
+        self.exposure_time, self.exposure_source = self.resolve_exposure_time(exposure_time, time)
         if not (ttv_prior_width is None or ttv_prior_width == "auto"
                 or (isinstance(ttv_prior_width, (int, float)) and np.isfinite(ttv_prior_width) and ttv_prior_width > 0)):
             raise ValueError(f"ttv_prior_width must be a positive number of days, 'auto' or None, got "
@@ -827,6 +829,43 @@ class ExoMoonLeastSquares:
             return np.logspace(math.log(min, 10), math.log(max, 10), samples, base=10)
         else:
             return np.linspace(min, max, samples)
+
+    @staticmethod
+    def resolve_exposure_time(exposure_time, time):
+        """Return the exposure time in days (None for an instantaneous model) and where it came from.
+
+        "auto" takes the median spacing between consecutive distinct times. A spacing longer
+        than a day is not an exposure, so it gives an instantaneous model with a warning.
+
+        Raises
+        ------
+        ValueError
+            If exposure_time is not "auto", None or a positive number of days up to 1.
+        """
+        time = np.asarray(time, dtype=float)
+        spacing = np.diff(np.sort(time[np.isfinite(time)]))
+        spacing = spacing[spacing > 0]
+        median = float(np.median(spacing)) if len(spacing) else None
+        if isinstance(exposure_time, str):
+            if exposure_time != "auto":
+                raise ValueError(f"exposure_time must be a number of days, 'auto' or None, got {exposure_time!r}")
+            if median is None or median > 1:
+                logging.warning("Exposure time cannot be measured from the point spacing (%s): the planet and moon "
+                                "models are instantaneous. Pass exposure_time to set it",
+                                "fewer than two distinct times" if median is None else f"median {median:.2f} d")
+                return None, "none (instantaneous model)"
+            logging.info("Exposure time %.2f min from the median point spacing", median * 1440)
+            return median, "median point spacing"
+        if exposure_time is None:
+            if median is not None and ExoMoonLeastSquares.SUBEXPOSURE_DAYS < median <= 1:
+                logging.warning("exposure_time=None: the planet and moon models are instantaneous although the points "
+                                "are spaced by %.1f min. A long exposure smears the planet ingress, and the residual "
+                                "of an unsmeared planet model can look like a moon; use exposure_time='auto'",
+                                median * 1440)
+            return None, "none (instantaneous model)"
+        if not (np.isfinite(exposure_time) and 0 < exposure_time <= 1):
+            raise ValueError(f"exposure_time must be a positive number of days up to 1, got {exposure_time}")
+        return float(exposure_time), "given"
 
     @staticmethod
     def transit_model(transit_params, time, exposure_time=None):
