@@ -4,6 +4,14 @@
 
 ### Added
 
+- EMLS synthetic planet false-alarm test
+  (`sherlockpipe/regression_tests/emls_synthetic_planet/synthetic_planet.py`): removes
+  the real transits, injects the planet at shifted ephemerides without a moon (exact
+  model, limb darkening error, exposure smearing) and counts detections, with the FAP
+  from the nulls of the real curve (`nulls` command, once per target). It reads an
+  `emls_results.json` and a .csv or .npz curve; `plan` prints the job lines and
+  `summary` the counts. Run it before changing how EMLS models the planet;
+  `RESULTS.md` has the KOI-189.01 and Kepler-1514 b results.
 - EMLS false-alarm probability (audit item H10): `--null_runs` (default 100)
   searches on pseudo-epochs, windows of the same light curve away from the
   planet transits and outside every searched moon window, moved onto the real
