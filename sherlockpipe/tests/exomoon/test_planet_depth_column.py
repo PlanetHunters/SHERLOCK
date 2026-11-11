@@ -201,3 +201,26 @@ def test_fixed_impact_parameter_is_kept_by_the_fold_fit(tmp_path):
     fitted = ExoMoonLeastSquares.impact_parameter(emls.planet_a_over_rstar, emls.planet_inc, emls.planet_ecc,
                                                   emls.planet_arg_periastron)
     assert abs(fitted - 0.3) < 1e-4
+
+
+def test_impact_column_does_not_vanish_for_a_central_transit(tmp_path):
+    """The flux is even in b, so a b derivative vanishes at b = 0; the column is taken in b^2."""
+    emls = system(tmp_path, inc=90.0, fix_impact_param=True)
+    run_to_search(emls)
+    term = ExoMoonLeastSquares.PLANET_SHAPE_TERMS.index("impact_squared")
+    column = emls.planet_shape_columns[:, term]
+    assert emls.planet_shape_impact < 0.01
+
+    params = emls.null_planet_params()
+    mid_time = emls.bary_t0s[0] + emls.ttvs[0]
+    near = np.abs(emls.time - mid_time) < emls.planet_duration
+    flux = []
+    for b in (0.0, 0.1):
+        changed = copy.copy(params)
+        changed.t0 = mid_time
+        changed.inc = float(np.rad2deg(np.arccos(b / changed.a)))
+        flux.append(ExoMoonLeastSquares.transit_model(changed, emls.time[near], emls.exposure_time)
+                    .light_curve(changed))
+    secant = (flux[1] - flux[0]) / 0.1 ** 2
+    assert np.max(np.abs(column[near])) > 0.5 * np.max(np.abs(secant))
+    assert np.corrcoef(column[near], secant)[0, 1] > 0.95

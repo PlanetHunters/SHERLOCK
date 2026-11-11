@@ -710,8 +710,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "planet depth correction shared by all epochs with each moon hypothesis, and "
                  "planet_depth_correction_ppm is its value at the best one (negative when the fold fit "
                  "had taken part of the moon as planet depth), and planet_t0_shifts the mid-time shift it fits for each "
-                 "epoch with that moon; planet_shape_corrections the shared changes of the subtracted impact parameter "
-                 "and limb darkening (u1, u2) it fits with that moon. planet_shape_correction_large marks an impact-parameter correction beyond 0.1, where its first-order column is approximate. planet_shape_check is a flag: its bin errors are scaled by the red-noise factor, and a moon inside the transit fails it as a planet residual does. planet_fit_absorbed_fraction measures what "
+                 "epoch with that moon; planet_shape_corrections the shared changes of the subtracted squared impact parameter "
+                 "(impact_squared, fitted in b^2 because the flux is even in b; impact is the resulting change of b) "
+                 "and limb darkening (u1, u2) it fits with that moon. planet_shape_correction_large marks an impact-parameter correction beyond 0.1 (or b^2 below -0.01), where its first-order column is approximate. planet_shape_check is a flag: its bin errors are scaled by the red-noise factor, and a moon inside the transit fails it as a planet residual does. planet_fit_absorbed_fraction measures what "
                  "the fold fit absorbs before that correction.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:

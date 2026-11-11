@@ -101,7 +101,7 @@ class ExoMoonLeastSquares:
     PLANET_MASK_HALF_WIDTH = 0.75  # in T14: the 'planet' detrend mask is +-0.75 T14 around each epoch
     SINGLE_EVENT_SNR_FRACTION = 0.5
     # Planet shape terms fitted with each moon, one coefficient shared by all epochs (see planet_fit).
-    PLANET_SHAPE_TERMS = ("impact", "u1", "u2")
+    PLANET_SHAPE_TERMS = ("impact_squared", "u1", "u2")
     MAX_LINEAR_IMPACT_CORRECTION = 0.1
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
@@ -355,10 +355,12 @@ class ExoMoonLeastSquares:
         self.fit_planet_t0 = True
         self.last_planet_fit = None
         self.planet_t0_shifts = None
-        # Derivatives of the subtracted planet model with respect to its impact parameter and its
-        # two limb darkening coefficients, at every epoch. Like the depth, each is one correction
+        # Derivatives of the subtracted planet model with respect to its squared impact parameter and
+        # its two limb darkening coefficients, at every epoch. Like the depth, each is one correction
         # shared by all epochs, fitted with each moon; fit_planet_shape turns them off.
         self.planet_shape_columns = None
+        # Impact parameter the shape columns are taken at.
+        self.planet_shape_impact = None
         self.fit_planet_shape = True
         self.planet_shape_corrections = None
         self.epochs_dropped_fit = []
@@ -3745,11 +3747,13 @@ class ExoMoonLeastSquares:
     def planet_shape_derivatives(self, time):
         """Return the derivatives of the subtracted planet model with respect to its shape.
 
-        One column per term of PLANET_SHAPE_TERMS (impact parameter, u1, u2), each evaluated at
-        every epoch's mid-time, so it is the same shape in every epoch and zero away from the
+        One column per term of PLANET_SHAPE_TERMS (squared impact parameter, u1, u2), each evaluated
+        at every epoch's mid-time, so it is the same shape in every epoch and zero away from the
         transits. Like the depth, each gets one coefficient shared by all epochs (see
-        `planet_fit`), so it keeps the stacked power. The impact parameter derivative is a central
-        difference, forward when b is below the step; None without a planet model to correct.
+        `planet_fit`), so it keeps the stacked power. The geometry column is taken in b^2: the
+        flux is even in b, so its b derivative vanishes at b = 0 and a near-central transit would
+        get an unbounded coefficient, while the b^2 derivative stays finite. It is a central
+        difference, forward when b^2 is below the step; None without a planet model to correct.
         """
         if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
             return None
@@ -3758,6 +3762,7 @@ class ExoMoonLeastSquares:
             if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
         distance_factor = (1 - params.ecc ** 2) / (1 + params.ecc * np.sin(np.deg2rad(params.w)))
         impact = ExoMoonLeastSquares.impact_parameter(params.a, params.inc, params.ecc, params.w)
+        self.planet_shape_impact = float(impact)
 
         def with_impact(base, value):
             changed = copy.copy(base)
@@ -3778,8 +3783,8 @@ class ExoMoonLeastSquares:
                 continue
             nominal = copy.copy(params)
             nominal.t0 = mid_time
-            low_b = max(impact - step, 0.0)
-            pairs = [(with_impact(nominal, impact + step), with_impact(nominal, low_b), impact + step - low_b),
+            high_b2, low_b2 = impact ** 2 + step, max(impact ** 2 - step, 0.0)
+            pairs = [(with_impact(nominal, np.sqrt(high_b2)), with_impact(nominal, np.sqrt(low_b2)), high_b2 - low_b2),
                      (with_ld(nominal, 0, step), with_ld(nominal, 0, -step), 2 * step),
                      (with_ld(nominal, 1, step), with_ld(nominal, 1, -step), 2 * step)]
             for term, (upper, lower, width) in enumerate(pairs):
@@ -4199,18 +4204,27 @@ class ExoMoonLeastSquares:
                          len(self.planet_t0_shifts))
         if self.last_planet_fit is not None and self.last_planet_fit.get("shape"):
             self.planet_shape_corrections = dict(self.last_planet_fit["shape"])
+            if "impact_squared" in self.planet_shape_corrections and self.planet_shape_impact is not None:
+                b0 = self.planet_shape_impact
+                b2 = b0 ** 2 + self.planet_shape_corrections["impact_squared"]
+                self.planet_shape_corrections["impact"] = float(np.sqrt(max(b2, 0.0)) - b0)
             logging.info("Planet shape fitted with the best moon: %s (changes to the subtracted impact parameter "
                          "and limb darkening)", ", ".join(f"{name} {value:+.4f}" for name, value
                                                          in self.planet_shape_corrections.items()))
             # The quadratic limb darkening enters the flux linearly, so its columns are exact (and u1, u2,
             # correlated by about 0.98, can drift together along their degenerate direction); the impact
-            # parameter column is a first-order derivative.
+            # parameter column is a first-order derivative in b^2. A b^2 below zero has no geometry, so
+            # beyond the b = 0 equivalent of the limit it is flagged too.
             impact = abs(self.planet_shape_corrections.get("impact", 0.0))
-            self.planet_shape_correction_large = bool(impact > self.MAX_LINEAR_IMPACT_CORRECTION)
+            b2 = (self.planet_shape_impact or 0.0) ** 2 + self.planet_shape_corrections.get("impact_squared", 0.0)
+            self.planet_shape_correction_large = bool(impact > self.MAX_LINEAR_IMPACT_CORRECTION
+                                                      or b2 < -self.MAX_LINEAR_IMPACT_CORRECTION ** 2)
             if self.planet_shape_correction_large:
-                logging.warning("Planet impact parameter corrected by %+.3f with the best moon, beyond the %.2f "
-                                "first-order range of its column: the subtracted planet geometry differs much from "
-                                "the data, so the correction is approximate", self.planet_shape_corrections["impact"],
+                logging.warning("Planet impact parameter corrected by %+.3f (b^2 %+.4f) with the best moon, beyond the "
+                                "%.2f first-order range of its column: the subtracted planet geometry differs much "
+                                "from the data, so the correction is approximate",
+                                self.planet_shape_corrections.get("impact", 0.0),
+                                self.planet_shape_corrections.get("impact_squared", 0.0),
                                 self.MAX_LINEAR_IMPACT_CORRECTION)
         if self.planet_depth_column is not None and self.last_planet_depth_correction is not None:
             self.planet_depth_correction = float(self.last_planet_depth_correction * 1e6)

@@ -66,6 +66,11 @@
   out, failed an injected moon and passed the false one, so neither works as a veto.
   `planet_shape_correction_large` warns when the fitted impact-parameter correction
   exceeds 0.1, beyond the first-order range of its column.
+- EMLS planet shape column for the geometry is the derivative in b^2 instead of b
+  (`impact_squared`; `planet_shape_corrections["impact"]` is the resulting change of
+  b). The flux is even in b, so the b derivative vanishes for a central transit and
+  its coefficient was unbounded: Kepler-1514 b (b 0.004) and KOI-125.01 (b 0.003)
+  reported impact corrections of 10.6 and 26.1.
 - EMLS measures the exposure time by default. `ExoMoonLeastSquares` used an
   instantaneous model unless `exposure_time` was given, so the catalog driver and
   any direct use of the class modelled Kepler long cadence without smearing; only
