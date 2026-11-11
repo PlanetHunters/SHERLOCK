@@ -58,13 +58,16 @@ def test_injection_conditions_change_the_transit_shape(tool):
     star = {"mass": 0.74, "radius": 0.765, "ld": [0.61, 0.11], "exposure_seconds": None}
     time = np.linspace(-0.3, 0.3, 601)
     flux = np.ones_like(time)
-    match, ld, smear = (tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, condition)
+    match, ld, smear = (tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, condition, model_exposure=False)
                         for condition in tool.CONDITIONS)
     centre = np.argmin(np.abs(time))
     assert 0.97 < match[centre] < 0.99
     assert ld[centre] < match[centre]
     assert smear[centre] > match[centre]
     assert match[0] == ld[0] == 1.0
+    # With the exposure modelled, match is the smeared planet EMLS subtracts.
+    modelled = tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, "match")
+    np.testing.assert_array_equal(modelled, smear)
     with pytest.raises(ValueError):
         tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, "other")
 
@@ -82,6 +85,16 @@ def test_plan_prints_one_command_per_case(tool, capsys):
     lines = capsys.readouterr().out.strip().splitlines()
     assert len(lines) == 10
     assert all(" run " in line and "--offsets 5" in line for line in lines)
+
+
+def test_plan_adds_smear_only_with_an_instantaneous_model(tool, capsys):
+    base = ["plan", "--curve", "lc.csv", "--params", "p.json", "--nulls", "n.json", "--out", "OUT", "--offsets", "1"]
+    tool.main(base)
+    modelled = capsys.readouterr().out
+    tool.main(base + ["--instantaneous"])
+    instantaneous = capsys.readouterr().out
+    assert "smear" not in modelled and modelled.count(" run ") == 2
+    assert instantaneous.count("--condition smear") == 1 and instantaneous.count(" run ") == 3
 
 
 def test_summary_counts(tool):

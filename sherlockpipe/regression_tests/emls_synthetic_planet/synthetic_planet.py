@@ -6,11 +6,13 @@ realization of the target's own noise. No moon is injected: any detection is a f
 Run it before merging a change to how EMLS models or subtracts the planet (see RESULTS.md).
 
 Conditions (how the injected planet differs from the model EMLS subtracts):
-    match  same limb darkening, no exposure smearing: EMLS can model it exactly
-    ld     limb darkening u1 + 0.15, u2 - 0.15 (EMLS starts from the given values)
-    smear  integrated over the exposure (--exposure-seconds, default Kepler long cadence);
-           EMLS models the exposure it measures from the point spacing (exposure_time="auto").
-           --instantaneous runs EMLS without it, as the 2026-11-11 results in RESULTS.md did
+    match  the model EMLS subtracts: integrated over the exposure (--exposure-seconds, default
+           Kepler long cadence), since EMLS models the exposure it measures from the point
+           spacing (exposure_time="auto"); instantaneous with --instantaneous
+    ld     as match, with limb darkening u1 + 0.15, u2 - 0.15 (EMLS starts from the given values)
+    smear  integrated over the exposure while EMLS runs with --instantaneous, as the first
+           2026-11-11 results in RESULTS.md did; without --instantaneous it repeats match, so
+           plan only adds it with --instantaneous
 
 Inputs:
     --curve   light curve as .npz or .csv with time, flux, flux_err columns. Mask other planets
@@ -108,7 +110,9 @@ def epochs_in_span(t0, period, time):
     return list(np.arange(first, time.max(), period))
 
 
-def inject_planet(time, flux, planet, star, t0, condition, exposure_seconds=KEPLER_LONG_CADENCE_SECONDS):
+def inject_planet(time, flux, planet, star, t0, condition, exposure_seconds=KEPLER_LONG_CADENCE_SECONDS,
+                  model_exposure=True):
+    """Multiply flux by the planet of the condition; model_exposure: EMLS models the exposure."""
     import batman
     params = batman.TransitParams()
     params.t0, params.per = t0, planet["planet_period"]
@@ -117,13 +121,12 @@ def inject_planet(time, flux, planet, star, t0, condition, exposure_seconds=KEPL
     params.inc, params.ecc, params.w = planet["planet_inc"], planet["planet_ecc"], planet["planet_arg_periastron"]
     params.limb_dark = "quadratic"
     params.u = list(star["ld"])
-    kwargs = {}
+    if condition not in CONDITIONS:
+        raise ValueError(f"Unknown condition {condition}")
     if condition == "ld":
         params.u = [star["ld"][0] + LD_SHIFT, star["ld"][1] - LD_SHIFT]
-    elif condition == "smear":
-        kwargs = {"supersample_factor": 15, "exp_time": exposure_seconds / 86400}
-    elif condition != "match":
-        raise ValueError(f"Unknown condition {condition}")
+    smeared = condition == "smear" or model_exposure
+    kwargs = {"supersample_factor": 15, "exp_time": exposure_seconds / 86400} if smeared else {}
     return flux * batman.TransitModel(params, time, **kwargs).light_curve(params)
 
 
@@ -181,7 +184,7 @@ def run(args):
                                                 planet["planet_t0"], planet["planet_duration"])
     offset = synthetic_offsets(planet["planet_period"], planet["planet_duration"], args.offsets)[args.offset_index]
     t0 = planet["planet_t0"] + offset
-    flux = inject_planet(time, flux, planet, star, t0, args.condition, exposure)
+    flux = inject_planet(time, flux, planet, star, t0, args.condition, exposure, not args.instantaneous)
     planet["planet_t0"] = t0
     case_dir = os.path.join(args.out, f"{args.condition}_{args.offset_index}")
     emls = build_emls(case_dir, args.cpus, planet, star, time, flux, flux_err, t0, 0,
@@ -202,7 +205,8 @@ def run(args):
 def plan(args):
     """Print one run command per offset and condition, for xargs or a job queue."""
     script = os.path.abspath(__file__)
-    for condition in args.conditions:
+    conditions = args.conditions or [c for c in CONDITIONS if c != "smear" or args.instantaneous]
+    for condition in conditions:
         for index in range(args.offsets):
             command = [sys.executable, script, "run", "--curve", args.curve, "--params", args.params,
                        "--nulls", args.nulls, "--offset-index", str(index), "--offsets", str(args.offsets),
@@ -266,7 +270,8 @@ def main(argv=None):
             command.add_argument("--offset-index", type=int, required=True)
             command.add_argument("--condition", choices=CONDITIONS, required=True)
         else:
-            command.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=list(CONDITIONS))
+            command.add_argument("--conditions", nargs="+", choices=CONDITIONS, default=None,
+                                 help="default: match and ld, plus smear with --instantaneous")
     many = commands.add_parser("summary")
     many.add_argument("dirs", nargs="+")
     args = parser.parse_args(argv)
