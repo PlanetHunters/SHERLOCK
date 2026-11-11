@@ -100,6 +100,8 @@ class ExoMoonLeastSquares:
     AUTO_PLANET_MASK_RATIO = 2.0  # 'auto' masks only the planet when the moon window is this many biweight windows
     PLANET_MASK_HALF_WIDTH = 0.75  # in T14: the 'planet' detrend mask is +-0.75 T14 around each epoch
     SINGLE_EVENT_SNR_FRACTION = 0.5
+    # Planet shape terms fitted with each moon, one coefficient shared by all epochs (see planet_fit).
+    PLANET_SHAPE_TERMS = ("impact", "u1", "u2")
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
     SPECTRUM_KERNEL = 31
@@ -118,7 +120,7 @@ class ExoMoonLeastSquares:
                   max_subtraction_rms_ratio: float = 3.0, exposure_time: float = None,
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
-                 detrend_mask='auto'):
+                 detrend_mask='auto', fix_impact_param=False):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -271,6 +273,8 @@ class ExoMoonLeastSquares:
         self.subtract_mode = subtract_mode
         self.mask_duration_factor = mask_duration_factor
         self.skip_fold_fit = skip_fold_fit
+        # Keep the input impact parameter in the fold fit instead of fitting it.
+        self.fix_impact_param = bool(fix_impact_param)
         self.fit_rp_per_transit = fit_rp_per_transit
         self.min_transit_completeness = min_transit_completeness
         self.max_subtraction_rms_ratio = max_subtraction_rms_ratio
@@ -346,6 +350,12 @@ class ExoMoonLeastSquares:
         self.fit_planet_t0 = True
         self.last_planet_fit = None
         self.planet_t0_shifts = None
+        # Derivatives of the subtracted planet model with respect to its impact parameter and its
+        # two limb darkening coefficients, at every epoch. Like the depth, each is one correction
+        # shared by all epochs, fitted with each moon; fit_planet_shape turns them off.
+        self.planet_shape_columns = None
+        self.fit_planet_shape = True
+        self.planet_shape_corrections = None
         self.epochs_dropped_fit = []
         self.epochs_flagged_rms = []
         self.epochs_flagged_rp = []
@@ -1594,6 +1604,11 @@ class ExoMoonLeastSquares:
                            (start_t14 / 2, start_t14 * 2),
                            (0.0, 1.0 + params.rp + rp_err),
                            (max(params.rp - rp_err, MIN_RP_OVER_RSTAR), params.rp + rp_err)]
+            if self.fix_impact_param and self.planet_impact_param is not None:
+                # The input impact parameter is kept: its bound is a point (a width the optimizers accept).
+                fixed_b = float(np.clip(self.planet_impact_param, 0.0, 1.0 + params.rp))
+                fold_guess[2] = fixed_b
+                fold_bounds[2] = (fixed_b, fixed_b + 1e-9)
         self.fold_fit_status = None
         if not self.skip_fold_fit:
             fold_theta, _, (fold_a, fold_inc), self.fold_fit_status = ExoMoonLeastSquares.fit_fold_shape(
@@ -2185,7 +2200,7 @@ class ExoMoonLeastSquares:
         """
         flux = np.asarray(flux, dtype=float)
         n_points, n_inside = len(flux), int(np.sum(inside))
-        unchanged = {"model": np.zeros(n_points), "depth": 0.0, "t0_shifts": {}, "inflation": 1.0}
+        unchanged = {"model": np.zeros(n_points), "depth": 0.0, "t0_shifts": {}, "shape": {}, "inflation": 1.0}
         if n_inside == 0 or n_points - n_inside < 2:
             return unchanged
         depth_column, t0_column, epoch = planet_columns[:, 0], planet_columns[:, 1], planet_columns[:, 2].astype(int)
@@ -2193,6 +2208,10 @@ class ExoMoonLeastSquares:
         if np.any(depth_column != 0):
             planet_terms.append(depth_column)
             names.append("depth")
+        for offset, shape_name in enumerate(ExoMoonLeastSquares.PLANET_SHAPE_TERMS):
+            if planet_columns.shape[1] > 3 + offset and np.any(planet_columns[:, 3 + offset] != 0):
+                planet_terms.append(planet_columns[:, 3 + offset])
+                names.append(shape_name)
         for index in np.unique(epoch[(epoch >= 0) & (t0_column != 0)]):
             term = np.where(epoch == index, t0_column, 0.0)
             if np.any(term != 0):
@@ -2220,8 +2239,10 @@ class ExoMoonLeastSquares:
         model = design[:, 2:] @ coefficients[2:]
         fitted = dict(zip(names, coefficients[2:]))
         inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / n_inside + 1 / (n_points - n_inside))))
+        shape = {name: float(fitted.pop(name)) for name in ExoMoonLeastSquares.PLANET_SHAPE_TERMS if name in fitted}
         return {"model": model, "depth": float(fitted.pop("depth", 0.0)),
-                "t0_shifts": {name: float(value) for name, value in fitted.items()}, "inflation": inflation}
+                "t0_shifts": {name: float(value) for name, value in fitted.items()}, "shape": shape,
+                "inflation": inflation}
 
     @staticmethod
     def planet_depth_fit(it_flux, oot_flux, it_column, oot_column):
@@ -3652,6 +3673,7 @@ class ExoMoonLeastSquares:
             max(self.planet_duration * 0.7, search_half_window), self.exposure_time)
         self.planet_depth_column = self.planet_depth_derivative(self.time)
         self.planet_t0_column, self.planet_epoch_index = self.planet_t0_derivative(self.time)
+        self.planet_shape_columns = self.planet_shape_derivatives(self.time)
 
     def search_planet_depth_column(self):
         """Return the planet columns that `split_scenarios` stacks with the flux, or None.
@@ -3666,7 +3688,56 @@ class ExoMoonLeastSquares:
         t0_column, epoch_index = self.planet_t0_column, self.planet_epoch_index
         if not self.fit_planet_t0 or t0_column is None or len(t0_column) != len(self.time):
             t0_column, epoch_index = np.zeros(len(column)), np.full(len(column), -1)
-        return np.column_stack((column, t0_column, epoch_index))
+        shape = self.planet_shape_columns
+        if not self.fit_planet_shape or shape is None or len(shape) != len(self.time):
+            shape = np.zeros((len(column), len(ExoMoonLeastSquares.PLANET_SHAPE_TERMS)))
+        return np.column_stack((column, t0_column, epoch_index, shape))
+
+    def planet_shape_derivatives(self, time):
+        """Return the derivatives of the subtracted planet model with respect to its shape.
+
+        One column per term of PLANET_SHAPE_TERMS (impact parameter, u1, u2), each evaluated at
+        every epoch's mid-time, so it is the same shape in every epoch and zero away from the
+        transits. Like the depth, each gets one coefficient shared by all epochs (see
+        `planet_fit`), so it keeps the stacked power. The impact parameter derivative is a central
+        difference, forward when b is below the step; None without a planet model to correct.
+        """
+        if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
+            return None
+        params = self.null_planet_params()
+        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)] \
+            if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
+        distance_factor = (1 - params.ecc ** 2) / (1 + params.ecc * np.sin(np.deg2rad(params.w)))
+        impact = ExoMoonLeastSquares.impact_parameter(params.a, params.inc, params.ecc, params.w)
+
+        def with_impact(base, value):
+            changed = copy.copy(base)
+            changed.inc = float(np.rad2deg(np.arccos(np.clip(value / (base.a * distance_factor), -1, 1))))
+            return changed
+
+        def with_ld(base, index, delta):
+            changed = copy.copy(base)
+            changed.u = list(base.u)
+            changed.u[index] = changed.u[index] + delta
+            return changed
+
+        step = 1e-3
+        columns = np.zeros((len(time), len(ExoMoonLeastSquares.PLANET_SHAPE_TERMS)))
+        for mid_time in mid_times:
+            near = np.abs(time - mid_time) < self.planet_duration
+            if not np.any(near):
+                continue
+            nominal = copy.copy(params)
+            nominal.t0 = mid_time
+            low_b = max(impact - step, 0.0)
+            pairs = [(with_impact(nominal, impact + step), with_impact(nominal, low_b), impact + step - low_b),
+                     (with_ld(nominal, 0, step), with_ld(nominal, 0, -step), 2 * step),
+                     (with_ld(nominal, 1, step), with_ld(nominal, 1, -step), 2 * step)]
+            for term, (upper, lower, width) in enumerate(pairs):
+                flux_upper = ExoMoonLeastSquares.transit_model(upper, time[near], self.exposure_time).light_curve(upper)
+                flux_lower = ExoMoonLeastSquares.transit_model(lower, time[near], self.exposure_time).light_curve(lower)
+                columns[near, term] = (flux_upper - flux_lower) / width
+        return columns if np.any(columns != 0) else None
 
     def planet_t0_derivative(self, time):
         """Return the derivative of the subtracted planet model with respect to each epoch's mid-time.
@@ -4074,6 +4145,11 @@ class ExoMoonLeastSquares:
             logging.info("Planet mid-times fitted with the best moon: shifts of %.2f min rms over %d epochs",
                          np.sqrt(np.mean(np.square([shift["shift_minutes"] for shift in self.planet_t0_shifts]))),
                          len(self.planet_t0_shifts))
+        if self.last_planet_fit is not None and self.last_planet_fit.get("shape"):
+            self.planet_shape_corrections = dict(self.last_planet_fit["shape"])
+            logging.info("Planet shape fitted with the best moon: %s (changes to the subtracted impact parameter "
+                         "and limb darkening)", ", ".join(f"{name} {value:+.4f}" for name, value
+                                                         in self.planet_shape_corrections.items()))
         if self.planet_depth_column is not None and self.last_planet_depth_correction is not None:
             self.planet_depth_correction = float(self.last_planet_depth_correction * 1e6)
             logging.info("Planet depth fitted with the best moon: %+.0f ppm on the fold-fit depth %.0f ppm (negative "
@@ -4160,9 +4236,13 @@ class ExoMoonLeastSquares:
                 correction = planet_fit["depth"] * columns[:, 0]
                 for index, shift in planet_fit["t0_shifts"].items():
                     correction = correction + np.where(columns[:, 2] == index, shift * columns[:, 1], 0.0)
+                for offset, shape_name in enumerate(ExoMoonLeastSquares.PLANET_SHAPE_TERMS):
+                    correction = correction + planet_fit["shape"].get(shape_name, 0.0) * columns[:, 3 + offset]
                 shown_flux = self.flux - correction
                 flux_label = f'Subtracted flux, planet depth {planet_fit["depth"] * 1e6:+.0f} ppm' + \
-                    (', epoch mid-times refitted' if planet_fit["t0_shifts"] else '')
+                    (', epoch mid-times refitted' if planet_fit["t0_shifts"] else '') + \
+                    (', shape ' + ', '.join(f'{name} {value:+.3f}' for name, value in planet_fit["shape"].items())
+                     if planet_fit["shape"] else '')
             for i, t0 in enumerate(self.bary_t0s):
                 mask_orbit = np.abs(self.time - t0) < half_orbit_dur_max
                 if len(self.time[mask_orbit]) < self.min_cadences_per_t0:

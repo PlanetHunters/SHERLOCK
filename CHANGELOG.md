@@ -139,6 +139,15 @@
   whole-window mask (`moon_window`). `none` masks nothing and divides the
   planet model out first. The choice is logged and written to
   `emls_results.json` (`detrending.mask`).
+- EMLS planet shape fitted with each moon: the stacked fit also takes one
+  impact parameter and two limb darkening (u1, u2) corrections shared by all
+  epochs, the derivatives of the subtracted planet model. A limb darkening
+  error of +-0.15 on KOI-189.01 (1.8 % deep) left a residual inside the
+  transit that the moon window took as a moon in 10 of 20 synthetic planets
+  without a moon. `fit_planet_shape = False` turns them off, and
+  `emls_results.json` gives them (`planet_shape_corrections`). New inputs
+  `--impact_param` and `--fix_impact_param` (`fix_impact_param=True`) set the
+  impact parameter and keep it in the planet fold fit.
 - EMLS planet depth and mid-times fitted with each moon: a moon inside the
   planet transit in most epochs deepened the fold fit by its mean depth and
   pulled each epoch's fitted mid-time towards itself (shift versus moon

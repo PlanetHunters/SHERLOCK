@@ -149,3 +149,55 @@ def test_planet_t0_column_is_antisymmetric_about_each_mid_time(tmp_path):
         assert np.sum(emls.planet_t0_column[before]) > 0 > np.sum(emls.planet_t0_column[after])
         assert abs(np.sum(emls.planet_t0_column[before]) + np.sum(emls.planet_t0_column[after])) < \
             0.1 * np.sum(np.abs(emls.planet_t0_column[mine]))
+
+
+def test_search_measures_the_same_moon_window_whatever_the_limb_darkening_error(tmp_path):
+    emls = system(tmp_path)
+    inputs = run_to_search(emls)
+    emls.build_search_templates()
+    search_input = inputs[len(inputs) // 2]
+    wrong = copy.copy(emls)
+    # The subtracted planet had limb darkening off by +0.15 in u1 and -0.15 in u2: the subtraction
+    # leaves that shape error at every epoch.
+    u1_column, u2_column = emls.planet_shape_columns[:, 1], emls.planet_shape_columns[:, 2]
+    wrong.flux = emls.flux - (0.15 * u1_column - 0.15 * u2_column)
+    plain = copy.copy(wrong)
+    plain.fit_planet_shape = False
+
+    reference, fitted, unfitted = (e.search(search_input, return_lc=True) for e in (emls, wrong, plain))
+
+    def window_depth(result):
+        return np.mean(result[7]) - np.mean(result[5])
+
+    assert abs(window_depth(fitted) - window_depth(reference)) < 1e-6
+    assert abs(fitted[3] - reference[3]) < 1e-6
+    assert abs(window_depth(unfitted) - window_depth(reference)) > 5e-6
+
+
+def test_planet_shape_columns_are_symmetric_and_zero_away_from_the_transits(tmp_path):
+    emls = system(tmp_path)
+    run_to_search(emls)
+    columns = emls.planet_shape_columns
+    mid_times = [t0 + ttv for t0, ttv in zip(emls.bary_t0s, emls.ttvs)]
+    distance = np.min(np.abs(emls.time[:, None] - np.array(mid_times)[None, :]), axis=1)
+
+    assert columns is not None and columns.shape == (len(emls.time), len(ExoMoonLeastSquares.PLANET_SHAPE_TERMS))
+    assert np.all(columns[distance > emls.planet_duration] == 0)
+    assert np.all(np.any(columns != 0, axis=0))
+    # A shape change is the same before and after each mid-time.
+    for mid_time in mid_times:
+        before = (emls.time < mid_time) & (emls.time > mid_time - emls.planet_duration)
+        after = (emls.time > mid_time) & (emls.time < mid_time + emls.planet_duration)
+        for term in range(columns.shape[1]):
+            total = np.sum(np.abs(columns[before | after, term]))
+            assert abs(np.sum(columns[before, term]) - np.sum(columns[after, term])) < 0.1 * total
+
+
+def test_fixed_impact_parameter_is_kept_by_the_fold_fit(tmp_path):
+    emls = system(tmp_path, inc=89.0, fix_impact_param=True)
+    emls.planet_impact_param = 0.3
+    run_to_search(emls)
+
+    fitted = ExoMoonLeastSquares.impact_parameter(emls.planet_a_over_rstar, emls.planet_inc, emls.planet_ecc,
+                                                  emls.planet_arg_periastron)
+    assert abs(fitted - 0.3) < 1e-4

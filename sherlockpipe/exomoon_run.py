@@ -516,7 +516,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
              max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None,
              null_runs=100, fap_threshold=0.01, detrend_window=None,
-             detrend_mask='auto'):
+             detrend_mask='auto', impact_param=None, fix_impact_param=False):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -554,6 +554,11 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     detrend_mask : str, optional
         What that detrending masks: 'auto' (default), 'moon_window', 'planet' or 'none'; see
         `ExoMoonLeastSquares.resolved_detrend_mask`.
+    impact_param : float, optional
+        Planet impact parameter to use instead of the fit or the default; the inclination follows from it.
+    fix_impact_param : bool, optional
+        Keep the impact parameter in the planet fold fit instead of fitting it, default False. The
+        search still fits one impact parameter correction shared by all epochs with each moon.
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -577,7 +582,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
                        subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold, detrend_window,
-                       detrend_mask)
+                       detrend_mask, impact_param, fix_impact_param)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -593,10 +598,17 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
-         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None, detrend_mask='auto'):
+         ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None, detrend_mask='auto',
+         impact_param=None, fix_impact_param=False):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
+    if impact_param is not None:
+        a_over_rstar = planet["a"] * AU_TO_RSUN / star["radius"]
+        distance_factor = (1 - planet["ecc"] ** 2) / (1 + planet["ecc"] * np.sin(np.radians(planet["arg_periastron"])))
+        planet["impact"] = float(impact_param)
+        planet["inc"] = float(np.degrees(np.arccos(np.clip(planet["impact"] / (a_over_rstar * distance_factor), 0, 1))))
+        inputs["sources"]["impact"] = inputs["sources"]["inc"] = "user"
     for key in ("period", "t0", "duration", "radius", "a", "inc", "impact", "ecc", "mass"):
         logging.info("Planet %s = %s (%s)", key, planet[key], inputs["sources"].get(key))
     logging.info("Light curve %s, %d points, %d epochs in its span; moon radius %.3f-%.3f R_earth", inputs["lc_file"],
@@ -614,7 +626,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,
         fap_threshold=fap_threshold, duration_from_fit=inputs["sources"].get("duration") != "candidates.csv",
         detrend_window=(DETREND_DURATIONS * planet["duration"] if detrend_window is None else float(detrend_window))
-        if inputs["detrend"] else None, detrend_mask=detrend_mask)
+        if inputs["detrend"] else None, detrend_mask=detrend_mask, fix_impact_param=fix_impact_param)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -661,6 +673,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
         "planet_depth_correction_ppm": emls.planet_depth_correction,
         "planet_t0_shifts": emls.planet_t0_shifts,
+        "planet_shape_corrections": emls.planet_shape_corrections,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,
                      "impact": emls.planet_impact_param, "inc": emls.planet_inc,
                      "a_over_rstar": emls.planet_a_over_rstar},
@@ -695,7 +708,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "planet depth correction shared by all epochs with each moon hypothesis, and "
                  "planet_depth_correction_ppm is its value at the best one (negative when the fold fit "
                  "had taken part of the moon as planet depth), and planet_t0_shifts the mid-time shift it fits for each "
-                 "epoch with that moon. planet_fit_absorbed_fraction measures what "
+                 "epoch with that moon; planet_shape_corrections the shared changes of the subtracted impact parameter "
+                 "and limb darkening (u1, u2) it fits with that moon. planet_fit_absorbed_fraction measures what "
                  "the fold fit absorbs before that correction.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:
