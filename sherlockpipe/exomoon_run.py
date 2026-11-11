@@ -668,6 +668,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "planet_overlap_mean": emls.planet_overlap_mean,
         "best_tau": emls.best_tau, "period_constrained": emls.period_constrained,
         "fold_realigned": emls.fold_realigned, "planet_shape_check": emls.planet_shape_check,
+        "planet_shape_correction_large": emls.planet_shape_correction_large,
+        "exposure_time_source": emls.exposure_source,
         "mask_mode_survival": emls.mask_mode_survival,
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
@@ -709,7 +711,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "planet_depth_correction_ppm is its value at the best one (negative when the fold fit "
                  "had taken part of the moon as planet depth), and planet_t0_shifts the mid-time shift it fits for each "
                  "epoch with that moon; planet_shape_corrections the shared changes of the subtracted impact parameter "
-                 "and limb darkening (u1, u2) it fits with that moon. planet_fit_absorbed_fraction measures what "
+                 "and limb darkening (u1, u2) it fits with that moon. planet_shape_correction_large marks an impact-parameter correction beyond 0.1, where its first-order column is approximate. planet_shape_check is a flag: its bin errors are scaled by the red-noise factor, and a moon inside the transit fails it as a planet residual does. planet_fit_absorbed_fraction measures what "
                  "the fold fit absorbs before that correction.",
     }
     with open(os.path.join(output_dir, "emls_results.json"), "w") as file:

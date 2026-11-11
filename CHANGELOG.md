@@ -57,6 +57,15 @@
 
 ### Fixed
 
+- EMLS planet shape check scales its bin errors by the red-noise factor, so
+  correlated noise no longer fails it: Kepler-1514 b (beta 4.1) failed with p from
+  1e-5 to 1e-37, and now passes. It stays a flag and does not change `detected`: a
+  moon inside the transit fails it as a planet residual does (injected Rp/5 moons on
+  KOI-189.01 give chi2 140-235 for 20 bins, the unsmeared KOI-686.01 planet 90), and
+  the same test on the residual of the best hypothesis, with its moon windows left
+  out, failed an injected moon and passed the false one, so neither works as a veto.
+  `planet_shape_correction_large` warns when the fitted impact-parameter correction
+  exceeds 0.1, beyond the first-order range of its column.
 - EMLS measures the exposure time by default. `ExoMoonLeastSquares` used an
   instantaneous model unless `exposure_time` was given, so the catalog driver and
   any direct use of the class modelled Kepler long cadence without smearing; only

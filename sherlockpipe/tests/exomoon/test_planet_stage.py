@@ -117,8 +117,21 @@ def test_wrong_planet_shape_fails_the_shape_check(tmp_path):
     right = emls_for(tmp_path, data, t14(truth))
     right.subtract_planet_transit(*data[1:])
 
-    assert wrong.planet_shape_check['ok'] is False
-    assert right.planet_shape_check['ok'] is True
+    assert wrong.check_planet_shape(*wrong.planet_shape_check_inputs)['ok'] is False
+    assert right.check_planet_shape(*right.planet_shape_check_inputs)['ok'] is True
+
+
+def test_shape_check_bin_errors_follow_the_red_noise_factor(tmp_path):
+    truth = planet_params()
+    data = curve(truth, noise=1e-4, seed=8)
+    wrong = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, sma=0.85 * 0.1436)
+    wrong.subtract_planet_transit(*data[1:])
+
+    white = wrong.check_planet_shape(*wrong.planet_shape_check_inputs)
+    red = wrong.check_planet_shape(*wrong.planet_shape_check_inputs, noise_factor=3.0)
+
+    assert red['chi2'] == pytest.approx(white['chi2'] / 9, rel=1e-9)
+    assert red['noise_factor'] == 3.0
 
 
 # --- D4 / E2 / E3 ------------------------------------------------------------------------------------------------

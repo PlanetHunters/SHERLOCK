@@ -102,6 +102,7 @@ class ExoMoonLeastSquares:
     SINGLE_EVENT_SNR_FRACTION = 0.5
     # Planet shape terms fitted with each moon, one coefficient shared by all epochs (see planet_fit).
     PLANET_SHAPE_TERMS = ("impact", "u1", "u2")
+    MAX_LINEAR_IMPACT_CORRECTION = 0.1
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
     SPECTRUM_KERNEL = 31
@@ -332,6 +333,8 @@ class ExoMoonLeastSquares:
         self.best_tau = None
         self.period_constrained = None
         self.planet_shape_check = None
+        self.planet_shape_check_inputs = None
+        self.planet_shape_correction_large = None
         self.mask_mode_survival = None
         self.aliases = None
         self.red_noise_factor = 1.0
@@ -1370,7 +1373,8 @@ class ExoMoonLeastSquares:
                     "(offset up to %.2f d); closer moons keep less. Subtract mode keeps them", survival * 100,
                     max_offset)
 
-    def check_planet_shape(self, time, residual_flux, fitted_t0s, bins=20, p_threshold=1e-3):
+    def check_planet_shape(self, time, residual_flux, fitted_t0s, bins=20, p_threshold=1e-3, noise_factor=1.0,
+                           label="Planet shape check", log=True):
         """Test the stacked post-subtraction residual for a planet shape left behind (audit item D2).
 
         The residuals of the kept epochs are stacked on their fitted mid-times and binned over
@@ -1378,11 +1382,13 @@ class ExoMoonLeastSquares:
         means against the level between 0.75 T14 and 1.5 T14, with errors from the scatter
         there, is compared with a chi2 distribution; a p-value below p_threshold fails the
         check. A moon inside the planet transit can also fail it, so it is a flag.
+        noise_factor (the red-noise factor beta) scales the bin errors, since a bin mean of
+        correlated noise scatters beta times more than white noise.
 
         Returns
         -------
         dict or None
-            {"chi2", "dof", "p_value", "ok"}, or None without enough data.
+            {"chi2", "dof", "p_value", "ok", "noise_factor"}, or None without enough data.
         """
         if not fitted_t0s:
             return None
@@ -1401,19 +1407,22 @@ class ExoMoonLeastSquares:
         for b in range(bins):
             in_bin = values[inner][index == b]
             if len(in_bin) >= 3:
-                chi2 += ((np.mean(in_bin) - level) / (sigma / np.sqrt(len(in_bin)))) ** 2
+                chi2 += ((np.mean(in_bin) - level) / (noise_factor * sigma / np.sqrt(len(in_bin)))) ** 2
                 dof += 1
         if dof == 0 or not sigma > 0:
             return None
         p_value = float(stats.chi2.sf(chi2, dof))
-        result = {"chi2": float(chi2), "dof": dof, "p_value": p_value, "ok": bool(p_value >= p_threshold)}
+        result = {"chi2": float(chi2), "dof": dof, "p_value": p_value, "ok": bool(p_value >= p_threshold),
+                  "noise_factor": float(noise_factor)}
+        if not log:
+            return result
         if not result["ok"]:
-            logging.warning("Planet shape check failed: the stacked residual over the transit has chi2 %.1f for %d "
-                            "bins (p = %.1e), so the planet model leaves a residual, or a moon sits inside the "
-                            "transit", chi2, dof, p_value)
+            logging.warning("%s failed: the stacked residual over the transit has chi2 %.1f for %d bins (p = %.1e, "
+                            "red-noise factor %.2f), so the planet model leaves a residual, or a moon sits inside "
+                            "the transit", label, chi2, dof, p_value, noise_factor)
         else:
-            logging.info("Planet shape check passed: stacked residual chi2 %.1f for %d bins (p = %.2f)", chi2, dof,
-                         p_value)
+            logging.info("%s passed: stacked residual chi2 %.1f for %d bins (p = %.2g, red-noise factor %.2f)",
+                         label, chi2, dof, p_value, noise_factor)
         return result
 
     def realign_fold(self, time, flux, flux_err, params, duration_window, prior_sigmas, fold_bounds):
@@ -1859,8 +1868,9 @@ class ExoMoonLeastSquares:
             self.ttvs = [ttv for t0, ttv in zip(ttv_t0s, self.ttvs) if t0 not in rejected_t0s]
             self.require_usable_epochs()
         if mode == 'subtract':
-            self.planet_shape_check = self.check_planet_shape(result_time, result_model,
-                                                              [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)])
+            # Checked in run() once the red-noise factor is measured.
+            self.planet_shape_check_inputs = (result_time, result_model,
+                                              [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)])
         else:
             self.warn_mask_mode_survival()
         plt.figure(figsize=(10, 6))
@@ -3953,6 +3963,9 @@ class ExoMoonLeastSquares:
         self.build_search_templates()
         self.check_model_validity()
         self.set_red_noise_factor(before_trim)
+        if self.planet_shape_check_inputs is not None:
+            self.planet_shape_check = self.check_planet_shape(*self.planet_shape_check_inputs,
+                                                              noise_factor=self.red_noise_factor)
         period_grid, alpha_grid, search_inputs, all_residuals = self.grid_search()
         alpha_grid_size = len(alpha_grid)
         no_data_count = sum(bool(np.isnan(all_residual[3])) for all_residual in all_residuals)
@@ -4189,6 +4202,16 @@ class ExoMoonLeastSquares:
             logging.info("Planet shape fitted with the best moon: %s (changes to the subtracted impact parameter "
                          "and limb darkening)", ", ".join(f"{name} {value:+.4f}" for name, value
                                                          in self.planet_shape_corrections.items()))
+            # The quadratic limb darkening enters the flux linearly, so its columns are exact (and u1, u2,
+            # correlated by about 0.98, can drift together along their degenerate direction); the impact
+            # parameter column is a first-order derivative.
+            impact = abs(self.planet_shape_corrections.get("impact", 0.0))
+            self.planet_shape_correction_large = bool(impact > self.MAX_LINEAR_IMPACT_CORRECTION)
+            if self.planet_shape_correction_large:
+                logging.warning("Planet impact parameter corrected by %+.3f with the best moon, beyond the %.2f "
+                                "first-order range of its column: the subtracted planet geometry differs much from "
+                                "the data, so the correction is approximate", self.planet_shape_corrections["impact"],
+                                self.MAX_LINEAR_IMPACT_CORRECTION)
         if self.planet_depth_column is not None and self.last_planet_depth_correction is not None:
             self.planet_depth_correction = float(self.last_planet_depth_correction * 1e6)
             logging.info("Planet depth fitted with the best moon: %+.0f ppm on the fold-fit depth %.0f ppm (negative "
