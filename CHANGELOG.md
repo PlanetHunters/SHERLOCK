@@ -70,7 +70,9 @@
   (`impact_squared`; `planet_shape_corrections["impact"]` is the resulting change of
   b). The flux is even in b, so the b derivative vanishes for a central transit and
   its coefficient was unbounded: Kepler-1514 b (b 0.004) and KOI-125.01 (b 0.003)
-  reported impact corrections of 10.6 and 26.1.
+  reported impact corrections of 10.6 and 26.1; they are now +0.10 and +0.16 in b, with
+  the same SNR and FAP. `planet_shape_correction_large` now marks a b^2 correction
+  beyond 0.1, the range of the b^2 column (a change of b of 0.1 at b = 0.5).
 - EMLS measures the exposure time by default. `ExoMoonLeastSquares` used an
   instantaneous model unless `exposure_time` was given, so the catalog driver and
   any direct use of the class modelled Kepler long cadence without smearing; only

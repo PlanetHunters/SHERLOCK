@@ -51,3 +51,35 @@ Shape columns (7e408e9):
   12.52 -> 12.11. Same detections (4 of 6), radius recovery unchanged (1.8-2.2 R_earth for 2 R_earth).
 - Controls stay undetected: Kepler-1514 b FAP 0.58, KOI-189.01 FAP 0.020 (upper 0.031; post 0.030).
 - Run time per search is unchanged within noise (KOI-189.01 144 s vs 147 s, Kepler-1514 b 61 s vs 56 s).
+
+First five Kepler catalog targets (2026-11-11, 100 nulls each):
+
+| target | 7e408e9 SNR / FAP | c39252d SNR / FAP | shape check chi2 / 20 (beta) |
+|---|---|---|---|
+| Kepler-1514 b | 2.10 / 0.58 | 2.07 / 0.59 | 4.4 (4.2) |
+| KOI-189.01 | 4.82 / 0.020 | 4.21 / 0.11 | 17.0 (1.15) |
+| KOI-125.01 | 3.83 / 0.19 | 4.08 / 0.21 | 25.3 (1.45) |
+| KOI-855.01 | 4.50 / 0.11 | 4.43 / 0.12 | 22.3 (1.06) |
+| KOI-686.01 | 5.73 / 0.0033, detected | 4.57 / 0.064 | 34.8 (1.12) |
+
+7e408e9 modelled every target without exposure (the class default was instantaneous); c39252d
+measures 29.42 min from the point spacing. KOI-686.01 (ingress about 1 h) was a false detection
+from the unsmeared planet; it is undetected with the exposure modelled, and every shape check
+passes with the red-noise factor.
+
+KOI-686.01 synthetic planets (90fe46a, nulls from the c39252d control; match and ld injected with
+the 29.4 min exposure EMLS models):
+
+| condition | detected | FAP < 0.01 | FAP < 0.05 | SNR median / max | FAP median |
+|---|---|---|---|---|---|
+| match | 0 | 0 | 2 | 4.26 / 4.90 | 0.14 |
+| ld | 0 | 0 | 2 | 4.06 / 4.83 | 0.22 |
+
+A first run with match and ld injected instantaneously while EMLS smeared its model gave 2 of 20
+detections in each: an exposure mismatch in the other direction is a false alarm source too.
+
+Kepler-1514 b and KOI-125.01 (b < 0.005) reported impact corrections of 10.6 and 26.1 in c39252d:
+the b derivative of the flux vanishes for a central transit. 8b57f45 takes that column in b^2:
+the corrections become +0.10 and +0.16 in b (b^2 +0.011 and +0.026), with SNR / FAP unchanged
+(2.07 / 0.59 and 4.08 / 0.21). The large-correction flag is then set on the b^2 change (> 0.1),
+which neither target reaches.

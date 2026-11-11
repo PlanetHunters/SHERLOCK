@@ -102,7 +102,8 @@ class ExoMoonLeastSquares:
     SINGLE_EVENT_SNR_FRACTION = 0.5
     # Planet shape terms fitted with each moon, one coefficient shared by all epochs (see planet_fit).
     PLANET_SHAPE_TERMS = ("impact_squared", "u1", "u2")
-    MAX_LINEAR_IMPACT_CORRECTION = 0.1
+    # Largest change of b^2 the first-order geometry column covers (a change of b of 0.1 at b = 0.5).
+    MAX_LINEAR_IMPACT_SQUARED_CORRECTION = 0.1
     """Performs exomoon least-squares search and fitting."""
     MAX_RESIDUAL = sys.maxsize
     SPECTRUM_KERNEL = 31
@@ -4213,19 +4214,15 @@ class ExoMoonLeastSquares:
                                                          in self.planet_shape_corrections.items()))
             # The quadratic limb darkening enters the flux linearly, so its columns are exact (and u1, u2,
             # correlated by about 0.98, can drift together along their degenerate direction); the impact
-            # parameter column is a first-order derivative in b^2. A b^2 below zero has no geometry, so
-            # beyond the b = 0 equivalent of the limit it is flagged too.
-            impact = abs(self.planet_shape_corrections.get("impact", 0.0))
-            b2 = (self.planet_shape_impact or 0.0) ** 2 + self.planet_shape_corrections.get("impact_squared", 0.0)
-            self.planet_shape_correction_large = bool(impact > self.MAX_LINEAR_IMPACT_CORRECTION
-                                                      or b2 < -self.MAX_LINEAR_IMPACT_CORRECTION ** 2)
+            # parameter column is a first-order derivative in b^2, so its range is a change of b^2.
+            impact_squared = self.planet_shape_corrections.get("impact_squared", 0.0)
+            self.planet_shape_correction_large = bool(abs(impact_squared) > self.MAX_LINEAR_IMPACT_SQUARED_CORRECTION)
             if self.planet_shape_correction_large:
                 logging.warning("Planet impact parameter corrected by %+.3f (b^2 %+.4f) with the best moon, beyond the "
-                                "%.2f first-order range of its column: the subtracted planet geometry differs much "
+                                "%.2f b^2 first-order range of its column: the subtracted planet geometry differs much "
                                 "from the data, so the correction is approximate",
-                                self.planet_shape_corrections.get("impact", 0.0),
-                                self.planet_shape_corrections.get("impact_squared", 0.0),
-                                self.MAX_LINEAR_IMPACT_CORRECTION)
+                                self.planet_shape_corrections.get("impact", 0.0), impact_squared,
+                                self.MAX_LINEAR_IMPACT_SQUARED_CORRECTION)
         if self.planet_depth_column is not None and self.last_planet_depth_correction is not None:
             self.planet_depth_correction = float(self.last_planet_depth_correction * 1e6)
             logging.info("Planet depth fitted with the best moon: %+.0f ppm on the fold-fit depth %.0f ppm (negative "
