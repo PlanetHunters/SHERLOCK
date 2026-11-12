@@ -1775,8 +1775,10 @@ class ExoMoonLeastSquares:
                 # Quality control: post-subtraction RMS ratio
                 transit_mask = np.abs(time[mask] - best_t0) < self.planet_duration / 2
                 oot_mask = ~transit_mask
-                # Quality control: in-transit completeness check
-                n_in_transit = np.sum(best_model < 1.0)
+                # Quality control: in-transit completeness check. The points within T14 count, not
+                # those where the model dims: averaged over a long exposure it still dims half an
+                # exposure beyond T14, and an epoch short of in-transit points passed.
+                n_in_transit = int(np.sum(transit_mask))
                 cadence_d = np.median(np.diff(time[mask])) if len(time[mask]) > 1 else 0
                 n_expected = self.planet_duration / cadence_d if cadence_d > 0 else np.inf
                 incomplete = n_in_transit < self.min_transit_completeness * n_expected

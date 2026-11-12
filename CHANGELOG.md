@@ -57,6 +57,12 @@
 
 ### Fixed
 
+- EMLS in-transit coverage check counts the points within T14 of the fitted
+  mid-time. It counted the points where the planet model dims, which with the
+  exposure modelled reaches half an exposure beyond T14, so on Kepler long cadence
+  an epoch one point short could pass: KOI-125.01 kept T0 1306.2 with 7 of the 10
+  expected points (limit 7.7), an epoch after a data gap with a ramp of about
+  1500 ppm inside the transit.
 - EMLS planet shape check scales its bin errors by the red-noise factor, so
   correlated noise no longer fails it: Kepler-1514 b (beta 4.1) failed with p from
   1e-5 to 1e-37, and now passes. It stays a flag and does not change `detected`: a

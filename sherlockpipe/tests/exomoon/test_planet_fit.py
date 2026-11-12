@@ -362,3 +362,37 @@ def test_absorbed_fraction_run_does_not_log_its_own_fit(tmp_path, caplog):
     start = next(i for i, message in enumerate(messages) if message.startswith('Absorbed-fraction test: repeating'))
     assert messages[start + 1].startswith('Absorbed-fraction test: fold fit')
     assert logging.root.manager.disable == logging.NOTSET
+
+
+def test_coverage_counts_points_inside_t14_not_the_smeared_model(tmp_path):
+    """With the exposure modelled, the planet model stays below one half an exposure beyond T14, so
+    counting the points where it dims let a long-cadence epoch with too few in-transit points pass."""
+    cadence = 30 / 1440
+    truth = planet_params()
+    duration = t14(truth)
+    t0s = np.arange(12) * PERIOD
+    # One point lands 0.2 cadence after egress, where the smeared model still dims.
+    offset = (duration / 2 + 0.2 * cadence) % cadence
+    time = np.concatenate([t0 + offset + np.arange(-2.0, 2.0, cadence) for t0 in t0s])
+    expected = duration / cadence
+    needed = int(np.ceil(0.75 * expected))
+    # Epoch 4 keeps one in-transit point fewer than the 0.75 completeness needs, all at its end.
+    in_transit = np.flatnonzero(np.abs(time - t0s[4]) < duration / 2)
+    first_kept = in_transit[len(in_transit) - (needed - 1)]
+    keep = ~((np.abs(time - t0s[4]) < 2.0) & (np.arange(len(time)) < first_kept))
+    time = time[keep]
+    flux = np.ones_like(time)
+    for t0 in t0s:
+        window = np.abs(time - t0) < 3
+        truth.t0 = t0
+        flux[window] = batman.TransitModel(truth, time[window], supersample_factor=15,
+                                           exp_time=cadence).light_curve(truth)
+    flux = flux + np.random.default_rng(12).normal(0, 1e-4, len(time))
+    data = (t0s, time, flux, np.full(len(time), 1e-4))
+    emls = emls_for(tmp_path, data, duration, min_transit_completeness=0.75, exposure_time=cadence)
+
+    emls.subtract_planet_transit(*data[1:])
+
+    dropped = [epoch['t0'] for epoch in emls.epochs_dropped_coverage]
+    assert len(dropped) == 1 and dropped[0] == pytest.approx(t0s[4], abs=0.05)
+    assert emls.epochs_dropped_coverage[0]['points'] == needed - 1
