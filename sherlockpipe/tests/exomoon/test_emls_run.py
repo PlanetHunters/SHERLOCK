@@ -285,7 +285,7 @@ def test_command_finds_a_moon_in_a_sherlock_directory(tmp_path, monkeypatch):
     assert results['best_radius_below_range'] is False
     assert not (tmp_path / 'emls_1' / 'stale.txt').exists()
     assert os.path.exists(tmp_path / 'emls_1' / 'emls.log')
-    assert os.path.exists(tmp_path / 'emls_1' / 'stats.png')
+    assert os.path.exists(tmp_path / 'emls_1' / 'search_overview.png')
 
 
 def test_command_without_a_moon_stays_quiet(tmp_path, monkeypatch):

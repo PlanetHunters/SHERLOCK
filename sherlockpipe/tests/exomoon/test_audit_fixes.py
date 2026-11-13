@@ -493,18 +493,19 @@ def test_fold_bounds_contain_the_guess_and_reach_grazing(tmp_path):
 
 def test_sde_plot_title_shows_the_sde(tmp_path):
     titles = []
-    original = matplotlib.figure.Figure.suptitle
+    original = matplotlib.axes.Axes.set_title
 
     def spy(self, text, *args, **kwargs):
         titles.append(text)
         return original(self, text, *args, **kwargs)
 
     emls = system(tmp_path)
-    with mock.patch.object(matplotlib.figure.Figure, 'suptitle', spy):
+    with mock.patch.object(matplotlib.axes.Axes, 'set_title', spy):
         emls.run()
 
-    first = next(t for t in titles if 'SDE->' in t)
-    assert float(first.split('SDE->')[1].split(',')[0]) == pytest.approx(emls.max_sde)
+    first = next(t for t in titles if 'peak SDE of the residual spectrum' in t)
+    assert float(first.split('peak SDE of the residual spectrum ')[1]) == pytest.approx(emls.max_sde, abs=0.005)
+    assert float(first.split('at the selected period ')[1].split(',')[0]) == pytest.approx(emls.sde, abs=0.005)
 
 
 def test_late_transit_has_positive_timing_variation(tmp_path):

@@ -68,10 +68,9 @@ def test_execution_finishes_and_writes_results(executions, index):
     emls = executions[index]
     written = os.listdir(emls.object_dir)
 
-    assert {'stats.png', 'residuals_map.png'} <= set(written)
-    assert sum(name.startswith('SNR ') for name in written) == 5
-    assert sum(name.startswith('Residuals ') for name in written) == 5
-    assert sum(name.endswith('_moon_model.png') for name in written) == len(emls.bary_t0s)
+    assert {'search_overview.png', 'snr_map.png', 'hypothesis_1.png'} <= set(written)
+    assert 1 <= sum(name.startswith('hypothesis_') for name in written) <= emls.HYPOTHESIS_FIGURES
+    assert len(os.listdir(os.path.join(emls.object_dir, 'epochs'))) == len(emls.bary_t0s)
     assert np.isfinite(emls.max_snr)
     assert np.isfinite(emls.max_sde)
 

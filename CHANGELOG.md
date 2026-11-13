@@ -4,6 +4,22 @@
 
 ### Added
 
+- EMLS figures (`sherlockpipe/exomoon_plots.py`) replace `stats.png`, `residuals_map.png`,
+  `Residuals <n>.png`, `SDE <n>.png`, `SNR <n>.png` and `T0_<t0>_moon_model.png`:
+  `search_overview.png` (SNR spectrum with the FAP threshold and the sampling aliases of the
+  selected period, diagnostic spectra below), `snr_map.png` (SNR over period and phase),
+  `hypothesis_<n>.png` (the selected hypothesis and the next SNR peaks at other periods,
+  stacked, with a zoom), `null_distribution.png` (nulls, Gumbel fit, selected SNR and the
+  FAP verdict), `epochs/T0_<t0>.png` (each transit with the planet corrections of the best
+  fit) and `planet_epoch_depths.png`: each epoch's planet depth fitted without a moon
+  against the share of it the selected moon would take, both about their means (the planet
+  depth absorbs the means), with their correlation and the chi-squared of the depth changes
+  with and without the moon (also in `epoch_depth_comparison`). A real moon drives those
+  depth changes; spots do not. Epochs where the moon is over the planet disk are drawn
+  hollow and not counted: a real moon's dip is hidden there and the template does not
+  model it (on a KOI-189.01 Rp/5 injection, Pandora gives no dip in 3 of 36 epochs). The
+  15 extra hypothesis searches of the old figures are down to 3; the overview's SDE panel
+  title carries the reported SDE values.
 - EMLS fits one planet depth correction per epoch with each moon hypothesis
   (`fit_planet_epoch_depth`, default on), instead of one shared by all epochs.
   Real Kepler transits change depth between epochs: on KOI-189.01, KOI-125.01,
