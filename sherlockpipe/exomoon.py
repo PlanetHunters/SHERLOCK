@@ -3046,9 +3046,11 @@ class ExoMoonLeastSquares:
             no_depth_fit = dict(planet_fit, epoch_depths={}, depth=0.0)
             flux = self.flux - ExoMoonLeastSquares.planet_correction(no_depth_fit, columns)
             depths, moon_share, errors, epoch_t0s, overlaps = [], [], [], [], []
-            # Where the moon is within a planet radius plus a moon radius of the planet on the sky, it
-            # crosses the planet disk, which hides its dip; the template does not model that, so those
-            # epochs are marked and left out of the comparison. The sky speed is the planet's.
+            # With the coplanar orbit of the template, a moon within a planet radius plus a moon radius
+            # of the planet on the sky could be over the planet disk, where its dip would be hidden.
+            # Whether it is depends on the moon orbit inclination, which is not known: a few degrees
+            # move it above or below the disk. Those epochs are marked and left out of the comparison,
+            # not modelled. The sky speed is the planet's.
             rp = self.null_planet_params().rp
             rm = max(radius, self.min_radius) * R_earth_to_R_sun / self.star_radius
             chord = 2 * np.sqrt(max((1 + rp) ** 2 - self.planet_impact_param ** 2, 1e-6))
@@ -3074,7 +3076,7 @@ class ExoMoonLeastSquares:
                                            "depth_ppm": [float(value * 1e6) for value in depths],
                                            "moon_share_ppm": [float(value * 1e6) for value in moon_share],
                                            "error_ppm": [float(value * 1e6) for value in errors],
-                                           "moon_over_planet": overlaps}
+                                           "moon_possibly_over_planet": overlaps}
             if len(depths) > 2:
                 exomoon_plots.epoch_depth_figure(os.path.join(self.object_dir, "planet_epoch_depths.png"),
                                                  epoch_t0s, depths, moon_share, errors, best_period, best_alpha,

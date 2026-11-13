@@ -259,9 +259,9 @@ def epoch_depth_figure(path, epoch_t0s, depths, moon_shares, errors, moon_period
     the planet depth, so only their changes between epochs are compared: if the moon is real, the
     depth changes follow its share; spots or other stellar changes do not. The moon was selected
     on the stacked light curve, not on these depths, but the two share data, so a high
-    correlation supports a moon without proving it. Epochs in `overlaps` have the moon over the
-    planet disk, where a real moon's dip is hidden and the template does not model it: they are
-    drawn hollow and left out of the statistics.
+    correlation supports a moon without proving it. Epochs in `overlaps` may have the moon over the
+    planet disk (for a coplanar orbit; the inclination is not known), where a real moon's dip would
+    be hidden: they are drawn hollow and left out of the statistics.
     """
     epoch_t0s = np.asarray(epoch_t0s, dtype=float)
     depths = np.asarray(depths, dtype=float) * 1e6
@@ -290,8 +290,8 @@ def epoch_depth_figure(path, epoch_t0s, depths, moon_shares, errors, moon_period
     if np.any(overlaps):
         axs[0].errorbar(epoch_t0s[overlaps], depth_change[overlaps], yerr=errors[overlaps], fmt='o', markersize=5,
                         markerfacecolor='none', color=BIN_COLOR, elinewidth=0.8,
-                        label=f"Moon over the planet disk ({int(np.sum(overlaps))} epochs, not modelled, "
-                              f"not counted)")
+                        label=f"Moon possibly over the planet disk (coplanar orbit; {int(np.sum(overlaps))} "
+                              f"epochs, not counted)")
         axs[0].plot(epoch_t0s[overlaps], share_change[overlaps], 'D', markersize=5, markerfacecolor='none',
                     color=MODEL_COLOR)
     axs[0].axhline(0, color='0.3', linewidth=0.6)

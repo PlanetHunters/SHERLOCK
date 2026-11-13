@@ -15,9 +15,11 @@
   against the share of it the selected moon would take, both about their means (the planet
   depth absorbs the means), with their correlation and the chi-squared of the depth changes
   with and without the moon (also in `epoch_depth_comparison`). A real moon drives those
-  depth changes; spots do not. Epochs where the moon is over the planet disk are drawn
-  hollow and not counted: a real moon's dip is hidden there and the template does not
-  model it (on a KOI-189.01 Rp/5 injection, Pandora gives no dip in 3 of 36 epochs). The
+  depth changes; spots do not. Epochs where the moon may be over the planet disk (for the
+  coplanar orbit of the template) are drawn hollow and not counted: a moon there would
+  have its dip hidden, but whether it is over the disk depends on its orbit inclination,
+  which a few degrees change and EMLS does not know (on a coplanar KOI-189.01 Rp/5
+  injection, Pandora gives no dip in 3 of 36 epochs). The
   15 extra hypothesis searches of the old figures are down to 3; the overview's SDE panel
   title carries the reported SDE values.
 - EMLS fits one planet depth correction per epoch with each moon hypothesis
