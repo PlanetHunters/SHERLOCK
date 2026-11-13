@@ -77,9 +77,37 @@ def test_toi_row_keeps_its_previous_setup():
     assert params['max_radius'] == pytest.approx(1.5)
     assert params['planet_inc'] == 90 and params['planet_inc_err'] == 3
     assert params['planet_impact_param'] == pytest.approx(a * exomoon.AU_TO_RSUN / 0.8 * np.cos(np.pi / 2), abs=1e-12)
-    assert params['planet_mass'] == pytest.approx(3.0 ** 1.5)
+    assert params['planet_mass'] == pytest.approx(exomoon.catalog_planet_mass(3.0, 0.3))
     assert params['planet_t0'] == pytest.approx(101.5)
     assert params['planet_duration'] == pytest.approx(0.125)
+    assert params['planet_ecc'] == 0.0 and params['planet_arg_periastron'] == 0.0
+
+
+def test_catalog_mass_is_the_emls_command_forecast_not_r_to_the_1_5():
+    from sherlockpipe.exomoon_run import GIANT_RADIUS, JUPITER_MASS, guess_planet_mass
+
+    # A giant: R^1.5 gave 37 M_earth for 11.2 R_earth, about 8 times too light for its Hill sphere.
+    assert exomoon.catalog_planet_mass(11.2) == pytest.approx(JUPITER_MASS)
+    assert exomoon.catalog_planet_mass(GIANT_RADIUS - 1, 0.3) == pytest.approx(guess_planet_mass(GIANT_RADIUS - 1, 0.3))
+    assert np.isnan(exomoon.catalog_planet_mass(np.nan))
+
+
+def test_koi_table_mass_comes_from_the_forecast():
+    row = koi_row(**{'Planet Radius (R_Earth)': 11.2})
+
+    from sherlockpipe.exomoon_run import JUPITER_MASS
+    assert row['Predicted Mass (M_Earth)'] == pytest.approx(JUPITER_MASS)
+    assert exomoon.catalog_planet_params(row, 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)['planet_mass'] == \
+        pytest.approx(JUPITER_MASS)
+
+
+def test_koi_eccentricity_comes_from_the_catalog_else_circular():
+    circular = exomoon.catalog_planet_params(koi_row(), 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)
+    eccentric = exomoon.catalog_planet_params(koi_row(koi_eccen=0.3, koi_longp=120.0), 'kois', 1.0, 1.0, 0.0,
+                                              KEPLER_OFFSET)
+
+    assert circular['planet_ecc'] == 0.0 and circular['planet_arg_periastron'] == 0.0
+    assert eccentric['planet_ecc'] == 0.3 and eccentric['planet_arg_periastron'] == 120.0
 
 
 def test_koi_parameters_reach_the_search(tmp_path):

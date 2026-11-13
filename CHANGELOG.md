@@ -86,6 +86,14 @@
 
 ### Fixed
 
+- EMLS catalog driver: a planet without a catalog mass gets the same mass as in the
+  `sherlockpipe.emls` command (Chen & Kipping forecast, one Jupiter mass for giants)
+  instead of R^1.5, which made giants about 8 times too light and their Hill sphere,
+  widest stable moon orbit and moon period grid too small (audit item F7). The
+  eccentricity comes from the KOI catalog (`koi_eccen`, `koi_longp`) when present, else
+  the orbit is circular, instead of e = 0.15 and w = 0 for every target, which lowered
+  the outer moon limit from 0.49 to 0.41 Hill radii (F8). The TOI b = 0 start (B5) needs
+  no change: the planet fold fit frees b.
 - EMLS in-transit coverage check counts the points within T14 of the fitted
   mid-time. It counted the points where the planet model dims, which with the
   exposure modelled reaches half an exposure beyond T14, so on Kepler long cadence

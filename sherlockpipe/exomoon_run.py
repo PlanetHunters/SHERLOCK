@@ -130,7 +130,7 @@ def read_fit_parameters(fit_dir):
     return params
 
 
-def guess_planet_mass(radius, radius_err=None):
+def guess_planet_mass(radius, radius_err=None, warn=True):
     """Guess the planet mass from its radius.
 
     Below GIANT_RADIUS this is the Chen & Kipping (2017) forecast, with a fixed seed
@@ -143,6 +143,8 @@ def guess_planet_mass(radius, radius_err=None):
         Planet radius in Earth radii.
     radius_err : float, optional
         Radius uncertainty in Earth radii. 10 % of the radius when missing.
+    warn : bool, optional
+        Log the giant-regime warning, default True.
 
     Returns
     -------
@@ -150,6 +152,8 @@ def guess_planet_mass(radius, radius_err=None):
         Mass in Earth masses.
     """
     if radius >= GIANT_RADIUS:
+        if not warn:
+            return JUPITER_MASS
         logging.warning("Planet radius %.2f R_earth is in the giant regime, where the radius does not constrain the "
                         "mass. Using one Jupiter mass (%.1f M_earth); provide --planet_mass for a better moon "
                         "period range.", radius, JUPITER_MASS)

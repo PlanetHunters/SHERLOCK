@@ -4444,6 +4444,35 @@ def emls_output_dir(target_name, object_of_interest):
     return f"{target_name}_{object_of_interest}_EMLS/"
 
 
+def catalog_planet_mass(radius, radius_err=None):
+    """Return the planet mass in Earth masses the catalog driver uses when the catalog has none.
+
+    It is the same guess as the EMLS command (`sherlockpipe.exomoon_run.guess_planet_mass`): the
+    Chen & Kipping (2017) forecast, and one Jupiter mass in the giant regime, where the radius does
+    not constrain the mass. The mass sets the Hill sphere, so the widest stable moon orbit and the
+    moon period grid.
+
+    Parameters
+    ----------
+    radius : float
+        Planet radius in Earth radii.
+    radius_err : float, optional
+        Radius uncertainty in Earth radii.
+
+    Returns
+    -------
+    float
+        Mass in Earth masses, NaN for a radius that is not finite and positive.
+    """
+    from sherlockpipe.exomoon_run import guess_planet_mass
+    if radius is None or not np.isfinite(radius) or radius <= 0:
+        return np.nan
+    try:
+        return guess_planet_mass(float(radius), radius_err, warn=False)
+    except ValueError:
+        return np.nan
+
+
 def prepare_koi_table(tois_df):
     """Add the columns the EMLS driver needs to a KOI table.
 
@@ -4457,8 +4486,11 @@ def prepare_koi_table(tois_df):
     pandas.DataFrame
         The table with the derived columns.
     """
+    tois_df["Planet Radius (R_Earth) err"] = tois_df["koi_prad_err1"].fillna(0.1 * tois_df["Planet Radius (R_Earth)"])
     if "Predicted Mass (M_Earth)" not in tois_df.columns:
-        tois_df["Predicted Mass (M_Earth)"] = tois_df["Planet Radius (R_Earth)"] ** 1.5
+        tois_df["Predicted Mass (M_Earth)"] = [catalog_planet_mass(radius, radius_err) for radius, radius_err in
+                                               zip(tois_df["Planet Radius (R_Earth)"],
+                                                   tois_df["Planet Radius (R_Earth) err"])]
     if "Stellar Mass (M_Sun)" not in tois_df.columns:
         g = 10 ** tois_df["Stellar log(g) (cm/s^2)"] / 100
         r_m = tois_df["koi_srad"] * ac.R_sun.value
@@ -4466,7 +4498,6 @@ def prepare_koi_table(tois_df):
     if "Stellar Radius (R_Sun)" not in tois_df.columns:
         tois_df["Stellar Radius (R_Sun)"] = tois_df["koi_srad"]
     tois_df["Planet SNR"] = tois_df["koi_model_snr"]
-    tois_df["Planet Radius (R_Earth) err"] = tois_df["koi_prad_err1"].fillna(0.1 * tois_df["Planet Radius (R_Earth)"])
     tois_df["planet_impact"] = tois_df["koi_impact"].fillna(0)
     return tois_df
 
@@ -4524,7 +4555,14 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
     planet_t0 = first_time + (planet_t0 - first_time) % planet_period
     planet_mass = row['Predicted Mass (M_Earth)']
     if planet_mass is None or np.isnan(planet_mass):
-        planet_mass = planet_radius ** 1.5
+        planet_mass = catalog_planet_mass(planet_radius, row.get('Planet Radius (R_Earth) err'))
+    # The eccentricity comes from the catalog when it has one (koi_eccen, koi_longp), else the
+    # orbit is circular; it sets the Domingos outer limit of the moon orbits.
+    planet_ecc = row.get('koi_eccen', np.nan) if catalog == "kois" else np.nan
+    planet_ecc = float(planet_ecc) if planet_ecc is not None and np.isfinite(planet_ecc) else 0.0
+    planet_arg_periastron = row.get('koi_longp', np.nan) if catalog == "kois" and planet_ecc > 0 else np.nan
+    planet_arg_periastron = float(planet_arg_periastron) \
+        if planet_arg_periastron is not None and np.isfinite(planet_arg_periastron) else 0.0
     planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
     if catalog == "kois":
         planet_impact_param = float(row["planet_impact"])
@@ -4543,9 +4581,9 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
         'planet_duration': row['Duration (hours)'] / 24,
         'planet_inc': planet_inc,
         'planet_inc_err': planet_inc_err,
-        'planet_ecc': 0.15,
-        'planet_ecc_err': 0.15,
-        'planet_arg_periastron': 0,
+        'planet_ecc': planet_ecc,
+        'planet_ecc_err': 0.0,
+        'planet_arg_periastron': planet_arg_periastron,
         'planet_mass': planet_mass,
         'planet_semimajor_axis': planet_semimajor_axis,
         'planet_impact_param': planet_impact_param,
@@ -4646,7 +4684,7 @@ if __name__ == '__main__':
             keep_mask.append(False)
             continue
         if np.isnan(p_mass) or p_mass <= 0:
-            p_mass = p_radius ** 1.5
+            p_mass = catalog_planet_mass(p_radius)
         a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, period)
         p_mass_sun = p_mass * M_earth_to_M_sun
         moon_stable = hill_roche_stable(period, p_radius, p_mass, star_mass)
@@ -4665,7 +4703,7 @@ if __name__ == '__main__':
                 continue
             sis_mass = sis['Predicted Mass (M_Earth)']
             if np.isnan(sis_mass) or sis_mass <= 0:
-                sis_mass = sis['Planet Radius (R_Earth)'] ** 1.5
+                sis_mass = catalog_planet_mass(sis['Planet Radius (R_Earth)'])
             sis_a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, sis['Period (days)'])
             if not planet_planet_stable(a, p_mass, sis_a, sis_mass, star_mass):
                 companion_ok = False
