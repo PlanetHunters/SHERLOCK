@@ -4467,10 +4467,17 @@ def catalog_planet_mass(radius, radius_err=None):
     from sherlockpipe.exomoon_run import guess_planet_mass
     if radius is None or not np.isfinite(radius) or radius <= 0:
         return np.nan
-    try:
-        return guess_planet_mass(float(radius), radius_err, warn=False)
-    except ValueError:
-        return np.nan
+    # Catalog radius errors can reach the radius itself, and the forecaster then samples radii
+    # outside its model range and returns nothing: the error is capped at half the radius, and
+    # the default 10 % is tried last.
+    if radius_err is not None and np.isfinite(radius_err) and radius_err > 0:
+        radius_err = min(float(radius_err), 0.5 * float(radius))
+    for error in (radius_err, None):
+        try:
+            return guess_planet_mass(float(radius), error, warn=False)
+        except ValueError:
+            continue
+    return np.nan
 
 
 def prepare_koi_table(tois_df):

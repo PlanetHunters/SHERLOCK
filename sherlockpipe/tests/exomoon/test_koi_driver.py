@@ -90,6 +90,9 @@ def test_catalog_mass_is_the_emls_command_forecast_not_r_to_the_1_5():
     assert exomoon.catalog_planet_mass(11.2) == pytest.approx(JUPITER_MASS)
     assert exomoon.catalog_planet_mass(GIANT_RADIUS - 1, 0.3) == pytest.approx(guess_planet_mass(GIANT_RADIUS - 1, 0.3))
     assert np.isnan(exomoon.catalog_planet_mass(np.nan))
+    # A radius error as large as the radius, common in the KOI table, still gives a mass.
+    assert np.isfinite(exomoon.catalog_planet_mass(2.0, 10.0))
+    assert np.isfinite(exomoon.catalog_planet_mass(3.0, 3.0))
 
 
 def test_koi_table_mass_comes_from_the_forecast():
