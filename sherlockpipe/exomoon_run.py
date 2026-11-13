@@ -674,7 +674,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "epochs_flagged_rms": emls.epochs_flagged_rms, "epochs_flagged_rp": emls.epochs_flagged_rp,
         "planet_fit_absorbed_fraction": emls.absorbed_fraction,
         "planet_depth_correction_ppm": emls.planet_depth_correction,
-        "planet_t0_shifts": emls.planet_t0_shifts,
+        "planet_t0_shifts": emls.planet_t0_shifts, "planet_epoch_depths": emls.planet_epoch_depths,
         "planet_shape_corrections": emls.planet_shape_corrections,
         "fold_fit": {"status": emls.fold_fit_status, "duration": emls.planet_duration,
                      "impact": emls.planet_impact_param, "inc": emls.planet_inc,
@@ -707,8 +707,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
                  "are diagnostics that do not separate moons from noise. best_radius inverts the "
                  "least-squares template amplitude through the template set (audit items H13, H14). The "
                  "planet fit can absorb part of a moon inside the planet transit; the search fits one "
-                 "planet depth correction shared by all epochs with each moon hypothesis, and "
-                 "planet_depth_correction_ppm is its value at the best one (negative when the fold fit "
+                 "planet depth correction per epoch with each moon hypothesis (planet_epoch_depths at the best "
+                 "one, since real transit depths change between epochs), and "
+                 "planet_depth_correction_ppm is their mean at the best one (negative when the fold fit "
                  "had taken part of the moon as planet depth), and planet_t0_shifts the mid-time shift it fits for each "
                  "epoch with that moon; planet_shape_corrections the shared changes of the subtracted squared impact parameter "
                  "(impact_squared, fitted in b^2 because the flux is even in b; impact is the resulting change of b) "

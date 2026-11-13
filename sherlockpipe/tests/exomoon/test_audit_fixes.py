@@ -139,6 +139,11 @@ def test_same_dip_counts_the_same_in_the_first_and_last_epoch(tmp_path):
         flux[np.abs(time - t0s[epoch]) < 0.15] -= 3e-3
         emls = system(tmp_path, (t0s, time, flux, flux_err, duration), skip_fold_fit=True)
         inputs = run_to_search(emls)
+        # The dip covers the whole planet transit of one epoch, which is a change of that epoch's
+        # depth: the per-epoch depth takes it, in proportion to how the moon window falls on that
+        # transit, which differs between the two epochs. The epoch weighting is tested with the
+        # shared depth.
+        emls.fit_planet_epoch_depth = False
         return emls.search(inputs[0])[3]
 
     assert snr(0) == pytest.approx(snr(EPOCHS - 1), rel=0.25)

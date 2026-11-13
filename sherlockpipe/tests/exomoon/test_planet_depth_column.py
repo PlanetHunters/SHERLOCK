@@ -8,6 +8,7 @@ the derivative of the planet model with respect to its depth, placed at each epo
 import copy
 
 import numpy as np
+import pytest
 
 from sherlockpipe.exomoon import ExoMoonLeastSquares
 from sherlockpipe.tests.exomoon.test_audit_fixes import EPOCHS, run_to_search, system
@@ -224,3 +225,55 @@ def test_impact_column_does_not_vanish_for_a_central_transit(tmp_path):
     secant = (flux[1] - flux[0]) / 0.1 ** 2
     assert np.max(np.abs(column[near])) > 0.5 * np.max(np.abs(secant))
     assert np.corrcoef(column[near], secant)[0, 1] > 0.95
+
+
+def stacked_epochs(rng, moon_depth, epoch_errors, noise=1e-4):
+    """Stacked moon-frame points of one epoch per entry of epoch_errors: the moon window is the same
+    template in all of them, the planet transit (depth column -1) falls at a different place in each,
+    and each epoch's planet depth is wrong by its own amount."""
+    flux, inside, columns = [], [], []
+    for index, (offset, error) in enumerate(zip(np.linspace(-0.6, 0.6, len(epoch_errors)), epoch_errors)):
+        phase = np.linspace(-1, 1, 200)
+        column = np.where(np.abs(phase - offset) < 0.4, -1.0, 0.0)
+        window = np.abs(phase) <= 0.25
+        flux.append(1 - moon_depth * window + error * column + rng.normal(0, noise, len(phase)))
+        inside.append(window)
+        columns.append(np.column_stack((column, np.zeros(len(phase)), np.full(len(phase), index))))
+    return np.concatenate(flux), np.concatenate(inside), np.vstack(columns)
+
+
+def test_epoch_depth_fit_returns_the_moon_when_each_transit_depth_differs():
+    rng = np.random.default_rng(21)
+    errors = rng.normal(0, 300e-6, 12)
+    flux, inside, columns = stacked_epochs(rng, 300e-6, errors)
+
+    shared = ExoMoonLeastSquares.planet_fit(flux, inside, columns)
+    per_epoch = ExoMoonLeastSquares.planet_fit(flux, inside, columns, epoch_depth=True)
+
+    def moon_depth(fit):
+        corrected = flux - fit["model"]
+        return np.mean(corrected[~inside]) - np.mean(corrected[inside])
+
+    assert abs(moon_depth(per_epoch) - 300e-6) < 15e-6
+    assert abs(moon_depth(shared) - 300e-6) > abs(moon_depth(per_epoch) - 300e-6)
+    fitted = np.array([per_epoch["epoch_depths"][index] for index in range(12)])
+    np.testing.assert_allclose(fitted, errors, atol=30e-6)
+    assert per_epoch["depth"] == pytest.approx(np.mean(fitted))
+    assert shared["epoch_depths"] == {}
+
+
+def test_planet_correction_rebuilds_the_fitted_model():
+    rng = np.random.default_rng(22)
+    flux, inside, columns = stacked_epochs(rng, 300e-6, rng.normal(0, 300e-6, 8))
+    for epoch_depth in (False, True):
+        fit = ExoMoonLeastSquares.planet_fit(flux, inside, columns, epoch_depth=epoch_depth)
+        np.testing.assert_allclose(ExoMoonLeastSquares.planet_correction(fit, columns), fit["model"], atol=1e-12)
+
+
+def test_epoch_depths_keep_their_epoch_without_the_mid_time_fit(tmp_path):
+    emls = system(tmp_path)
+    run_to_search(emls)
+    emls.fit_planet_t0 = False
+    columns = emls.search_planet_depth_column()
+    assert np.all(columns[:, 1] == 0)
+    assert set(np.unique(columns[columns[:, 0] != 0, 2])) == set(range(len(emls.bary_t0s)))

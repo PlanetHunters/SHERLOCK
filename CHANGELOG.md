@@ -4,6 +4,17 @@
 
 ### Added
 
+- EMLS fits one planet depth correction per epoch with each moon hypothesis
+  (`fit_planet_epoch_depth`, default on), instead of one shared by all epochs.
+  Real Kepler transits change depth between epochs: on KOI-189.01, KOI-125.01,
+  KOI-855.01 and KOI-686.01 the mean in-transit residual scatters about twice as
+  much between epochs as on the pseudo-epoch nulls or on identical synthetic
+  planets processed through the whole pipeline, and the first and second halves
+  of each transit move together (r 0.73-0.86), so whole transits are deeper or
+  shallower. The nulls did not have that scatter, so the FAP was optimistic.
+  A moon separates from the epoch depths because it covers a different part of
+  each transit: on the Rp/5 injections the best SNR any method can reach drops
+  by 8-15 %. `planet_epoch_depths` reports them at the best hypothesis.
 - EMLS synthetic planet false-alarm test
   (`sherlockpipe/regression_tests/emls_synthetic_planet/synthetic_planet.py`): removes
   the real transits, injects the planet at shifted ephemerides without a moon (exact
