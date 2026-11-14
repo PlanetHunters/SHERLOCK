@@ -1,4 +1,5 @@
 import copy
+import functools
 import itertools
 import logging
 import math
@@ -4444,6 +4445,26 @@ def emls_output_dir(target_name, object_of_interest):
     return f"{target_name}_{object_of_interest}_EMLS/"
 
 
+def mean_planet_mass(radius):
+    """Return a planet mass in Earth masses from the Chen & Kipping (2017) mean mass-radius relation.
+
+    The inverse of `moon_radius_from_mass` below the giant regime, and one Jupiter mass from
+    `GIANT_RADIUS` up, as `catalog_planet_mass`. It is instant and within about 10 % of the
+    forecast median, so the catalog filter uses it on thousands of rows; the targets searched
+    get the forecast.
+    """
+    from sherlockpipe.exomoon_run import GIANT_RADIUS, JUPITER_MASS
+    if radius is None or not np.isfinite(radius) or radius <= 0:
+        return np.nan
+    if radius >= GIANT_RADIUS:
+        return JUPITER_MASS
+    transition_mass = 2.04
+    transition_radius = 1.008 * transition_mass ** 0.279
+    if radius <= transition_radius:
+        return float((radius / 1.008) ** (1 / 0.279))
+    return float(transition_mass * (radius / transition_radius) ** (1 / 0.589))
+
+
 def catalog_planet_mass(radius, radius_err=None):
     """Return the planet mass in Earth masses the catalog driver uses when the catalog has none.
 
@@ -4464,7 +4485,6 @@ def catalog_planet_mass(radius, radius_err=None):
     float
         Mass in Earth masses, NaN for a radius that is not finite and positive.
     """
-    from sherlockpipe.exomoon_run import guess_planet_mass
     if radius is None or not np.isfinite(radius) or radius <= 0:
         return np.nan
     # Catalog radius errors can reach the radius itself, and the forecaster then samples radii
@@ -4472,12 +4492,115 @@ def catalog_planet_mass(radius, radius_err=None):
     # the default 10 % is tried last.
     if radius_err is not None and np.isfinite(radius_err) and radius_err > 0:
         radius_err = min(float(radius_err), 0.5 * float(radius))
+    else:
+        radius_err = None
+    return _cached_catalog_planet_mass(float(radius), radius_err)
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_catalog_planet_mass(radius, radius_err):
+    """The forecast of `catalog_planet_mass`, cached: it samples the forecaster (about 0.06 s a call)
+    and catalogs repeat radius and error pairs."""
+    from sherlockpipe.exomoon_run import guess_planet_mass
     for error in (radius_err, None):
         try:
-            return guess_planet_mass(float(radius), error, warn=False)
+            return guess_planet_mass(radius, error, warn=False)
         except ValueError:
             continue
     return np.nan
+
+
+# Moon radius range of the catalog search, as fractions of the planet radius.
+CATALOG_MIN_MOON_RADIUS_FRACTION = 1 / 20
+CATALOG_MAX_MOON_RADIUS_FRACTION = 1 / 2
+# Moon survival against tidal migration (Barnes & O'Brien 2002): assumed system age, and the
+# planet radius in Earth radii above which k2/Q stays at its Jupiter value.
+TIDAL_SURVIVAL_AGE_GYR = 5.0
+TIDAL_K2_Q_MAX_RADIUS = 11.2
+
+
+def planet_k2_over_q(planet_radius):
+    """Return the planet tidal efficiency k2/Q from its radius in Earth radii.
+
+    Empirical Solar System relation of Teachey, Kipping & Schmitt (2018, HEK VI, Fig. 1),
+    log10(k2/Q) = -2.90 - 0.187 Rp/R_earth, fitted to the Moon, the Earth, Neptune and Jupiter.
+    Above Jupiter's radius it is kept at Jupiter's value instead of extrapolated.
+    """
+    return 10 ** (-2.90 - 0.187 * min(float(planet_radius), TIDAL_K2_Q_MAX_RADIUS))
+
+
+def max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period, planet_ecc=0.0,
+                            age_gyr=TIDAL_SURVIVAL_AGE_GYR):
+    """Return the largest moon mass in Earth masses that survives tidal migration for the system age.
+
+    Barnes & O'Brien (2002, ApJ 575, 1087) Eq. 7 solved for the moon mass, as in their Eq. 8:
+    a moon is lost once tides carry it across the region between the planet and the widest
+    stable orbit a_crit, which takes T = (2/13) a_crit^(13/2) sqrt(M_p / G) / (3 (k2/Q)_p M_m R_p^5),
+    so M_m,max = (2/13) a_crit^(13/2) sqrt(M_p) / (3 (k2/Q)_p T R_p^5 sqrt(G)). a_crit is the outer
+    moon limit EMLS searches up to (`ExoMoonLeastSquares.max_moon_semimajor_axis`, Domingos et al.
+    2006), and k2/Q comes from `planet_k2_over_q`. HEK VI (Teachey et al. 2018) and Fox et al. (2022)
+    apply it to the Kepler catalog the same way. It is an order-of-magnitude bound: k2/Q is an
+    empirical Solar System relation, the age is assumed, and the mass goes as a_crit^6.5.
+
+    Parameters
+    ----------
+    star_mass : float
+        Stellar mass in solar masses.
+    planet_mass, planet_radius : float
+        Planet mass in Earth masses and radius in Earth radii.
+    planet_period : float
+        Planet period in days.
+    planet_ecc : float, optional
+        Planet eccentricity, default 0.
+    age_gyr : float, optional
+        System age in Gyr, default TIDAL_SURVIVAL_AGE_GYR.
+
+    Returns
+    -------
+    float
+        Mass in Earth masses, NaN when an input is not finite and positive.
+    """
+    values = (star_mass, planet_mass, planet_radius, planet_period, age_gyr)
+    if not all(value is not None and np.isfinite(value) and value > 0 for value in values):
+        return np.nan
+    planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
+    a_crit = ExoMoonLeastSquares.max_moon_semimajor_axis(star_mass, planet_mass * M_earth_to_M_sun,
+                                                         planet_semimajor_axis, planet_ecc) * AU_TO_M
+    mass = planet_mass * Mearth_to_kg
+    radius = planet_radius * ac.R_earth.value
+    age = age_gyr * 1e9 * 365.25 * 86400
+    moon_mass = 2 / 13 * a_crit ** 6.5 * np.sqrt(mass) / (3 * planet_k2_over_q(planet_radius) * age * radius ** 5 *
+                                                          np.sqrt(G))
+    return float(moon_mass / Mearth_to_kg)
+
+
+def moon_radius_from_mass(moon_mass):
+    """Return a moon radius in Earth radii from its mass in Earth masses.
+
+    Mean mass-radius relation of Chen & Kipping (2017, ApJ 834, 17, Table 1): R = 1.008 M^0.279
+    for rocky bodies up to 2.04 M_earth, then R proportional to M^0.589 (continuous at the
+    transition). Bodies more massive than 131.6 M_earth keep that radius.
+    """
+    if moon_mass is None or not np.isfinite(moon_mass) or moon_mass <= 0:
+        return 0.0
+    transition = 2.04
+    rocky = 1.008 * min(moon_mass, transition) ** 0.279
+    if moon_mass <= transition:
+        return float(rocky)
+    return float(rocky * (min(moon_mass, 131.6) / transition) ** 0.589)
+
+
+def catalog_planet_orbit(row, catalog):
+    """Return the eccentricity and argument of periastron in degrees of a catalog row.
+
+    They come from the KOI catalog (koi_eccen, koi_longp) when present, else the orbit is
+    circular; the eccentricity sets the Domingos outer limit of the moon orbits.
+    """
+    ecc = row.get('koi_eccen', np.nan) if catalog == "kois" else np.nan
+    ecc = float(ecc) if ecc is not None and np.isfinite(ecc) else 0.0
+    arg_periastron = row.get('koi_longp', np.nan) if catalog == "kois" and ecc > 0 else np.nan
+    arg_periastron = float(arg_periastron) if arg_periastron is not None and np.isfinite(arg_periastron) else 0.0
+    return ecc, arg_periastron
 
 
 def prepare_koi_table(tois_df):
@@ -4495,9 +4618,10 @@ def prepare_koi_table(tois_df):
     """
     tois_df["Planet Radius (R_Earth) err"] = tois_df["koi_prad_err1"].fillna(0.1 * tois_df["Planet Radius (R_Earth)"])
     if "Predicted Mass (M_Earth)" not in tois_df.columns:
-        tois_df["Predicted Mass (M_Earth)"] = [catalog_planet_mass(radius, radius_err) for radius, radius_err in
-                                               zip(tois_df["Planet Radius (R_Earth)"],
-                                                   tois_df["Planet Radius (R_Earth) err"])]
+        # Left empty: the catalog filter uses the mean relation (`mean_planet_mass`) and the targets
+        # searched the forecast (`catalog_planet_mass`), since forecasting thousands of rows takes
+        # several minutes (about 0.3 s a row).
+        tois_df["Predicted Mass (M_Earth)"] = np.nan
     if "Stellar Mass (M_Sun)" not in tois_df.columns:
         g = 10 ** tois_df["Stellar log(g) (cm/s^2)"] / 100
         r_m = tois_df["koi_srad"] * ac.R_sun.value
@@ -4553,8 +4677,9 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
     Returns
     -------
     dict
-        Keyword values named as the `ExoMoonLeastSquares` arguments. The moon radius
-        range is Rp/20 to Rp/2 for every catalog.
+        Keyword values named as the `ExoMoonLeastSquares` arguments, plus
+        "max_surviving_moon_radius". The moon radius range is Rp/20 to the smaller of Rp/2 and
+        the largest moon that survives tidal migration (`max_surviving_moon_mass`).
     """
     planet_radius = row['Planet Radius (R_Earth)']
     planet_period = row['Period (days)']
@@ -4563,13 +4688,14 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
     planet_mass = row['Predicted Mass (M_Earth)']
     if planet_mass is None or np.isnan(planet_mass):
         planet_mass = catalog_planet_mass(planet_radius, row.get('Planet Radius (R_Earth) err'))
-    # The eccentricity comes from the catalog when it has one (koi_eccen, koi_longp), else the
-    # orbit is circular; it sets the Domingos outer limit of the moon orbits.
-    planet_ecc = row.get('koi_eccen', np.nan) if catalog == "kois" else np.nan
-    planet_ecc = float(planet_ecc) if planet_ecc is not None and np.isfinite(planet_ecc) else 0.0
-    planet_arg_periastron = row.get('koi_longp', np.nan) if catalog == "kois" and planet_ecc > 0 else np.nan
-    planet_arg_periastron = float(planet_arg_periastron) \
-        if planet_arg_periastron is not None and np.isfinite(planet_arg_periastron) else 0.0
+    planet_ecc, planet_arg_periastron = catalog_planet_orbit(row, catalog)
+    # The largest moon is the smaller of half the planet radius and the largest moon that
+    # survives tidal migration (Barnes & O'Brien 2002, as in HEK VI); the catalog filter has
+    # already dropped targets where it is below the smallest moon searched.
+    min_radius = planet_radius * CATALOG_MIN_MOON_RADIUS_FRACTION
+    surviving_radius = moon_radius_from_mass(max_surviving_moon_mass(star_mass, planet_mass, planet_radius,
+                                                                     planet_period, planet_ecc))
+    max_radius = max(min_radius, min(planet_radius * CATALOG_MAX_MOON_RADIUS_FRACTION, surviving_radius))
     planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
     if catalog == "kois":
         planet_impact_param = float(row["planet_impact"])
@@ -4594,8 +4720,9 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
         'planet_mass': planet_mass,
         'planet_semimajor_axis': planet_semimajor_axis,
         'planet_impact_param': planet_impact_param,
-        'min_radius': planet_radius / 20,
-        'max_radius': planet_radius / 2,
+        'min_radius': min_radius,
+        'max_radius': max_radius,
+        'max_surviving_moon_radius': surviving_radius,
     }
 
 
@@ -4667,18 +4794,16 @@ if __name__ == '__main__':
         r_mhill = (a1 + a2) / 2 * (m_total / (3 * star_mass)) ** (1 / 3)
         return delta_a >= n_hill * r_mhill
 
-    def moon_tidal_stable(period, p_mass, p_radius, star_mass, t_age_gyr=5):
-        """Check if a moon can survive tidal migration over the system age.
+    def moon_tidal_stable(row, period, p_mass, p_radius, star_mass):
+        """Check if a moon at least as large as the smallest one searched survives tidal migration.
 
-        Heller et al. (2014, Astrobiology 14, 798) derived an approximate
-        threshold for moon survival against planet-moon tidal migration:
-            P_planet > P_crit × (M_p/M_⊕)^(1/6) × (age/1 Gyr)^(1/4)
-
-        with P_crit ≈ 10 days for rocky planets (Q_p ≈ 100, k2p ≈ 0.3).
-        Below this period, tides cause the moon to spiral into the planet
-        within the system's age (Barnes & O'Brien 2002, ApJ 575, 1087)."""
-        P_crit = 10.0 * (p_mass ** (1.0 / 6.0)) * (t_age_gyr ** (1.0 / 4.0))
-        return period > P_crit
+        Barnes & O'Brien (2002) Eq. 8 for the system age (`max_surviving_moon_mass`), with the
+        moon radius from the Chen & Kipping (2017) relation; HEK VI (Teachey et al. 2018) filters
+        the Kepler catalog the same way. It replaces a P > 10 d M^(1/6) age^(1/4) rule that
+        could not be traced to its cited source (Heller et al. 2014)."""
+        ecc, _ = catalog_planet_orbit(row, catalog)
+        surviving = moon_radius_from_mass(max_surviving_moon_mass(star_mass, p_mass, p_radius, period, ecc))
+        return surviving >= p_radius * CATALOG_MIN_MOON_RADIUS_FRACTION
 
     keep_mask = []
     n_hillroche, n_tidal, n_companion = 0, 0, 0
@@ -4691,7 +4816,8 @@ if __name__ == '__main__':
             keep_mask.append(False)
             continue
         if np.isnan(p_mass) or p_mass <= 0:
-            p_mass = catalog_planet_mass(p_radius)
+            # The mean relation, not the forecast: it is applied to thousands of rows.
+            p_mass = mean_planet_mass(p_radius)
         a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, period)
         p_mass_sun = p_mass * M_earth_to_M_sun
         moon_stable = hill_roche_stable(period, p_radius, p_mass, star_mass)
@@ -4699,7 +4825,7 @@ if __name__ == '__main__':
             n_hillroche += 1
             keep_mask.append(False)
             continue
-        if not moon_tidal_stable(period, p_mass, p_radius, star_mass):
+        if not moon_tidal_stable(r, period, p_mass, p_radius, star_mass):
             n_tidal += 1
             keep_mask.append(False)
             continue
@@ -4710,7 +4836,7 @@ if __name__ == '__main__':
                 continue
             sis_mass = sis['Predicted Mass (M_Earth)']
             if np.isnan(sis_mass) or sis_mass <= 0:
-                sis_mass = catalog_planet_mass(sis['Planet Radius (R_Earth)'])
+                sis_mass = mean_planet_mass(sis['Planet Radius (R_Earth)'])
             sis_a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, sis['Period (days)'])
             if not planet_planet_stable(a, p_mass, sis_a, sis_mass, star_mass):
                 companion_ok = False
@@ -4719,8 +4845,9 @@ if __name__ == '__main__':
             n_companion += 1
         keep_mask.append(companion_ok)
     confirmed_tois_df = confirmed_tois_df[keep_mask]
-    logging.info("Dynamical filter: Hill-Roche=%d, Tidal=%d, Companion=%d removed, %d remain",
-                 n_hillroche, n_tidal, n_companion, len(confirmed_tois_df))
+    logging.info("Dynamical filter: Hill-Roche=%d, Tidal (Barnes & O'Brien 2002, %.0f Gyr)=%d, Companion=%d removed, "
+                 "%d remain",
+                 n_hillroche, TIDAL_SURVIVAL_AGE_GYR, n_tidal, n_companion, len(confirmed_tois_df))
     #confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Object Id'] == 'TIC 309792357']
     confirmed_tois_df = confirmed_tois_df.iloc[0:100]
     for index, row in confirmed_tois_df.iterrows():
@@ -4776,6 +4903,9 @@ if __name__ == '__main__':
             planet_impact_param = planet['planet_impact_param']
             min_radius = planet['min_radius']
             max_radius = planet['max_radius']
+            logging.info("Moon radius range %.2f-%.2f R_earth: the largest moon that survives tidal migration for "
+                         "%.0f Gyr is %.2f R_earth (Barnes & O'Brien 2002)", min_radius, max_radius,
+                         TIDAL_SURVIVAL_AGE_GYR, planet['max_surviving_moon_radius'])
             # planet_radius = 11.8142656578
             # planet_radius_err = 1.00
             # planet_period = 141.834025

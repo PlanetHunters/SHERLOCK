@@ -94,6 +94,20 @@
   the orbit is circular, instead of e = 0.15 and w = 0 for every target, which lowered
   the outer moon limit from 0.49 to 0.41 Hill radii (F8). The TOI b = 0 start (B5) needs
   no change: the planet fold fit frees b.
+- EMLS catalog driver: the tidal survival filter is Barnes & O'Brien (2002) Eq. 8, applied
+  per target as in HEK VI (Teachey, Kipping & Schmitt 2018) and Fox et al. (2022): the
+  largest moon that survives tidal migration for 5 Gyr, with the EMLS outer moon limit as
+  a_crit and log10(k2/Q) = -2.90 - 0.187 Rp/R_earth (kept at Jupiter's value above
+  11.2 R_earth), converted to a radius with the Chen & Kipping (2017) relation. A target is
+  dropped when that radius is below the smallest moon searched (Rp/20), and the largest
+  moon searched is capped at it. The previous rule, P > 10 d M^(1/6) age^(1/4), is not in
+  the paper it cited (Heller et al. 2014) and grew stricter with planet mass, the opposite
+  of tidal theory (audit item F6). With the Hill-Roche and companion cuts, the 2882 KOIs
+  with SNR > 15 go to 730 targets (1046 before), and almost none below 10 d survive, as
+  Dobos et al. (2021) find. The filter takes planet masses from the Chen & Kipping mean
+  relation (`mean_planet_mass`, within about 10 % of the forecast median); only the
+  targets searched get the forecast, which costs about 0.3 s a planet, so the selection
+  takes seconds instead of about 12 minutes.
 - EMLS in-transit coverage check counts the points within T14 of the fitted
   mid-time. It counted the points where the planet model dims, which with the
   exposure modelled reaches half an exposure beyond T14, so on Kepler long cadence

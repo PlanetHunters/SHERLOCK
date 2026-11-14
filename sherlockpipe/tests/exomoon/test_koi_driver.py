@@ -55,7 +55,10 @@ def test_koi_row_gets_the_moon_radius_range():
     params = exomoon.catalog_planet_params(koi_row(), 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)
 
     assert params['min_radius'] == pytest.approx(PLANET_RADIUS / 20)
-    assert params['max_radius'] == pytest.approx(PLANET_RADIUS / 2)
+    assert params['max_radius'] == pytest.approx(max(PLANET_RADIUS / 20, min(PLANET_RADIUS / 2,
+                                                                          params['max_surviving_moon_radius'])))
+    wide = exomoon.catalog_planet_params(koi_row(**{'Period (days)': 400.0}), 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)
+    assert wide['max_radius'] == pytest.approx(PLANET_RADIUS / 2)
 
 
 def test_koi_row_uses_its_impact_parameter():
@@ -74,7 +77,8 @@ def test_toi_row_keeps_its_previous_setup():
 
     a = exomoon.ExoMoonLeastSquares.compute_semimajor_axis(0.9, 10.0)
     assert params['min_radius'] == pytest.approx(0.15)
-    assert params['max_radius'] == pytest.approx(1.5)
+    # A 10 d sub-Neptune keeps no moon above the smallest one searched (Barnes & O'Brien 2002).
+    assert params['max_radius'] == pytest.approx(0.15)
     assert params['planet_inc'] == 90 and params['planet_inc_err'] == 3
     assert params['planet_impact_param'] == pytest.approx(a * exomoon.AU_TO_RSUN / 0.8 * np.cos(np.pi / 2), abs=1e-12)
     assert params['planet_mass'] == pytest.approx(exomoon.catalog_planet_mass(3.0, 0.3))
@@ -99,7 +103,8 @@ def test_koi_table_mass_comes_from_the_forecast():
     row = koi_row(**{'Planet Radius (R_Earth)': 11.2})
 
     from sherlockpipe.exomoon_run import JUPITER_MASS
-    assert row['Predicted Mass (M_Earth)'] == pytest.approx(JUPITER_MASS)
+    # The table leaves the mass empty; the driver forecasts it only for the rows it keeps.
+    assert np.isnan(row['Predicted Mass (M_Earth)'])
     assert exomoon.catalog_planet_params(row, 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)['planet_mass'] == \
         pytest.approx(JUPITER_MASS)
 
@@ -154,3 +159,62 @@ def test_koi_driver_reaches_the_search(tmp_path, monkeypatch):
     assert CapturePool.inputs
     assert {item.min_radius for item in CapturePool.inputs} == {PLANET_RADIUS / 20}
 
+
+
+def test_max_surviving_moon_mass_is_barnes_and_obrien_eq_8(monkeypatch):
+    """Independent check against the audit's integration of da/dt (f = 0.36, k2 = 0.51, Q = 1e5)."""
+    monkeypatch.setattr(exomoon, 'planet_k2_over_q', lambda radius: 0.51 / 1e5)
+    monkeypatch.setattr(ExoMoonLeastSquares, 'max_moon_semimajor_axis', staticmethod(
+        lambda star_mass, planet_mass, a, ecc=0.0: 0.36 * ExoMoonLeastSquares.compute_hill_radius(star_mass,
+                                                                                                    planet_mass, a)))
+    assert exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 30) == pytest.approx(0.091, rel=0.05)
+    assert exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 60) == pytest.approx(1.84, rel=0.05)
+
+
+def test_moons_survive_around_wide_giants_not_around_close_small_planets():
+    def surviving(mass, radius, period):
+        return exomoon.moon_radius_from_mass(exomoon.max_surviving_moon_mass(1.0, mass, radius, period))
+
+    # A hot Jupiter keeps no moon; a 200 d Jupiter keeps a large one.
+    assert surviving(318, 11.2, 3) < 11.2 / 20
+    assert surviving(318, 11.2, 200) > 11.2 / 2
+    # The bound grows with the planet mass and the period (unlike the old P > 10 d M^(1/6) rule).
+    assert exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 50) > exomoon.max_surviving_moon_mass(1.0, 30, 11.2, 50)
+    assert exomoon.max_surviving_moon_mass(1.0, 17, 3.9, 100) > exomoon.max_surviving_moon_mass(1.0, 17, 3.9, 20)
+    # An eccentric orbit narrows the stable region, so the bound drops.
+    assert exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 50, 0.3) < exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 50)
+    assert np.isnan(exomoon.max_surviving_moon_mass(1.0, np.nan, 11.2, 50))
+
+
+def test_k2_over_q_follows_hek_vi_and_stops_at_jupiter():
+    assert exomoon.planet_k2_over_q(1.0) == pytest.approx(10 ** (-2.90 - 0.187))
+    assert exomoon.planet_k2_over_q(20.0) == exomoon.planet_k2_over_q(11.2)
+
+
+def test_moon_radius_from_mass_is_the_chen_kipping_mean_relation():
+    assert exomoon.moon_radius_from_mass(1.0) == pytest.approx(1.008)
+    below, above = exomoon.moon_radius_from_mass(2.04 * 0.999), exomoon.moon_radius_from_mass(2.04 * 1.001)
+    assert above == pytest.approx(below, rel=0.002)
+    assert exomoon.moon_radius_from_mass(17.0) == pytest.approx(1.008 * 2.04 ** 0.279 * (17 / 2.04) ** 0.589)
+    assert exomoon.moon_radius_from_mass(0.0) == 0.0
+
+
+def test_catalog_radius_range_stops_at_the_largest_surviving_moon():
+    close = exomoon.catalog_planet_params(koi_row(**{'Period (days)': 25.0, 'Planet Radius (R_Earth)': 11.2}), 'kois',
+                                          1.0, 1.0, 0.0, KEPLER_OFFSET)
+    wide = exomoon.catalog_planet_params(koi_row(**{'Period (days)': 300.0, 'Planet Radius (R_Earth)': 11.2}),
+                                         'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)
+
+    assert close['min_radius'] == pytest.approx(11.2 / 20)
+    assert close['min_radius'] <= close['max_radius'] < 11.2 / 2
+    assert close['max_radius'] == pytest.approx(max(close['min_radius'], close['max_surviving_moon_radius']))
+    assert wide['max_radius'] == pytest.approx(11.2 / 2)
+
+
+def test_mean_planet_mass_is_close_to_the_forecast_median():
+    for radius in (1.0, 2.0, 4.0, 6.0):
+        assert exomoon.mean_planet_mass(radius) == pytest.approx(exomoon.catalog_planet_mass(radius), rel=0.15)
+    from sherlockpipe.exomoon_run import JUPITER_MASS
+    assert exomoon.mean_planet_mass(11.2) == JUPITER_MASS
+    assert exomoon.moon_radius_from_mass(exomoon.mean_planet_mass(3.0)) == pytest.approx(3.0)
+    assert np.isnan(exomoon.mean_planet_mass(np.nan))
