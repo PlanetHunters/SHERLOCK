@@ -4,6 +4,13 @@
 
 ### Changed
 
+- EMLS catalog driver (`python -m sherlockpipe.exomoon`) now runs the set-up the validation used and the
+  paper describes: no wotan pre-flattening (5 T14), EMLS detrends the raw curve itself with a 3 T14
+  biweight and the 'auto' mask (`detrend_window`, `detrend_mask`), runs 100 pseudo-epoch nulls
+  (`null_runs`) for the false-alarm probability, and models the exposure ('auto'). Before, the driver
+  searched a pre-flattened curve, whose trend could absorb part of a moon, and gave no FAP. The
+  settings are module constants (`DETREND_DURATIONS`, `NULL_RUNS`, `DRIVER_CPUS`), and
+  `test_koi_driver_reaches_the_search` checks them.
 - `sherlockpipe/exomoon.py` (5 659 lines) is now the package `sherlockpipe/exomoon/`, one module per
   stage: `constants`, `exposure` (per-point exposures, averaged models, weights), `orbits` (moon
   dynamics, limits, hypotheses), `planet` (fold fit, per-epoch times, subtraction, derivatives),

@@ -130,6 +130,14 @@ def test_koi_parameters_reach_the_search(tmp_path):
     assert {item.min_radius for item in inputs} == {params['min_radius']}
 
 
+class CaptureSearchPool(CapturePool):
+    """CapturePool that also keeps the search object the driver built (the pool initializer's argument)."""
+    emls = None
+
+    def __init__(self, *args, initargs=(), **kwargs):
+        CaptureSearchPool.emls = initargs[0] if initargs else None
+
+
 def test_koi_driver_reaches_the_search(tmp_path, monkeypatch):
     """Run the module as the KOI driver on one synthetic target and stop at the search."""
     home = tmp_path / 'home'
@@ -146,18 +154,24 @@ def test_koi_driver_reaches_the_search(tmp_path, monkeypatch):
     builder = mock.MagicMock()
     builder.return_value.build.return_value = build
     CapturePool.inputs = None
+    CaptureSearchPool.emls = None
     caught = []
     # The driver replaces the root log handlers, so record what it reports through logging.exception.
     record = lambda *args, **kwargs: caught.append(sys.exc_info()[1])
 
     with mock.patch('lcbuilder.lcbuilder_class.LcBuilder', builder), \
-            mock.patch('sherlockpipe.exomoon.search.Pool', CapturePool), \
+            mock.patch('sherlockpipe.exomoon.search.Pool', CaptureSearchPool), \
             mock.patch('logging.exception', side_effect=record):
         runpy.run_module('sherlockpipe.exomoon', run_name='__main__')
 
     assert len(caught) == 1 and isinstance(caught[0], StopAtSearch), repr(caught)
     assert CapturePool.inputs
     assert {item.min_radius for item in CapturePool.inputs} == {PLANET_RADIUS / 20}
+    # The validated set-up: EMLS detrends the raw curve (3 T14 biweight, 'auto' mask) and runs 100 nulls.
+    emls = CaptureSearchPool.emls
+    assert emls.detrend_window == pytest.approx(3 * duration)
+    assert emls.detrend_mask == 'auto'
+    assert emls.null_runs == 100
 
 
 

@@ -7,12 +7,19 @@ import os
 import sys
 from lcbuilder.helper import LcbuilderHelper
 import numpy as np
-import wotan
 from lcbuilder.lcbuilder_class import LcBuilder
 import pandas as pd
 from sherlockpipe.exomoon.catalog import CATALOG_MIN_MOON_RADIUS_FRACTION, TIDAL_SURVIVAL_AGE_GYR, catalog_csv_path, catalog_planet_orbit, catalog_planet_params, combine_cadence_curves, emls_output_dir, max_surviving_moon_mass, mean_planet_mass, moon_radius_from_mass, prepare_koi_table
 from sherlockpipe.exomoon.constants import AU_TO_RSUN, M_earth_to_M_sun, R_earth_to_R_sun
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
+
+# The search set-up the validation runs used (controls, synthetic planets, injections): EMLS detrends
+# the undetrended curve itself, with a biweight of DETREND_DURATIONS transit durations and the 'auto'
+# mask, so the planet and a moon stay out of the trend, and NULL_RUNS pseudo-epoch searches give the
+# false-alarm probability. A pre-flattened curve would let the trend take part of a moon.
+DETREND_DURATIONS = 3
+NULL_RUNS = 100
+DRIVER_CPUS = 4
 
 
 if __name__ == '__main__':
@@ -224,14 +231,15 @@ if __name__ == '__main__':
             # min_radius = 1
             # max_radius = 3
             flux_err = np.ma.filled(flux_err, np.ma.median(flux_err))
-            flux = wotan.flatten(times, flux, method="biweight", window_length=planet_duration * 5)
             t0s = [i for i in np.arange(planet_t0, np.max(times), planet_period)]
-            emls = ExoMoonLeastSquares(object_dir, 4, star_mass, star_radius, ld_coeffs,
+            emls = ExoMoonLeastSquares(object_dir, DRIVER_CPUS, star_mass, star_radius, ld_coeffs,
                                        planet_radius, planet_radius_err, planet_mass, planet_period, planet_t0, planet_duration,
                                        planet_semimajor_axis, planet_inc, planet_inc_err, planet_ecc, planet_ecc_err, planet_arg_periastron, planet_impact_param,
                                        min_radius, max_radius, t0s, times, flux, flux_err, max_moon_density,
                                        period_grid_size=10000, radius_grid_size=20, subtract_mode='subtract', fit_rp_per_transit=False,
-                                       min_transit_completeness=0.75, max_subtraction_rms_ratio=1.5)
+                                       min_transit_completeness=0.75, max_subtraction_rms_ratio=1.5,
+                                       null_runs=NULL_RUNS, detrend_window=DETREND_DURATIONS * planet_duration,
+                                       detrend_mask='auto', exposure_time='auto')
             # emls.flux = emls.inject_moon(emls.time, emls.flux, emls.flux_err, emls.bary_t0s, planet_semimajor_axis,
             #                             planet_ecc, moon_radius, moon_period, moon_mass, plot=True, initial_alpha=moon_alpha,
             #                              inject_planet=False, inject_moon=False)
