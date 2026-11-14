@@ -261,3 +261,42 @@ def test_sparse_planet_fit_is_the_dense_weighted_least_squares(epoch_depth):
     np.testing.assert_allclose(fit["model"], design[:, 2:] @ coefficients[2:], rtol=1e-8, atol=1e-12)
     inflation = np.sqrt(np.linalg.inv(normal)[1, 1] / (1 / weights[inside].sum() + 1 / weights[~inside].sum()))
     assert fit["inflation"] == pytest.approx(inflation, rel=1e-9)
+
+
+def test_upper_clip_is_astropy_sigma_clip():
+    from astropy.stats import sigma_clip
+    rng = np.random.default_rng(31)
+    for _ in range(200):
+        values = rng.standard_t(3, size=rng.integers(10, 3000))
+        expected = sigma_clip(values, sigma=5.0, sigma_lower=float('inf'), sigma_upper=3).mask
+        np.testing.assert_array_equal(ExoMoonLeastSquares.upper_clip(values), expected)
+
+
+def test_grid_search_on_the_fixed_stack_is_the_generic_split(tmp_path):
+    """search() takes the fixed-stack path; the same hypothesis through the generic split gives the same stack."""
+    t0s = np.arange(6) * PERIOD
+    cadence = [1 if i % 2 else 30 for i in range(len(t0s))]
+    time = np.concatenate([t0 + np.arange(-1.5, 1.5, c * MINUTE) for t0, c in zip(t0s, cadence)])
+    exposures = np.concatenate([np.full(len(np.arange(-1.5, 1.5, c * MINUTE)), c * MINUTE) for c in cadence])
+    sigma = np.where(exposures < 2 * MINUTE, 5.5e-4, 1e-4)
+    params = planet_params(radius=10.0)
+    flux = np.empty(len(time))
+    for value in (MINUTE, 30 * MINUTE):
+        index = exposures == value
+        flux[index] = integrated(params, time[index], value)
+    flux += np.random.default_rng(12).standard_t(4, len(time)) * sigma
+    duration = PERIOD / np.pi * np.arcsin((1 + params.rp) / params.a)
+    emls = system(tmp_path, curve=(t0s, time, flux, sigma, duration), exposure_time='auto', min_cadences_per_t0=5)
+    inputs = run_to_search(emls)
+    column = emls.search_planet_depth_column()
+
+    for search_input in inputs[::max(1, len(inputs) // 60)]:
+        stacked = emls.split_scenarios(search_input, emls.time, emls.flux, emls.flux_err, emls.bary_t0s, extra=column)
+        generic = emls.split_scenarios(search_input, emls.time.copy(), emls.flux, emls.flux_err,
+                                       list(emls.bary_t0s), extra=column)
+        assert emls._search_stack_cache[1] is not None
+        for index in (0, 1, 4):
+            np.testing.assert_array_equal(stacked[index], generic[index])
+        for index in (2, 3, 5, 6):
+            np.testing.assert_allclose(stacked[index], generic[index], rtol=0, atol=1e-11)
+        assert stacked[8] == pytest.approx(generic[8], rel=1e-9)

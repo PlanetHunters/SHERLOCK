@@ -4,6 +4,18 @@
 
 ### Added
 
+- EMLS grid search: every hypothesis stacks the same points (the widest moon-orbit window
+  around each epoch), so `search_stack` builds them once with their weights, planet columns
+  and the planet normal equations without the moon window, and `split_stacked` only adds the
+  window terms (`_window_cross_terms`) and removes the clipped points per hypothesis; the
+  upper clipping is astropy's sigma_clip algorithm without its overhead (`upper_clip`, same
+  mask on 700 heavy-tailed test samples). The pool workers get the EMLS object once through an
+  initializer instead of a copy with every chunk of 100 hypotheses (20.6 MB on the KOI-125.01
+  mixed curve, mostly the per-point exposure table and the injection flux). On that curve a
+  hypothesis takes 4 ms against 54 ms at 6ec025b (same stacked points and order, fluxes within
+  1e-13, SNR within 3e-7 relative over 400 hypotheses), and a full 250 000-hypothesis search
+  with 6 CPUs on a loaded machine went from 4:47 to 3:12 with the initializer alone; a null's
+  own setup (detrending, planet subtraction) takes 2.4 s.
 - EMLS search is about 5 times faster with the same results. The joint planet fit
   (`planet_fit`) sums its normal equations over each point's non-zero columns in numba
   (`_planet_normal_equations`, `_planet_model`) instead of building the dense design of

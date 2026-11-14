@@ -116,6 +116,32 @@ def _planet_normal_equations(epoch, inside, depth_column, t0_column, shapes, sha
 
 
 @njit(cache=True)
+def _window_cross_terms(selection, epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup,
+                        depth_shared, t0_lookup, weights, flux, n_columns):
+    """Return the moon-window row and column (index 1) of D^T W D and D^T W f for the selected points.
+
+    Added to the normal equations of the same points without the window, they give the
+    equations with these points inside it.
+    """
+    normal = np.zeros((n_columns, n_columns))
+    right = np.zeros(n_columns)
+    columns = np.empty(4 + shape_columns.shape[0], dtype=np.int64)
+    values = np.empty(4 + shape_columns.shape[0])
+    for position in range(selection.shape[0]):
+        point = selection[position]
+        count = _point_terms(point, epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup,
+                             depth_shared, t0_lookup, columns, values)
+        weight = weights[point]
+        normal[1, 1] += weight
+        right[1] += weight * flux[point]
+        for term in range(count):
+            if columns[term] != 1:
+                normal[1, columns[term]] += weight * values[term]
+                normal[columns[term], 1] += weight * values[term]
+    return normal, right
+
+
+@njit(cache=True)
 def _planet_model(epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup, depth_shared,
                   t0_lookup, coefficients):
     """Return the planet terms of the `planet_fit` design times their coefficients (columns 2 and up)."""
@@ -128,6 +154,20 @@ def _planet_model(epoch, inside, depth_column, t0_column, shapes, shape_columns,
         for term in range(2, count):
             model[point] += values[term] * coefficients[columns[term]]
     return model
+
+
+_WORKER_SEARCH = None
+
+
+def _set_worker_search(emls):
+    """Pool initializer: keep the searching EMLS object in the worker process."""
+    global _WORKER_SEARCH
+    _WORKER_SEARCH = emls
+
+
+def _worker_search(search_input):
+    """Score one hypothesis with the worker's EMLS object (see `ExoMoonLeastSquares.grid_search`)."""
+    return _WORKER_SEARCH.search(search_input)
 
 
 class ExposureAveragedModel:
@@ -2436,6 +2476,12 @@ class ExoMoonLeastSquares:
             the planet depth correction, the uncertainty inflation of the moon depth and the whole
             planet fit (see `planet_fit`) follow.
         """
+        if extra is not None and time is self.time and flux is self.flux and flux_err is self.flux_err \
+                and bary_t0s is self.bary_t0s:
+            # The grid search: every hypothesis stacks the same points (see `search_stack`).
+            stack = self.search_stack(search_input, extra)
+            if stack is not None:
+                return self.split_stacked(stack, search_input)
         # Alpha is the moon phase at self.planet_t0, the same reference inject_moon uses, so it
         # does not move when the first epoch is skipped or rejected.
         transit_scenarios = ExoMoonLeastSquares.compute_moon_transit_scenarios(time, flux, flux_err,
@@ -2497,6 +2543,151 @@ class ExoMoonLeastSquares:
             return (scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err,
                     planet_fit["depth"], planet_fit["inflation"], planet_fit)
         return scenario_time, it_time, it_flux, it_flux_err, oot_time, oot_flux, oot_flux_err
+
+    @staticmethod
+    def upper_clip(values, sigma_upper=3.0, max_iterations=5):
+        """Return the mask of `remove_outliers` with sigma_lower=inf: astropy's sigma_clip, without its overhead.
+
+        Median and standard deviation of the kept values, points above median + sigma_upper std
+        removed, repeated until none is removed or max_iterations; the mask uses the last bounds.
+        """
+        values = np.asarray(values, dtype=float)
+        finite = np.isfinite(values)
+        kept = values[finite]
+        upper = np.inf
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            lower = -np.inf
+            for _ in range(max_iterations):
+                size = kept.size
+                # The kept values are finite, so the plain median and std equal astropy's nan-aware ones.
+                centre, spread = np.median(kept), np.std(kept)
+                lower, upper = centre - spread * np.inf, centre + spread * sigma_upper
+                kept = kept[(kept >= lower) & (kept <= upper)]
+                if size == kept.size:
+                    break
+            return ~finite | (values < lower) | (values > upper)
+
+    def search_stack(self, search_input, extra):
+        """Return the points every grid hypothesis stacks, with their fixed planet normal equations, or None.
+
+        The data window of each epoch is the widest moon orbit searched, the same for every
+        hypothesis, so the stacked points, their weights and the planet columns are fixed: only
+        their times relative to the moon and the moon window move. The normal equations of the
+        planet terms without the window are summed once here, and `split_stacked` adds the
+        window and removes the clipped points per hypothesis. None when the errors are not usable.
+        """
+        half_window = search_input.half_moon_max_orbit_transit_duration
+        key = (id(self.time), len(self.time), id(self.flux), id(self.flux_err), id(extra), tuple(self.bary_t0s),
+               float(half_window), bool(self.fit_planet_epoch_depth))
+        cached = getattr(self, "_search_stack_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        time = np.asarray(self.time, dtype=float)
+        time_sorted = len(time) < 2 or bool(np.all(time[1:] >= time[:-1]))
+        indices, slots, epochs = [], [], []
+        for t0 in self.bary_t0s:
+            if time_sorted:
+                window = np.arange(np.searchsorted(time, t0 - half_window, side='left'),
+                                   np.searchsorted(time, t0 + half_window, side='right'))
+                window = window[np.abs(time[window] - t0) <= half_window]
+            else:
+                window = np.argwhere(np.abs(time - t0) <= half_window).flatten()
+            if len(window) > 0:
+                indices.append(window)
+                slots.append(np.full(len(window), len(epochs), dtype=np.int64))
+                epochs.append(t0)
+        stack = None
+        if indices:
+            index = np.concatenate(indices)
+            flux_err = np.asarray(self.flux_err, dtype=float)[index]
+            if ExoMoonLeastSquares.usable_errors(flux_err, len(index)):
+                columns = np.asarray(extra)[index]
+                names, n_columns, terms = ExoMoonLeastSquares.planet_design(columns, self.fit_planet_epoch_depth)
+                weights = 1 / flux_err ** 2
+                flux = np.ascontiguousarray(np.asarray(self.flux, dtype=float)[index])
+                outside = np.zeros(len(index), dtype=np.bool_)
+                normal, right = _planet_normal_equations(terms[0], outside, *terms[1:], weights, flux, n_columns) \
+                    if n_columns > 2 else (None, None)
+                stack = {"time": time[index], "flux": flux, "flux_err": flux_err, "weights": weights,
+                         "root_weights": np.sqrt(weights), "slot": np.concatenate(slots), "epochs": np.asarray(epochs),
+                         "names": names, "n_columns": n_columns, "terms": terms, "normal": normal, "right": right,
+                         "total_weight": float(np.sum(weights))}
+        self._search_stack_cache = (key, stack)
+        return stack
+
+    def stacked_planet_fit(self, stack, inside, normal, right, selection=None):
+        """Solve the planet fit of the stacked points (all, or the selected ones) given their normal equations."""
+        weights = stack["weights"] if selection is None else stack["weights"][selection]
+        inside_points = inside if selection is None else inside[selection]
+        n_points, n_inside = len(weights), int(np.count_nonzero(inside_points))
+        unchanged = {"model": np.zeros(n_points), "depth": 0.0, "t0_shifts": {}, "epoch_depths": {}, "shape": {},
+                     "inflation": 1.0}
+        if n_inside == 0 or n_points - n_inside < 2 or stack["n_columns"] == 2:
+            return unchanged
+        inside_weight = float(np.sum(weights[inside_points]))
+        n_columns = stack["n_columns"]
+        solved = ExoMoonLeastSquares.solve_planet_normal(normal, right, list(stack["names"]), n_columns,
+                                                         inside_weight, float(np.sum(weights)) - inside_weight)
+        if solved is None:
+            return unchanged
+        fit, coefficients = solved
+        model = _planet_model(stack["terms"][0], inside, *stack["terms"][1:], coefficients)
+        fit["model"] = model if selection is None else model[selection]
+        return fit
+
+    def split_stacked(self, stack, search_input):
+        """`split_scenarios` of one grid hypothesis on the fixed stack of `search_stack`.
+
+        The same steps on the same points: moon-relative times, planet fit with the moon window,
+        upper clipping in units of each point's error, planet fit again on the kept points,
+        sorted by time; the normal equations are updated (window added, clipped points removed)
+        instead of summed again.
+        """
+        tau = ExoMoonLeastSquares.compute_moon_ts(0.0, search_input.half_moon_orbit_transit_duration,
+                                                  search_input.half_moon_transit_duration)
+        epochs = stack["epochs"]
+        period = search_input.moon_period
+        phase = search_input.moon_alpha + (((epochs - self.planet_t0) % period) / period) * 2 * np.pi
+        moon_t0 = epochs + np.cos(phase) * tau
+        half = search_input.half_moon_transit_duration
+        centre = (moon_t0 - half) + half
+        scenario_time = stack["time"] - centre[stack["slot"]]
+        inside = np.abs(scenario_time) <= half
+        terms, n_columns = stack["terms"], stack["n_columns"]
+        flux, weights = stack["flux"], stack["weights"]
+        if n_columns > 2:
+            cross_normal, cross_right = _window_cross_terms(np.flatnonzero(inside), terms[0], inside, *terms[1:],
+                                                            weights, flux, n_columns)
+            normal, right = stack["normal"] + cross_normal, stack["right"] + cross_right
+        else:
+            normal = right = None
+        first = self.stacked_planet_fit(stack, inside, normal, right)
+        corrected = flux - first["model"]
+        clipped = ExoMoonLeastSquares.upper_clip((corrected - 1) * stack["root_weights"])
+        if np.any(clipped):
+            removed = np.flatnonzero(clipped)
+            kept = np.flatnonzero(~clipped)
+            if n_columns > 2:
+                removed_normal, removed_right = _planet_normal_equations(
+                    terms[0][removed], inside[removed], terms[1][removed], terms[2][removed], terms[3][removed],
+                    *terms[4:], weights[removed], flux[removed], n_columns)
+                normal, right = normal - removed_normal, right - removed_right
+            fit = self.stacked_planet_fit(stack, inside, normal, right, selection=kept)
+        else:
+            kept = np.arange(len(flux))
+            fit = first
+        order = np.argsort(scenario_time[kept])
+        kept = kept[order]
+        fit["model"] = fit["model"][order]
+        scenario_time = scenario_time[kept]
+        scenario_flux = flux[kept] - fit["model"]
+        scenario_flux_err = stack["flux_err"][kept]
+        it_args = np.abs(scenario_time) <= half
+        oot_args = ~it_args
+        return (scenario_time, scenario_time[it_args], scenario_flux[it_args], scenario_flux_err[it_args],
+                scenario_time[oot_args], scenario_flux[oot_args], scenario_flux_err[oot_args],
+                fit["depth"], fit["inflation"], fit)
 
     def window_depth(self, search_input, time, flux, flux_err, bary_t0s):
         """Return the mean depth of the moon window against its surroundings, as `search` measures it."""
@@ -2620,13 +2811,38 @@ class ExoMoonLeastSquares:
                      "inflation": 1.0}
         if n_inside == 0 or n_points - n_inside < 2:
             return unchanged
+        names, n_columns, terms = ExoMoonLeastSquares.planet_design(planet_columns, epoch_depth)
+        if n_columns == 2:
+            return unchanged
+        weights = ExoMoonLeastSquares.point_weights(flux_err, n_points)
+        inside = np.ascontiguousarray(inside, dtype=np.bool_)
+        normal, right = _planet_normal_equations(terms[0], inside, *terms[1:], np.ascontiguousarray(weights),
+                                                 flux, n_columns)
+        solved = ExoMoonLeastSquares.solve_planet_normal(normal, right, names, n_columns,
+                                                         float(np.sum(weights[inside])),
+                                                         float(np.sum(weights[~inside])))
+        if solved is None:
+            return unchanged
+        fit, planet_coefficients = solved
+        fit["model"] = _planet_model(terms[0], inside, *terms[1:], planet_coefficients)
+        return fit
+
+    @staticmethod
+    def planet_design(planet_columns, epoch_depth=False):
+        """Return (names, n_columns, terms) of the `planet_fit` design for these planet columns.
+
+        The design has a constant, the moon window and the planet terms. Each per-epoch term is
+        zero outside its epoch, so each point has at most 4 + len(PLANET_SHAPE_TERMS) non-zero
+        columns, and the normal equations are summed over those (`_planet_normal_equations`):
+        the same sums as the dense product at a fraction of its cost. terms holds, in the order
+        the numba kernels take them around the moon window: the epoch index, then (depth column,
+        t0 column, shape columns, shape column indices, per-epoch depth column indices, shared
+        depth column index, per-epoch t0 column indices).
+        """
+        n_points = len(planet_columns)
         depth_column, t0_column, epoch = planet_columns[:, 0], planet_columns[:, 1], planet_columns[:, 2].astype(int)
-        # The design has a constant, the moon window and the planet terms. Each per-epoch term is
-        # zero outside its epoch, so each point has at most 4 + len(PLANET_SHAPE_TERMS) non-zero
-        # columns, and the normal equations are summed over those (`_planet_normal_equations`):
-        # the same sums as the dense product at a fraction of its cost.
         names, n_columns = [], 2
-        lookup_size = int(max(np.max(epoch), 0)) + 1
+        lookup_size = int(max(np.max(epoch), 0)) + 1 if n_points else 1
         depth_lookup = np.full(lookup_size, -1, dtype=np.int64)
         depth_shared = -1
         depth_epochs = np.unique(epoch[(epoch >= 0) & (depth_column != 0)]) if epoch_depth else []
@@ -2653,17 +2869,22 @@ class ExoMoonLeastSquares:
             t0_lookup[index] = n_columns
             n_columns += 1
             names.append(int(index))
-        if n_columns == 2:
-            return unchanged
-        weights = ExoMoonLeastSquares.point_weights(flux_err, n_points)
-        terms = (np.ascontiguousarray(epoch, dtype=np.int64), np.ascontiguousarray(inside, dtype=np.bool_),
-                 np.ascontiguousarray(depth_column, dtype=float), np.ascontiguousarray(t0_column, dtype=float),
-                 shapes, shape_columns, depth_lookup, depth_shared, t0_lookup)
-        normal, right = _planet_normal_equations(*terms, np.ascontiguousarray(weights, dtype=float), flux, n_columns)
+        terms = (np.ascontiguousarray(epoch, dtype=np.int64), np.ascontiguousarray(depth_column, dtype=float),
+                 np.ascontiguousarray(t0_column, dtype=float), shapes, shape_columns, depth_lookup, depth_shared,
+                 t0_lookup)
+        return names, n_columns, terms
+
+    @staticmethod
+    def solve_planet_normal(normal, right, names, n_columns, inside_weight, outside_weight):
+        """Solve the `planet_fit` normal equations; return (fit without "model", coefficients) or None.
+
+        A term the stacked points cannot tell from the others (an epoch with only a few points,
+        for example) is dropped rather than fitted; None when only the constant and the moon
+        window are left. coefficients holds the planet term of every design column (zero for
+        the constant, the window and the dropped terms).
+        """
         keep = list(range(n_columns))
         if np.linalg.matrix_rank(normal) < n_columns:
-            # A term the stacked points cannot tell from the others (an epoch with only a few
-            # points, for example) is dropped rather than fitted.
             keep = [0, 1]
             for column_index in range(2, n_columns):
                 trial = keep + [column_index]
@@ -2671,21 +2892,19 @@ class ExoMoonLeastSquares:
                     keep.append(column_index)
             names = [names[i - 2] for i in keep[2:]]
             if len(keep) == 2:
-                return unchanged
+                return None
             normal, right = normal[np.ix_(keep, keep)], right[keep]
         normal_inverse = np.linalg.inv(normal)
         coefficients = normal_inverse @ right
         planet_coefficients = np.zeros(n_columns)
         planet_coefficients[np.asarray(keep[2:], dtype=np.int64)] = coefficients[2:]
-        model = _planet_model(*terms, planet_coefficients)
         fitted = dict(zip(names, coefficients[2:]))
-        inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / np.sum(weights[inside]) + 1 / np.sum(weights[~inside]))))
+        inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / inside_weight + 1 / outside_weight)))
         shape = {name: float(fitted.pop(name)) for name in ExoMoonLeastSquares.PLANET_SHAPE_TERMS if name in fitted}
         epoch_depths = {name[1]: float(fitted.pop(name)) for name in list(fitted) if isinstance(name, tuple)}
         depth = float(np.mean(list(epoch_depths.values()))) if epoch_depths else float(fitted.pop("depth", 0.0))
-        return {"model": model, "depth": depth,
-                "t0_shifts": {name: float(value) for name, value in fitted.items()}, "epoch_depths": epoch_depths,
-                "shape": shape, "inflation": inflation}
+        return ({"depth": depth, "t0_shifts": {name: float(value) for name, value in fitted.items()},
+                 "epoch_depths": epoch_depths, "shape": shape, "inflation": inflation}, planet_coefficients)
 
     @staticmethod
     def planet_correction(fit, columns):
@@ -4488,9 +4707,12 @@ class ExoMoonLeastSquares:
                 for moon_period in period_grid:
                     search_inputs.extend(self.search_inputs(moon_period, alpha_grid, planet_mass, max_period,
                                                             impact_param))
-        with Pool(processes=self.cpus, maxtasksperchild=500) as pool:
+        # Each worker gets this object once (see `_set_worker_search`): passing the bound method
+        # sent a copy of it, about 20 MB on a 1-minute Kepler curve, with every chunk of 100.
+        with Pool(processes=self.cpus, maxtasksperchild=500, initializer=_set_worker_search,
+                  initargs=(self,)) as pool:
             all_residuals = list(
-                tqdm(pool.imap(self.search, search_inputs, chunksize=100),
+                tqdm(pool.imap(_worker_search, search_inputs, chunksize=100),
                      total=len(search_inputs), disable=not progress)
             )
         return period_grid, alpha_grid, search_inputs, all_residuals

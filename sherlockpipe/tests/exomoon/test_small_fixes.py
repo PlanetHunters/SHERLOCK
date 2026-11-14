@@ -21,8 +21,9 @@ ALPHA_STEP = 2 * np.pi / 25
 class SerialPool:
     """Runs the search in this process, so patched methods apply."""
 
-    def __init__(self, *args, **kwargs):
-        pass
+    def __init__(self, *args, initializer=None, initargs=(), **kwargs):
+        if initializer is not None:
+            initializer(*initargs)
 
     def __enter__(self):
         return self
