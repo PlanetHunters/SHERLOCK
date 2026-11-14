@@ -72,6 +72,64 @@ def forecast_moon_mass(radius, max_density):
     return cap if forecast is None else min(forecast, cap)
 
 
+@njit(cache=True)
+def _point_terms(point, epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup, depth_shared,
+                 t0_lookup, columns, values):
+    """Fill the non-zero (column, value) pairs of one point of the `planet_fit` design; return how many."""
+    columns[0], values[0] = 0, 1.0
+    columns[1], values[1] = 1, 1.0 if inside[point] else 0.0
+    count = 2
+    index = epoch[point]
+    column = depth_shared if depth_shared >= 0 else (depth_lookup[index] if index >= 0 else -1)
+    if column >= 0:
+        columns[count], values[count] = column, depth_column[point]
+        count += 1
+    for term in range(shape_columns.shape[0]):
+        if shape_columns[term] >= 0:
+            columns[count], values[count] = shape_columns[term], shapes[point, term]
+            count += 1
+    column = t0_lookup[index] if index >= 0 else -1
+    if column >= 0:
+        columns[count], values[count] = column, t0_column[point]
+        count += 1
+    return count
+
+
+@njit(cache=True)
+def _planet_normal_equations(epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup,
+                             depth_shared, t0_lookup, weights, flux, n_columns):
+    """Return (D^T W D, D^T W f) of the `planet_fit` design, summed over each point's non-zero columns."""
+    normal = np.zeros((n_columns, n_columns))
+    right = np.zeros(n_columns)
+    columns = np.empty(4 + shape_columns.shape[0], dtype=np.int64)
+    values = np.empty(4 + shape_columns.shape[0])
+    for point in range(epoch.shape[0]):
+        count = _point_terms(point, epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup,
+                             depth_shared, t0_lookup, columns, values)
+        weight = weights[point]
+        for first in range(count):
+            weighted = values[first] * weight
+            right[columns[first]] += weighted * flux[point]
+            for second in range(count):
+                normal[columns[first], columns[second]] += weighted * values[second]
+    return normal, right
+
+
+@njit(cache=True)
+def _planet_model(epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup, depth_shared,
+                  t0_lookup, coefficients):
+    """Return the planet terms of the `planet_fit` design times their coefficients (columns 2 and up)."""
+    model = np.zeros(epoch.shape[0])
+    columns = np.empty(4 + shape_columns.shape[0], dtype=np.int64)
+    values = np.empty(4 + shape_columns.shape[0])
+    for point in range(epoch.shape[0]):
+        count = _point_terms(point, epoch, inside, depth_column, t0_column, shapes, shape_columns, depth_lookup,
+                             depth_shared, t0_lookup, columns, values)
+        for term in range(2, count):
+            model[point] += values[term] * coefficients[columns[term]]
+    return model
+
+
 class ExposureAveragedModel:
     """batman transit model averaged over each exposure with the midpoint rule.
 
@@ -1037,7 +1095,8 @@ class ExoMoonLeastSquares:
         self.exposure_source = source
         logging.info("Light curve with %d exposures, each point modelled with its own: %s. The moon templates use "
                      "%.2f min, which carries %.0f%% of the weight", len(groups),
-                     ", ".join(f"{value * 1440:.2f} min ({100 * share:.0f}% of points)" for value, share in groups),
+                     ", ".join(f"{value * 1440:.2f} min ({100 * share:.0f}% of the points or of the time)"
+                               for value, share in groups),
                      dominant * 1440, 100 * carried[dominant] / max(sum(carried.values()), 1e-300))
 
     def calibrate_errors_per_exposure(self):
@@ -2315,6 +2374,9 @@ class ExoMoonLeastSquares:
         """
         #TODO need to take into account "prograde" or "retrograde" orbit
         orbit_scenarios = []
+        # On a sorted curve each epoch's window is one slice, found by bisection instead of a pass
+        # over every point (the same points as the comparison below).
+        time_sorted = len(time) < 2 or bool(np.all(time[1:] >= time[:-1]))
         for t0 in bary_t0s:
             max_moon_t0_tau = ExoMoonLeastSquares.compute_moon_ts(t0, half_moon_orbit_transit_duration, half_moon_transit_duration)
             moon_t0, moon_alpha = ExoMoonLeastSquares.compute_moon_t0(planet_t0, t0, moon_period, moon_initial_alpha, max_moon_t0_tau)
@@ -2324,7 +2386,14 @@ class ExoMoonLeastSquares:
             # alpha = (moon_initial_alpha + phase_delta) % (2 * np.pi)
             # time_alpha = np.cos(alpha) * moon_orbit_transit_length / 2
             # moon_t1 = t1 + time_alpha
-            time_orbit_range_args = np.argwhere(np.abs(time - t0) <= half_moon_max_orbit_transit_duration).flatten()
+            if time_sorted:
+                first = np.searchsorted(time, t0 - half_moon_max_orbit_transit_duration, side='left')
+                last = np.searchsorted(time, t0 + half_moon_max_orbit_transit_duration, side='right')
+                time_orbit_range_args = np.arange(first, last)
+                inside_window = np.abs(time[time_orbit_range_args] - t0) <= half_moon_max_orbit_transit_duration
+                time_orbit_range_args = time_orbit_range_args[inside_window]
+            else:
+                time_orbit_range_args = np.argwhere(np.abs(time - t0) <= half_moon_max_orbit_transit_duration).flatten()
             time_moon_transit = time[time_orbit_range_args]
             flux_moon_transit = flux[time_orbit_range_args]
             flux_err_moon_transit = flux_err[time_orbit_range_args]
@@ -2378,16 +2447,12 @@ class ExoMoonLeastSquares:
                                                                                extra=extra)
         if len(transit_scenarios) == 0:
             return None
-        scenario_time = []
-        scenario_flux = []
-        scenario_flux_err = []
         scenario_extra = []
-        for normalized_moon_transit_scenario in transit_scenarios:
-            scenario_time = np.concatenate((scenario_time, normalized_moon_transit_scenario[1].flatten()))
-            scenario_flux = np.concatenate((scenario_flux, normalized_moon_transit_scenario[2].flatten()))
-            scenario_flux_err = np.concatenate((scenario_flux_err, normalized_moon_transit_scenario[3].flatten()))
-            if extra is not None:
-                scenario_extra.append(normalized_moon_transit_scenario[4])
+        scenario_time = np.concatenate([scenario[1].ravel() for scenario in transit_scenarios]).astype(float)
+        scenario_flux = np.concatenate([scenario[2].ravel() for scenario in transit_scenarios]).astype(float)
+        scenario_flux_err = np.concatenate([scenario[3].ravel() for scenario in transit_scenarios]).astype(float)
+        if extra is not None:
+            scenario_extra = [scenario[4] for scenario in transit_scenarios]
         sorted_time_args = np.argsort(scenario_time)
         scenario_time = scenario_time[sorted_time_args]
         scenario_flux = scenario_flux[sorted_time_args]
@@ -2556,45 +2621,63 @@ class ExoMoonLeastSquares:
         if n_inside == 0 or n_points - n_inside < 2:
             return unchanged
         depth_column, t0_column, epoch = planet_columns[:, 0], planet_columns[:, 1], planet_columns[:, 2].astype(int)
-        planet_terms, names = [], []
+        # The design has a constant, the moon window and the planet terms. Each per-epoch term is
+        # zero outside its epoch, so each point has at most 4 + len(PLANET_SHAPE_TERMS) non-zero
+        # columns, and the normal equations are summed over those (`_planet_normal_equations`):
+        # the same sums as the dense product at a fraction of its cost.
+        names, n_columns = [], 2
+        lookup_size = int(max(np.max(epoch), 0)) + 1
+        depth_lookup = np.full(lookup_size, -1, dtype=np.int64)
+        depth_shared = -1
         depth_epochs = np.unique(epoch[(epoch >= 0) & (depth_column != 0)]) if epoch_depth else []
         if len(depth_epochs) > 0:
             for index in depth_epochs:
-                planet_terms.append(np.where(epoch == index, depth_column, 0.0))
+                depth_lookup[index] = n_columns
+                n_columns += 1
                 names.append(("depth", int(index)))
         elif np.any(depth_column != 0):
-            planet_terms.append(depth_column)
+            depth_shared = n_columns
+            n_columns += 1
             names.append("depth")
+        n_shapes = len(ExoMoonLeastSquares.PLANET_SHAPE_TERMS)
+        shapes = np.zeros((n_points, n_shapes))
+        shape_columns = np.full(n_shapes, -1, dtype=np.int64)
         for offset, shape_name in enumerate(ExoMoonLeastSquares.PLANET_SHAPE_TERMS):
             if planet_columns.shape[1] > 3 + offset and np.any(planet_columns[:, 3 + offset] != 0):
-                planet_terms.append(planet_columns[:, 3 + offset])
+                shapes[:, offset] = planet_columns[:, 3 + offset]
+                shape_columns[offset] = n_columns
+                n_columns += 1
                 names.append(shape_name)
+        t0_lookup = np.full(lookup_size, -1, dtype=np.int64)
         for index in np.unique(epoch[(epoch >= 0) & (t0_column != 0)]):
-            term = np.where(epoch == index, t0_column, 0.0)
-            if np.any(term != 0):
-                planet_terms.append(term)
-                names.append(int(index))
-        if not planet_terms:
+            t0_lookup[index] = n_columns
+            n_columns += 1
+            names.append(int(index))
+        if n_columns == 2:
             return unchanged
         weights = ExoMoonLeastSquares.point_weights(flux_err, n_points)
-        design = np.column_stack([np.ones(n_points), inside.astype(float)] + planet_terms)
-        normal = design.T @ (design * weights[:, None])
-        if np.linalg.matrix_rank(normal) < design.shape[1]:
+        terms = (np.ascontiguousarray(epoch, dtype=np.int64), np.ascontiguousarray(inside, dtype=np.bool_),
+                 np.ascontiguousarray(depth_column, dtype=float), np.ascontiguousarray(t0_column, dtype=float),
+                 shapes, shape_columns, depth_lookup, depth_shared, t0_lookup)
+        normal, right = _planet_normal_equations(*terms, np.ascontiguousarray(weights, dtype=float), flux, n_columns)
+        keep = list(range(n_columns))
+        if np.linalg.matrix_rank(normal) < n_columns:
             # A term the stacked points cannot tell from the others (an epoch with only a few
             # points, for example) is dropped rather than fitted.
             keep = [0, 1]
-            for column_index in range(2, design.shape[1]):
-                trial = design[:, keep + [column_index]]
-                if np.linalg.matrix_rank(trial.T @ (trial * weights[:, None])) == len(keep) + 1:
+            for column_index in range(2, n_columns):
+                trial = keep + [column_index]
+                if np.linalg.matrix_rank(normal[np.ix_(trial, trial)]) == len(keep) + 1:
                     keep.append(column_index)
             names = [names[i - 2] for i in keep[2:]]
-            design = design[:, keep]
-            normal = design.T @ (design * weights[:, None])
-            if design.shape[1] == 2:
+            if len(keep) == 2:
                 return unchanged
+            normal, right = normal[np.ix_(keep, keep)], right[keep]
         normal_inverse = np.linalg.inv(normal)
-        coefficients = normal_inverse @ (design.T @ (flux * weights))
-        model = design[:, 2:] @ coefficients[2:]
+        coefficients = normal_inverse @ right
+        planet_coefficients = np.zeros(n_columns)
+        planet_coefficients[np.asarray(keep[2:], dtype=np.int64)] = coefficients[2:]
+        model = _planet_model(*terms, planet_coefficients)
         fitted = dict(zip(names, coefficients[2:]))
         inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / np.sum(weights[inside]) + 1 / np.sum(weights[~inside]))))
         shape = {name: float(fitted.pop(name)) for name in ExoMoonLeastSquares.PLANET_SHAPE_TERMS if name in fitted}
@@ -4228,7 +4311,17 @@ class ExoMoonLeastSquares:
         shape = self.planet_shape_columns
         if not self.fit_planet_shape or shape is None or len(shape) != len(self.time):
             shape = np.zeros((len(column), len(ExoMoonLeastSquares.PLANET_SHAPE_TERMS)))
-        return np.column_stack((column, t0_column, epoch_index, shape))
+        # Every hypothesis searches the same curve, so the stacked columns are built once per set
+        # of inputs (the arrays are replaced, never changed in place, when the curve or the
+        # planet model changes).
+        key = (id(self.time), len(self.time), id(column), id(self.planet_t0_column), id(self.planet_epoch_index),
+               id(self.planet_shape_columns), self.fit_planet_t0, self.fit_planet_shape)
+        cached = getattr(self, "_search_columns_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        columns = np.column_stack((column, t0_column, epoch_index, shape))
+        self._search_columns_cache = (key, columns)
+        return columns
 
     def planet_shape_derivatives(self, time):
         """Return the derivatives of the subtracted planet model with respect to its shape.

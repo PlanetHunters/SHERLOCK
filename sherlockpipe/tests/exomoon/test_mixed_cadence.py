@@ -233,3 +233,31 @@ def test_a_time_held_at_two_cadences_is_kept_once_at_the_shorter():
     assert np.count_nonzero(flux == 2.0) == len(long_time) - np.count_nonzero(overlap)
     assert np.all(np.diff(time) > 0) and len(flux_err) == len(time)
     np.testing.assert_allclose(ExoMoonLeastSquares.infer_point_exposures(time)[flux == 1.0], MINUTE, rtol=1e-6)
+
+
+@pytest.mark.parametrize("epoch_depth", [False, True])
+def test_sparse_planet_fit_is_the_dense_weighted_least_squares(epoch_depth):
+    """planet_fit sums the normal equations over each point's non-zero columns; check against the dense design."""
+    rng = np.random.default_rng(21)
+    n, n_epochs = 3000, 12
+    epoch = rng.integers(-1, n_epochs, n)
+    columns = np.column_stack([rng.normal(size=n) * (epoch >= 0), rng.normal(size=n) * (epoch >= 0), epoch,
+                               rng.normal(size=n), rng.normal(size=n), rng.normal(size=n)]).astype(float)
+    inside = rng.random(n) < 0.2
+    flux_err = 1e-3 * (1 + 4 * rng.random(n))
+    flux = 1 + rng.normal(0, flux_err)
+
+    fit = ExoMoonLeastSquares.planet_fit(flux, inside, columns, epoch_depth=epoch_depth, flux_err=flux_err)
+
+    used = epoch >= 0
+    depth_terms = [np.where(epoch == e, columns[:, 0], 0.0) for e in range(n_epochs)] if epoch_depth \
+        else [columns[:, 0]]
+    t0_terms = [np.where(epoch == e, columns[:, 1], 0.0) for e in range(n_epochs) if np.any(used & (epoch == e))]
+    design = np.column_stack([np.ones(n), inside.astype(float)] + depth_terms + [columns[:, 3], columns[:, 4],
+                                                                              columns[:, 5]] + t0_terms)
+    weights = 1 / flux_err ** 2
+    normal = design.T @ (design * weights[:, None])
+    coefficients = np.linalg.solve(normal, design.T @ (flux * weights))
+    np.testing.assert_allclose(fit["model"], design[:, 2:] @ coefficients[2:], rtol=1e-8, atol=1e-12)
+    inflation = np.sqrt(np.linalg.inv(normal)[1, 1] / (1 / weights[inside].sum() + 1 / weights[~inside].sum()))
+    assert fit["inflation"] == pytest.approx(inflation, rel=1e-9)

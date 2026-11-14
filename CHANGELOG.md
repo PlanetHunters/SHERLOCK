@@ -4,6 +4,15 @@
 
 ### Added
 
+- EMLS search is about 5 times faster with the same results. The joint planet fit
+  (`planet_fit`) sums its normal equations over each point's non-zero columns in numba
+  (`_planet_normal_equations`, `_planet_model`) instead of building the dense design of
+  points x (2 + 2 epochs + 3) columns, whose product took 79 % of the search time; each
+  epoch's moon-orbit window is found by bisection on the sorted curve; the epochs are
+  concatenated once instead of one by one; and the planet columns are built once per curve
+  instead of once per hypothesis. On the KOI-125.01 1-minute + 30-minute curve (41 950 points
+  in the windows, 33 epochs) a hypothesis went from 54 to 11 ms; over 400 hypotheses the SNR
+  differs from the previous code by at most 5e-7 relative.
 - EMLS handles light curves that mix cadences without assuming a mission. With
   `exposure_time="auto"` each point's exposure is measured from the spacing to its nearest
   point (5-point running median, spacings within 10 % grouped, small groups at a whole
