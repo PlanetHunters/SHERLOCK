@@ -4755,28 +4755,27 @@ if __name__ == '__main__':
         cadence = [60]
         tois_df = prepare_koi_table(tois_df)
     confirmed_tois_df = tois_df.loc[(tois_df['Disposition'] == 'CP') | (tois_df['Disposition'] == 'KP') | (tois_df['Disposition'] == 'CONFIRMED') | (tois_df['Disposition'] == 'CANDIDATE')]
+    companion_tois_df = confirmed_tois_df
     confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Planet SNR'] > 15]
     confirmed_tois_df = confirmed_tois_df.sort_values(by='Planet SNR', ascending=False)
     # Moon dynamical stability filter
-    def hill_roche_stable(period, p_radius, p_mass, star_mass):
-        """Check if Hill radius exceeds Roche limit: r_Hill > 2 * r_Roche.
+    def hill_roche_stable(row, period, p_radius, p_mass, star_mass):
+        """Check that the stable prograde moon region extends beyond the Roche limit.
 
-        The Hill sphere (Hill 1878, Am. J. Math. 1, 5) defines the region
-        where the planet's gravity dominates over the star:
-            r_Hill = a_p × (M_p / 3M_star)^(1/3)
-
-        The Roche limit (Roche 1849, Acad. Sci. Montpellier) for a fluid
-        satellite is the closest orbit before tidal disruption:
-            r_Roche = 2.44 × R_p × (ρ_p / ρ_m)^(1/3)
-
-        A moon can only exist if r_Hill > r_Roche. The factor 2 margin for
-        long-term stability is a heuristic."""
+        The outer limit is the one EMLS searches up to, a_max = 0.4895 (1 - 1.0305 e_p) r_H
+        (Domingos, Winter & Yokoyama 2006, MNRAS 373, 1227), with the circular Hill radius
+        r_H = a_p (M_p / 3 M_star)^(1/3) (`max_moon_semimajor_axis`). The inner limit is the fluid
+        Roche limit r_Roche = 2.44 R_p (rho_p / rho_m)^(1/3) for an Earth-like moon,
+        rho_m = 5.5 g cm^-3. For a circular orbit, a_max > r_Roche is r_H > 2.04 r_Roche. It replaces
+        an r_H > 2 r_Roche margin that had no source and ignored the eccentricity."""
+        ecc, _ = catalog_planet_orbit(row, catalog)
         a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, period)
-        r_hill = a * (p_mass * M_earth_to_M_sun / (3 * star_mass)) ** (1 / 3)
-        moon_density = 5.5
-        r_roche = ExoMoonLeastSquares.compute_roche_radius(p_radius, p_mass, moon_density)
-        r_roche_au = r_roche * R_earth_to_R_sun / AU_TO_RSUN
-        return r_hill > r_roche_au * 2
+        try:
+            a_max = ExoMoonLeastSquares.max_moon_semimajor_axis(star_mass, p_mass * M_earth_to_M_sun, a, ecc)
+        except ValueError:
+            return False
+        r_roche = ExoMoonLeastSquares.compute_roche_radius(p_radius, p_mass, max_moon_density)
+        return a_max > r_roche * R_earth_to_R_sun / AU_TO_RSUN
 
     def planet_planet_stable(a1, m1_earth, a2, m2_earth, star_mass, n_hill=5):
         """Check if two planets are separated by n_hill mutual Hill radii.
@@ -4820,7 +4819,7 @@ if __name__ == '__main__':
             p_mass = mean_planet_mass(p_radius)
         a = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, period)
         p_mass_sun = p_mass * M_earth_to_M_sun
-        moon_stable = hill_roche_stable(period, p_radius, p_mass, star_mass)
+        moon_stable = hill_roche_stable(r, period, p_radius, p_mass, star_mass)
         if not moon_stable:
             n_hillroche += 1
             keep_mask.append(False)
@@ -4829,10 +4828,13 @@ if __name__ == '__main__':
             n_tidal += 1
             keep_mask.append(False)
             continue
-        sisters = confirmed_tois_df[confirmed_tois_df['Object Id'] == r['Object Id']]
+        # Every planet of the system counts, not only those that passed the SNR cut: a faint
+        # companion destabilises moons as much as a bright one.
+        sisters = companion_tois_df[companion_tois_df['Object Id'] == r['Object Id']]
         companion_ok = True
         for _, sis in sisters.iterrows():
-            if sis['OI'] == r['OI']:
+            if sis['OI'] == r['OI'] or not np.isfinite(sis['Period (days)']) \
+                    or not np.isfinite(sis['Planet Radius (R_Earth)']):
                 continue
             sis_mass = sis['Predicted Mass (M_Earth)']
             if np.isnan(sis_mass) or sis_mass <= 0:

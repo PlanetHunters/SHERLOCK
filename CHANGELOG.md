@@ -94,6 +94,7 @@
   the orbit is circular, instead of e = 0.15 and w = 0 for every target, which lowered
   the outer moon limit from 0.49 to 0.41 Hill radii (F8). The TOI b = 0 start (B5) needs
   no change: the planet fold fit frees b.
+- EMLS catalog driver: the companion filter checks every CONFIRMED or CANDIDATE planet of the system, not only those above the SNR cut, so a faint close companion (KOI-1070.03, SNR 5.2, next to KOI-1070.02) now drops its neighbour; rows without a period or radius are skipped. The Hill-Roche check asks that the Domingos et al. (2006) outer limit EMLS searches up to, 0.4895 (1 - 1.0305 e) r_H, lies beyond the fluid Roche limit, instead of an unsourced r_H > 2 r_Roche that ignored the eccentricity (the same for a circular orbit: r_H > 2.04 r_Roche). KOIs with SNR > 15: 730 -> 728 (KOI-1070.02 and KOI-2092.01 removed); the first targets are unchanged.
 - EMLS catalog driver: the tidal survival filter is Barnes & O'Brien (2002) Eq. 8, applied
   per target as in HEK VI (Teachey, Kipping & Schmitt 2018) and Kipping & Yahalomi (2023, MNRAS 518, 3482): the
   largest moon that survives tidal migration for 5 Gyr, with the EMLS outer moon limit as

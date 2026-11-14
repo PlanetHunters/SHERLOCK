@@ -218,3 +218,38 @@ def test_mean_planet_mass_is_close_to_the_forecast_median():
     assert exomoon.mean_planet_mass(11.2) == JUPITER_MASS
     assert exomoon.moon_radius_from_mass(exomoon.mean_planet_mass(3.0)) == pytest.approx(3.0)
     assert np.isnan(exomoon.mean_planet_mass(np.nan))
+
+
+def run_driver_on_table(tmp_path, monkeypatch, table):
+    """Run the KOI driver on a catalog table and return the light-curve builds it started."""
+    home = tmp_path / 'home'
+    (home / '.sherlockpipe').mkdir(parents=True)
+    table.to_csv(home / '.sherlockpipe' / 'kois.csv', index=False)
+    monkeypatch.setenv('HOME', str(home))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, 'argv', ['exomoon.py', '--catalog', 'kois'])
+    builder = mock.MagicMock()
+    builder.return_value.build.side_effect = StopAtSearch()
+    with mock.patch('lcbuilder.lcbuilder_class.LcBuilder', builder), mock.patch('logging.exception'):
+        runpy.run_module('sherlockpipe.exomoon', run_name='__main__')
+    return builder.return_value.build.call_count
+
+
+def test_driver_drops_a_target_with_a_close_faint_companion(tmp_path, monkeypatch):
+    """A companion below the SNR cut still destabilises the moons of its neighbour."""
+    target = koi_table(**{'Period (days)': DRIVER_PERIOD})
+    companion = koi_table(**{'OI': 'K00001.02', 'Period (days)': 1.1 * DRIVER_PERIOD, 'koi_model_snr': 5.0})
+    assert run_driver_on_table(tmp_path / 'alone', monkeypatch, target) == 1
+    assert run_driver_on_table(tmp_path / 'pair', monkeypatch, pd.concat([target, companion])) == 0
+
+
+def test_driver_hill_roche_check_uses_the_domingos_limit_with_eccentricity(tmp_path, monkeypatch, capsys):
+    """No stable prograde orbit once 0.4895 (1 - 1.0305 e) r_H falls inside the Roche limit.
+
+    The tidal filter would drop this target too, so the check is read from the filter counts."""
+    circular = koi_table(**{'Period (days)': DRIVER_PERIOD, 'koi_eccen': 0.0})
+    eccentric = koi_table(**{'Period (days)': DRIVER_PERIOD, 'koi_eccen': 0.97})
+    assert run_driver_on_table(tmp_path / 'circular', monkeypatch, circular) == 1
+    assert 'Hill-Roche=0,' in capsys.readouterr().out
+    assert run_driver_on_table(tmp_path / 'eccentric', monkeypatch, eccentric) == 0
+    assert 'Hill-Roche=1,' in capsys.readouterr().out
