@@ -268,9 +268,9 @@ def estimate_exposure_time(time, lc_file, exposure_time=None):
     The exposure is the median spacing between consecutive points of the whole curve. Mission
     exposures span their cadence, and a binned point spans its bin, so the spacing measures the
     exposure without the SHERLOCK configuration, whose EXPTIME only selects the downloaded data.
-    A curve that mixes cadences gets its median spacing, which follows the cadence with the most
+    A curve that mixes cadences reports its median spacing, which follows the cadence with the most
     points, and a warning names every cadence that holds more than MIXED_CADENCE_SHARE of the
-    points or of the time. With more than about half of the points removed at random, the median
+    points or of the time; EMLS then models each point with its own exposure (see `run`). With more than about half of the points removed at random, the median
     can be twice the cadence; the warning then names both.
 
     Parameters
@@ -321,9 +321,10 @@ def estimate_exposure_time(time, lc_file, exposure_time=None):
     others = [cadence for cadence in significant_cadences(cadences)
               if abs(cadence["seconds"] - seconds) > CADENCE_TOLERANCE * seconds]
     if others:
-        logging.warning("%s mixes cadences (%s). Every point is modelled with the median %.1f s, so the points at "
-                        "%s are modelled with the wrong exposure. Pass --exposure_time to choose another one",
-                        lc_file, found, seconds, ", ".join(f"{cadence['seconds']:.1f} s" for cadence in others))
+        logging.warning("%s mixes cadences (%s; median %.1f s, other %s). Each point is modelled with its own "
+                        "exposure, measured from the spacing to its nearest point, and weighted by its error. Pass "
+                        "--exposure_time to model every point with one exposure instead", lc_file, found, seconds,
+                        ", ".join(f"{cadence['seconds']:.1f} s" for cadence in others))
     elif not cadences:
         logging.warning("%s has no regular cadence, so the median spacing %.1f s may not be its exposure. Pass "
                         "--exposure_time to set it", lc_file, seconds)
@@ -624,7 +625,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         moon["min_radius"], moon["max_radius"], inputs["t0s"], inputs["time"], inputs["flux"], inputs["flux_err"],
         max_moon_density, period_grid_size=period_grid_size, radius_grid_size=radius_grid_size,
         subtract_mode=subtract_mode,
-        exposure_time=None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400,
+        exposure_time=("auto" if inputs["sources"]["exposure_time"] != "user"
+                       and len(significant_cadences(inputs["cadences"])) > 1
+                       else None if inputs["exposure_time"] is None else inputs["exposure_time"] / 86400),
         ttv_prior_width="auto" if ttv_prior_minutes is None else (ttv_prior_minutes / 1440 if ttv_prior_minutes
                                                                   else None),
         planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,

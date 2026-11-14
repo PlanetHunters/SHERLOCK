@@ -90,6 +90,30 @@ class ExposureAveragedModel:
         return self.model.light_curve(transit_params).reshape(self.shape).mean(axis=1)
 
 
+class PerPointExposureModel:
+    """Transit model for points with different exposures, as a light curve that mixes cadences.
+
+    The points are grouped by exposure, and each group gets the model `transit_model` builds for
+    its exposure. It exposes the same light_curve(params) interface as batman.TransitModel.
+    """
+
+    def __init__(self, transit_params, time, exposures):
+        time = np.asarray(time, dtype=float)
+        exposures = np.asarray(exposures, dtype=float)
+        self.size = len(time)
+        self.groups = []
+        for value in np.unique(exposures):
+            index = np.flatnonzero(exposures == value)
+            self.groups.append((index, ExoMoonLeastSquares.transit_model(
+                transit_params, time[index], float(value) if value > 0 else None)))
+
+    def light_curve(self, transit_params):
+        flux = np.empty(self.size)
+        for index, model in self.groups:
+            flux[index] = model.light_curve(transit_params)
+        return flux
+
+
 class NoUsableEpochsError(ValueError):
     """No planet transit epoch is left to search for a moon."""
 
@@ -113,6 +137,10 @@ class ExoMoonLeastSquares:
     SPECTRUM_KERNEL = 31
     TEMPLATE_MIN_SAMPLES = 1000
     SUBEXPOSURE_DAYS = 2 / 1440
+    # Point spacings within this fraction of a group's shortest spacing are one cadence.
+    CADENCE_GROUP_TOLERANCE = 0.1
+    # A light curve mixes cadences when more than one cadence holds over this share of the points.
+    MIXED_EXPOSURE_SHARE = 0.05
 
     def __init__(self, object_dir, cpus, star_mass, star_radius, ab, planet_radius, planet_radius_err,
                  planet_mass, planet_period,
@@ -288,7 +316,7 @@ class ExoMoonLeastSquares:
         self.fit_rp_per_transit = fit_rp_per_transit
         self.min_transit_completeness = min_transit_completeness
         self.max_subtraction_rms_ratio = max_subtraction_rms_ratio
-        self.exposure_time, self.exposure_source = self.resolve_exposure_time(exposure_time, time)
+        self.setup_point_exposures(exposure_time, time)
         if not (ttv_prior_width is None or ttv_prior_width == "auto"
                 or (isinstance(ttv_prior_width, (int, float)) and np.isfinite(ttv_prior_width) and ttv_prior_width > 0)):
             raise ValueError(f"ttv_prior_width must be a positive number of days, 'auto' or None, got "
@@ -885,6 +913,215 @@ class ExoMoonLeastSquares:
         return float(exposure_time), "given"
 
     @staticmethod
+    def infer_point_exposures(time, window=5):
+        """Return each point's exposure in days, measured from the spacing to its nearest point.
+
+        The nearest-neighbour spacing ignores the gap on one side of a point, and a running median
+        over `window` points ignores an isolated missing cadence. The spacings are then grouped:
+        values within CADENCE_GROUP_TOLERANCE of a group's shortest spacing form one cadence, and
+        each point gets the median of its group. A spacing longer than a day is not an exposure and
+        gives 0, an instantaneous model. A small group (at most MIXED_EXPOSURE_SHARE of the points
+        and of the time) whose spacing is a whole multiple of a larger group's comes from missing
+        points of that cadence and takes its exposure. Nothing about the mission is assumed.
+
+        Parameters
+        ----------
+        time : array_like
+            Mid-exposure times in days, in any order.
+        window : int, optional
+            Points in the running median, default 5.
+
+        Returns
+        -------
+        numpy.ndarray
+            Exposure in days of each point, in the order of `time`.
+        """
+        time = np.asarray(time, dtype=float)
+        exposures = np.zeros(len(time))
+        if len(time) < 2:
+            return exposures
+        order = np.argsort(time, kind="stable")
+        spacing = np.diff(time[order])
+        spacing = np.where(spacing > 0, spacing, np.nan)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            nearest = np.fmin(np.r_[np.nan, spacing], np.r_[spacing, np.nan])
+            half = window // 2
+            padded = np.pad(nearest, half, mode="edge")
+            smoothed = np.nanmedian(np.lib.stride_tricks.sliding_window_view(padded, window), axis=1)
+        if np.all(~np.isfinite(smoothed)):
+            return exposures
+        smoothed = np.where(np.isfinite(smoothed), smoothed, np.nanmedian(smoothed))
+        grouped = np.empty(len(smoothed))
+        rank = np.argsort(smoothed, kind="stable")
+        start = 0
+        while start < len(rank):
+            end = np.searchsorted(smoothed[rank], smoothed[rank[start]] * (1 + ExoMoonLeastSquares.CADENCE_GROUP_TOLERANCE),
+                                  side="right")
+            grouped[rank[start:end]] = np.median(smoothed[rank[start:end]])
+            start = end
+        groups = ExoMoonLeastSquares.exposure_groups(grouped)
+        tolerance = ExoMoonLeastSquares.CADENCE_GROUP_TOLERANCE
+        for value, share in groups:
+            if share > ExoMoonLeastSquares.MIXED_EXPOSURE_SHARE:
+                continue
+            for larger_value, larger_share in groups:
+                multiple = value / larger_value if larger_value > 0 else 0
+                if larger_share > share and multiple >= 2 - tolerance and \
+                        abs(multiple - np.round(multiple)) <= tolerance * np.round(multiple):
+                    grouped[grouped == value] = larger_value
+                    break
+        grouped[grouped > 1] = 0.0
+        exposures[order] = grouped
+        return exposures
+
+    @staticmethod
+    def exposure_groups(exposures):
+        """Return [(exposure, share)] of the distinct exposures, the largest share first.
+
+        The share is the larger of the share of the points and the share of the observed time
+        (the sum of the exposures), so a long cadence with few points still counts.
+        """
+        exposures = np.asarray(exposures, dtype=float)
+        values, inverse, counts = np.unique(exposures, return_inverse=True, return_counts=True)
+        time_spent = np.bincount(inverse, weights=exposures)
+        total_time = np.sum(time_spent)
+        shares = np.maximum(counts / np.sum(counts), time_spent / total_time if total_time > 0 else 0)
+        order = np.argsort(-shares, kind="stable")
+        return [(float(values[i]), float(shares[i])) for i in order]
+
+    def setup_point_exposures(self, exposure_time, time):
+        """Set the exposure of every point, per point when the light curve mixes cadences.
+
+        A light curve with one cadence keeps one exposure (see `resolve_exposure_time`), and
+        exposure_lookup stays None. When "auto" finds more than one cadence holding over
+        MIXED_EXPOSURE_SHARE of the points, or when an array is given, every point keeps its own
+        exposure (see `infer_point_exposures`): `exposure_at` returns it for any time of the curve,
+        and exposure_time becomes the exposure that carries most of the inverse-variance weight,
+        used only where one exposure is needed (the moon templates and the reports).
+        """
+        self.exposure_lookup = None
+        self.exposure_groups_found = None
+        if exposure_time is not None and not isinstance(exposure_time, str) and np.ndim(exposure_time) > 0:
+            exposures = np.asarray(exposure_time, dtype=float)
+            if exposures.shape != np.shape(time):
+                raise ValueError(f"exposure_time per point must have one value per time ({len(time)}), got "
+                                 f"{exposures.shape}")
+            if not np.all(np.isfinite(exposures) & (exposures >= 0) & (exposures <= 1)):
+                raise ValueError("exposure_time per point must be between 0 (instantaneous) and 1 day")
+            source = "given per point"
+        elif isinstance(exposure_time, str) and exposure_time == "auto":
+            exposures = ExoMoonLeastSquares.infer_point_exposures(time)
+            groups = ExoMoonLeastSquares.exposure_groups(exposures)
+            if sum(share > ExoMoonLeastSquares.MIXED_EXPOSURE_SHARE for _, share in groups) < 2:
+                self.exposure_time, self.exposure_source = self.resolve_exposure_time(exposure_time, time)
+                return
+            source = "per point, from the spacing to the nearest point"
+        else:
+            self.exposure_time, self.exposure_source = self.resolve_exposure_time(exposure_time, time)
+            return
+        groups = ExoMoonLeastSquares.exposure_groups(exposures)
+        if len(groups) == 1:
+            value = groups[0][0]
+            self.exposure_time = value if value > 0 else None
+            self.exposure_source = source
+            return
+        order = np.argsort(np.asarray(time, dtype=float), kind="stable")
+        self.exposure_lookup = (np.asarray(time, dtype=float)[order], exposures[order])
+        self.exposure_groups_found = groups
+        self.calibrate_errors_per_exposure()
+        weights = self.point_weights(self.flux_err, len(exposures))
+        carried = {value: float(np.sum(weights[exposures == value])) for value, _ in groups}
+        dominant = max(carried, key=carried.get)
+        self.exposure_time = dominant if dominant > 0 else None
+        self.exposure_source = source
+        logging.info("Light curve with %d exposures, each point modelled with its own: %s. The moon templates use "
+                     "%.2f min, which carries %.0f%% of the weight", len(groups),
+                     ", ".join(f"{value * 1440:.2f} min ({100 * share:.0f}% of points)" for value, share in groups),
+                     dominant * 1440, 100 * carried[dominant] / max(sum(carried.values()), 1e-300))
+
+    def calibrate_errors_per_exposure(self):
+        """Scale the flux errors of each exposure group to its own point-to-point scatter.
+
+        The weights of a light curve that mixes cadences compare points of different cadences,
+        so their errors must be on one scale. Each group's errors are multiplied by the ratio of
+        its point-to-point scatter (1.4826 MAD of consecutive differences over sqrt 2) to its
+        median error, relative to the same ratio of the group with most points, which keeps the
+        overall scale of the input errors. Groups with fewer than 20 consecutive pairs are left as given.
+        """
+        self.exposure_error_scales = {}
+        if self.flux_err is None or self.exposure_lookup is None:
+            return
+        time = np.asarray(self.time, dtype=float)
+        flux = np.asarray(self.flux, dtype=float)
+        flux_err = np.array(self.flux_err, dtype=float)
+        exposures = self.exposure_at(time)
+        order = np.argsort(time, kind="stable")
+        ratios = {}
+        for value, _ in self.exposure_groups_found:
+            members = order[exposures[order] == value]
+            # Consecutive points of the group in time order.
+            group_time, group_flux = time[members], flux[members]
+            steps = np.diff(group_time)
+            close = steps <= 3 * max(value, np.median(steps) if len(steps) else 0)
+            differences = np.diff(group_flux)[close]
+            median_err = np.median(flux_err[members]) if len(members) else np.nan
+            if len(differences) < 20 or not median_err > 0:
+                continue
+            scatter = 1.4826 * np.median(np.abs(differences - np.median(differences))) / np.sqrt(2)
+            if scatter > 0:
+                ratios[value] = scatter / median_err
+        if not ratios:
+            return
+        reference = next((value for value, _ in self.exposure_groups_found if value in ratios), None)
+        for value, ratio in ratios.items():
+            scale = ratio / ratios[reference]
+            flux_err[exposures == value] *= scale
+            self.exposure_error_scales[value] = float(scale)
+        logging.info("Flux errors scaled per exposure to the point-to-point scatter: %s",
+                     ", ".join(f"{value * 1440:.2f} min x{scale:.3f}" for value, scale in
+                               self.exposure_error_scales.items()))
+        self.flux_err = flux_err
+
+    @staticmethod
+    def usable_errors(flux_err, size):
+        """Return whether flux_err holds one positive, finite error per point."""
+        if flux_err is None:
+            return False
+        flux_err = np.asarray(flux_err, dtype=float)
+        return flux_err.shape == (size,) and bool(np.all(np.isfinite(flux_err) & (flux_err > 0)))
+
+    @staticmethod
+    def point_weights(flux_err, size):
+        """Return inverse-variance weights, or ones when the errors are not usable (see `usable_errors`)."""
+        if not ExoMoonLeastSquares.usable_errors(flux_err, size):
+            return np.ones(size)
+        return 1 / np.asarray(flux_err, dtype=float) ** 2
+
+    def exposure_at(self, time):
+        """Return the exposure in days of the points at these times of the light curve.
+
+        With one exposure for the whole curve this is exposure_time (a float or None). With
+        exposures per point it is an array with the exposure of the nearest point of the curve to
+        each time, so it must be called with times of the curve's own points (any subset, in any
+        order), before they are shifted by a fold or a null offset.
+        """
+        if self.exposure_lookup is None:
+            return self.exposure_time
+        reference_time, reference_exposure = self.exposure_lookup
+        time = np.atleast_1d(np.asarray(time, dtype=float))
+        index = np.clip(np.searchsorted(reference_time, time), 1, len(reference_time) - 1)
+        nearer_left = np.abs(time - reference_time[index - 1]) <= np.abs(reference_time[index] - time)
+        return reference_exposure[np.where(nearer_left, index - 1, index)]
+
+    @staticmethod
+    def exposure_subset(exposure, mask):
+        """Return the exposures of the masked points: the same float for one exposure, the masked array per point."""
+        if exposure is None or np.ndim(exposure) == 0:
+            return exposure
+        return np.asarray(exposure)[mask]
+
+    @staticmethod
     def transit_model(transit_params, time, exposure_time=None):
         """Build a batman model, averaged over the exposure when one is given.
 
@@ -898,14 +1135,23 @@ class ExoMoonLeastSquares:
             Transit parameters.
         time : array_like
             Mid-exposure times in days.
-        exposure_time : float, optional
+        exposure_time : float or array_like, optional
             Exposure time in days. None or a value up to SUBEXPOSURE_DAYS gives an instantaneous model.
+            An array gives each point its own exposure (see `PerPointExposureModel`).
 
         Returns
         -------
-        batman.TransitModel or ExposureAveragedModel
+        batman.TransitModel, ExposureAveragedModel or PerPointExposureModel
             An object with a light_curve(params) method.
         """
+        if exposure_time is not None and np.ndim(exposure_time) > 0:
+            exposures = np.asarray(exposure_time, dtype=float)
+            if exposures.shape != np.shape(time):
+                raise ValueError(f"{exposures.shape} exposures for {np.shape(time)} times")
+            values = np.unique(exposures)
+            if len(values) > 1:
+                return PerPointExposureModel(transit_params, time, exposures)
+            exposure_time = float(values[0]) if len(values) and values[0] > 0 else None
         if exposure_time is None or exposure_time <= ExoMoonLeastSquares.SUBEXPOSURE_DAYS:
             return batman.TransitModel(transit_params, time)
         sub_exposures = int(np.ceil(exposure_time / ExoMoonLeastSquares.SUBEXPOSURE_DAYS))
@@ -924,8 +1170,9 @@ class ExoMoonLeastSquares:
             Pandora model.
         time : array_like
             Mid-exposure times in days.
-        exposure_time : float, optional
+        exposure_time : float or array_like, optional
             Exposure time in days. None or a value up to SUBEXPOSURE_DAYS gives instantaneous fluxes.
+            An array gives each point its own exposure.
 
         Returns
         -------
@@ -933,6 +1180,20 @@ class ExoMoonLeastSquares:
             (total, planet, moon) fluxes at the given times.
         """
         time = np.asarray(time, dtype=float)
+        if exposure_time is not None and np.ndim(exposure_time) > 0:
+            exposures = np.asarray(exposure_time, dtype=float)
+            values = np.unique(exposures)
+            if len(values) > 1:
+                fluxes = None
+                for value in values:
+                    index = np.flatnonzero(exposures == value)
+                    part = ExoMoonLeastSquares.pandora_light_curve(model, time[index], value if value > 0 else None)
+                    if fluxes is None:
+                        fluxes = tuple(np.empty(len(time)) for _ in part)
+                    for whole, piece in zip(fluxes, part):
+                        whole[index] = piece
+                return fluxes
+            exposure_time = float(values[0]) if len(values) and values[0] > 0 else None
         if exposure_time is None or exposure_time <= ExoMoonLeastSquares.SUBEXPOSURE_DAYS:
             return tuple(np.asarray(flux, dtype=float) for flux in model.light_curve(time))
         sub_exposures = int(np.ceil(exposure_time / ExoMoonLeastSquares.SUBEXPOSURE_DAYS))
@@ -1355,8 +1616,9 @@ class ExoMoonLeastSquares:
         if self.mask_duration_factor is not None:
             return self.planet_duration / 2 * self.mask_duration_factor
         cadence = np.median(np.diff(np.sort(epoch_time))) if len(epoch_time) > 1 else 0.0
-        if self.exposure_time is not None:
-            cadence = max(cadence, self.exposure_time)
+        exposure = self.exposure_at(epoch_time) if len(epoch_time) else self.exposure_time
+        if exposure is not None:
+            cadence = max(cadence, float(np.max(exposure)))
         return 1.1 * self.planet_duration / 2 + cadence
 
     @staticmethod
@@ -1451,13 +1713,16 @@ class ExoMoonLeastSquares:
         geometry attributes and fold_realigned are updated in place.
         """
         def fold(shifts):
-            parts = [(time[np.abs(time - t0) < duration_window] - t0 - shift,
-                      flux[np.abs(time - t0) < duration_window], flux_err[np.abs(time - t0) < duration_window])
-                     for t0, shift in shifts]
-            return tuple(np.concatenate([part[i] for part in parts]) for i in range(3))
+            parts = []
+            for t0, shift in shifts:
+                near = np.abs(time - t0) < duration_window
+                parts.append((time[near] - t0 - shift, flux[near], flux_err[near], time[near]))
+            fold_time, fold_flux, fold_err, original = (np.concatenate([part[i] for part in parts]) for i in range(4))
+            # The exposures are looked up at the times of the points, before they move onto the fold.
+            return fold_time, fold_flux, fold_err, self.exposure_at(original)
 
-        def chi2(theta_params, fold_time, fold_flux, fold_err):
-            model = ExoMoonLeastSquares.transit_model(theta_params, fold_time, self.exposure_time)
+        def chi2(theta_params, fold_time, fold_flux, fold_err, fold_exposure):
+            model = ExoMoonLeastSquares.transit_model(theta_params, fold_time, fold_exposure)
             return float(np.sum(((fold_flux - model.light_curve(theta_params)) / fold_err) ** 2))
 
         shifts = []
@@ -1468,8 +1733,8 @@ class ExoMoonLeastSquares:
             epoch_params = copy.copy(params)
             epoch_params.t0, epoch_params.u = t0, self.ab
             theta, _, status = ExoMoonLeastSquares.fit_single_t0(time[mask], flux[mask], flux_err[mask], t0,
-                                                                 duration_window, epoch_params, self.exposure_time,
-                                                                 sigma)
+                                                                 duration_window, epoch_params,
+                                                                 self.exposure_at(time[mask]), sigma)
             usable = status is None or (status["converged"] and "t0" not in status["at_bound"])
             shifts.append((t0, float(theta[0] - t0) if usable else 0.0))
         if len(shifts) < 2:
@@ -1484,7 +1749,7 @@ class ExoMoonLeastSquares:
                  float(np.clip(params.rp, fold_bounds[3][0], fold_bounds[3][1]))]
         try:
             theta, _, (a_new, inc_new), status = ExoMoonLeastSquares.fit_fold_shape(
-                *aligned, guess, fold_bounds, copy.copy(params), self.exposure_time)
+                *aligned[:3], guess, fold_bounds, copy.copy(params), aligned[3])
         except ValueError:
             return
         refitted = copy.copy(params)
@@ -1621,16 +1886,20 @@ class ExoMoonLeastSquares:
         fold_time = []
         fold_flux = []
         fold_flux_err = []
+        fold_exposure = []
         for t0 in self.bary_t0s:
             mask = np.abs(time - t0) < duration_window
             if len(time[mask]) < self.min_cadences_per_t0:
                 continue
+            if self.exposure_lookup is not None:
+                fold_exposure.append(self.exposure_at(time[mask]))
             fold_time.append(time[mask] - t0)
             fold_flux.append(flux[mask])
             if flux_err is not None:
                 fold_flux_err.append(flux_err[mask])
         if len(fold_time) > 0:
             fold_time = np.concatenate(fold_time)
+            fold_exposure = np.concatenate(fold_exposure) if fold_exposure else self.exposure_time
             fold_flux = np.concatenate(fold_flux)
             fold_flux_err = np.concatenate(fold_flux_err) if flux_err is not None else None
             # B1: fit the fold in duration, impact parameter and radius, so any transit shape is
@@ -1651,8 +1920,9 @@ class ExoMoonLeastSquares:
                 centre = np.abs(fold_time) < 0.25 * start_t14
                 if np.sum(centre) >= 10:
                     observed = 1 - np.median(fold_flux[centre])
-                    model_centre = ExoMoonLeastSquares.transit_model(start_params, fold_time[centre],
-                                                                     self.exposure_time).light_curve(start_params)
+                    model_centre = ExoMoonLeastSquares.transit_model(
+                        start_params, fold_time[centre],
+                        ExoMoonLeastSquares.exposure_subset(fold_exposure, centre)).light_curve(start_params)
                     expected = 1 - np.median(model_centre)
                     if observed > 0 and expected > 0:
                         data_rp = float(params.rp * np.sqrt(observed / expected))
@@ -1674,7 +1944,7 @@ class ExoMoonLeastSquares:
         self.fold_fit_status = None
         if not self.skip_fold_fit:
             fold_theta, _, (fold_a, fold_inc), self.fold_fit_status = ExoMoonLeastSquares.fit_fold_shape(
-                fold_time, fold_flux, fold_flux_err, fold_guess, fold_bounds, params, self.exposure_time)
+                fold_time, fold_flux, fold_flux_err, fold_guess, fold_bounds, params, fold_exposure)
             logging.info("Fold fit: T14=%.4f->%.4f d, b=%.3f->%.3f, rp=%.4f->%.4f (depth %.1f->%.1f ppm), "
                          "a/R*=%.2f->%.2f, inc=%.2f->%.2f", fold_guess[1], fold_theta[1], fold_guess[2],
                          fold_theta[2], fold_guess[3], fold_theta[3], fold_guess[3] ** 2 * 1e6,
@@ -1701,9 +1971,9 @@ class ExoMoonLeastSquares:
             if plot:
                 guess_params = copy.copy(start_params)
                 model_guess = ExoMoonLeastSquares.transit_model(guess_params, fold_time,
-                                                                self.exposure_time).light_curve(guess_params)
+                                                                fold_exposure).light_curve(guess_params)
                 model_best = ExoMoonLeastSquares.transit_model(params_best, fold_time,
-                                                               self.exposure_time).light_curve(params_best)
+                                                               fold_exposure).light_curve(params_best)
                 fig_fold, ax_fold = plt.subplots(1, 1, figsize=(10, 6))
                 ax_fold.scatter(fold_time, fold_flux, color='gray', alpha=0.5, s=5)
                 fold_order = np.argsort(fold_time)
@@ -1759,11 +2029,11 @@ class ExoMoonLeastSquares:
             if self.fit_rp_per_transit:
                 best_theta, best_model, status = ExoMoonLeastSquares.fit_single_t0_rp(
                     time[mask], flux[mask], flux_err[mask], t0, params.rp,
-                    self.planet_radius_err / star_radius_rearth, duration_window, epoch_params, self.exposure_time,
+                    self.planet_radius_err / star_radius_rearth, duration_window, epoch_params, self.exposure_at(time[mask]),
                     t0_prior_sigma)
             else:
                 best_theta, best_model, status = ExoMoonLeastSquares.fit_single_t0(
-                    time[mask], flux[mask], flux_err[mask], t0, duration_window, epoch_params, self.exposure_time,
+                    time[mask], flux[mask], flux_err[mask], t0, duration_window, epoch_params, self.exposure_at(time[mask]),
                     t0_prior_sigma)
             best_t0 = best_theta[0]
             self.ttvs.append(best_t0 - t0)
@@ -2130,9 +2400,14 @@ class ExoMoonLeastSquares:
             scenario_extra = np.vstack(scenario_extra)[sorted_time_args]
             raw_flux = scenario_flux
             planet_fit = ExoMoonLeastSquares.planet_fit(raw_flux, np.abs(scenario_time) <= half_window,
-                                                        scenario_extra, epoch_depth=self.fit_planet_epoch_depth)
+                                                        scenario_extra, epoch_depth=self.fit_planet_epoch_depth,
+                                                        flux_err=scenario_flux_err)
             scenario_flux = raw_flux - planet_fit["model"]
-        outliers_args = ExoMoonLeastSquares.remove_outliers(scenario_flux, sigma_lower=float('inf'), sigma_upper=3)
+        # Clipped in units of each point's error, so points of a noisier cadence are not clipped
+        # more often than the others; with equal errors it is the same clipping as on the flux.
+        weights = ExoMoonLeastSquares.point_weights(scenario_flux_err, len(scenario_flux))
+        outliers_args = ExoMoonLeastSquares.remove_outliers((scenario_flux - 1) * np.sqrt(weights),
+                                                            sigma_lower=float('inf'), sigma_upper=3)
         scenario_time = scenario_time[~outliers_args].flatten()
         scenario_flux = scenario_flux[~outliers_args].flatten()
         scenario_flux_err = scenario_flux_err[~outliers_args].flatten()
@@ -2140,7 +2415,8 @@ class ExoMoonLeastSquares:
             scenario_extra = scenario_extra[~outliers_args]
             raw_flux = raw_flux[~outliers_args].flatten()
             planet_fit = ExoMoonLeastSquares.planet_fit(raw_flux, np.abs(scenario_time) <= half_window,
-                                                        scenario_extra, epoch_depth=self.fit_planet_epoch_depth)
+                                                        scenario_extra, epoch_depth=self.fit_planet_epoch_depth,
+                                                        flux_err=scenario_flux_err)
             scenario_flux = raw_flux - planet_fit["model"]
         #TODO check whether to use this mean or the real scenario_flux
         #scenario_flux = ExoMoonLeastSquares.running_mean_equal_length(scenario_flux, len(scenario_flux) // 100)
@@ -2162,7 +2438,7 @@ class ExoMoonLeastSquares:
         split = self.split_scenarios(search_input, time, flux, flux_err, bary_t0s)
         if split is None or len(split[2]) == 0 or len(split[5]) < 2:
             return np.nan
-        return float(np.mean(split[5]) - np.mean(split[2]))
+        return ExoMoonLeastSquares.weighted_mean(split[5], split[6]) - ExoMoonLeastSquares.weighted_mean(split[2], split[3])
 
     def search(self, search_input, return_lc=False):
         """Search for a moon signal for a given set of input parameters.
@@ -2203,7 +2479,8 @@ class ExoMoonLeastSquares:
         inflation = 1.0
         if column is not None:
             self.last_planet_depth_correction, inflation, self.last_planet_fit = split[7], split[8], split[9]
-        depth = np.mean(oot_flux) - np.mean(it_flux)
+        depth = ExoMoonLeastSquares.weighted_mean(oot_flux, oot_flux_err) - \
+            ExoMoonLeastSquares.weighted_mean(it_flux, it_flux_err)
         t0_flux_mean_value = 1 - depth
         if len(self.models) == 0:
             residual_baseline = np.sum(((it_flux - 1) / it_flux_err) ** 2)
@@ -2224,14 +2501,15 @@ class ExoMoonLeastSquares:
             residual_calculation = residual_baseline - (residual_baseline - residual_calculation) / inflation ** 2
         #oot_noise = np.std(oot_flux)
         #oot_noise = np.sqrt(np.std(oot_flux) * (np.sqrt(np.sum(oot_flux_err ** 2) / len(oot_flux_err))))
-        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux) / inflation / self.red_noise_factor
+        model_snr = ExoMoonLeastSquares.box_snr(it_flux, oot_flux, it_flux_err, oot_flux_err) / inflation \
+            / self.red_noise_factor
         if return_lc:
             return residual_calculation, residual_baseline, residual_radius, model_snr, it_time, it_flux, oot_time, oot_flux, residual_model
         else:
             return residual_calculation, residual_baseline, residual_radius, model_snr, template_unusable
 
     @staticmethod
-    def planet_fit(flux, inside, planet_columns, epoch_depth=False):
+    def planet_fit(flux, inside, planet_columns, epoch_depth=False, flux_err=None):
         """Fit the moon window together with the planet corrections, on the stacked epochs.
 
         The stacked points are fitted with a constant, the moon window (1 inside, 0 outside), one
@@ -2257,6 +2535,9 @@ class ExoMoonLeastSquares:
             `search_planet_depth_column`).
         epoch_depth : bool, optional
             Fit one depth correction per epoch instead of one shared by all, default False.
+        flux_err : numpy.ndarray, optional
+            Flux errors. The fit is then weighted by their inverse variance, and the inflation
+            compares with the weighted difference of means; equal errors give the unweighted fit.
 
         Returns
         -------
@@ -2295,26 +2576,27 @@ class ExoMoonLeastSquares:
                 names.append(int(index))
         if not planet_terms:
             return unchanged
+        weights = ExoMoonLeastSquares.point_weights(flux_err, n_points)
         design = np.column_stack([np.ones(n_points), inside.astype(float)] + planet_terms)
-        normal = design.T @ design
+        normal = design.T @ (design * weights[:, None])
         if np.linalg.matrix_rank(normal) < design.shape[1]:
             # A term the stacked points cannot tell from the others (an epoch with only a few
             # points, for example) is dropped rather than fitted.
             keep = [0, 1]
             for column_index in range(2, design.shape[1]):
                 trial = design[:, keep + [column_index]]
-                if np.linalg.matrix_rank(trial.T @ trial) == len(keep) + 1:
+                if np.linalg.matrix_rank(trial.T @ (trial * weights[:, None])) == len(keep) + 1:
                     keep.append(column_index)
             names = [names[i - 2] for i in keep[2:]]
             design = design[:, keep]
-            normal = design.T @ design
+            normal = design.T @ (design * weights[:, None])
             if design.shape[1] == 2:
                 return unchanged
         normal_inverse = np.linalg.inv(normal)
-        coefficients = normal_inverse @ (design.T @ flux)
+        coefficients = normal_inverse @ (design.T @ (flux * weights))
         model = design[:, 2:] @ coefficients[2:]
         fitted = dict(zip(names, coefficients[2:]))
-        inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / n_inside + 1 / (n_points - n_inside))))
+        inflation = float(np.sqrt(normal_inverse[1, 1] / (1 / np.sum(weights[inside]) + 1 / np.sum(weights[~inside]))))
         shape = {name: float(fitted.pop(name)) for name in ExoMoonLeastSquares.PLANET_SHAPE_TERMS if name in fitted}
         epoch_depths = {name[1]: float(fitted.pop(name)) for name in list(fitted) if isinstance(name, tuple)}
         depth = float(np.mean(list(epoch_depths.values()))) if epoch_depths else float(fitted.pop("depth", 0.0))
@@ -2339,7 +2621,7 @@ class ExoMoonLeastSquares:
         return correction
 
     @staticmethod
-    def planet_depth_fit(it_flux, oot_flux, it_column, oot_column):
+    def planet_depth_fit(it_flux, oot_flux, it_column, oot_column, it_err=None, oot_err=None):
         """Fit the moon-window depth together with one planet depth correction, on the stacked epochs.
 
         The stacked points are fitted with a constant, the moon window (1 inside, 0 outside) and
@@ -2365,20 +2647,39 @@ class ExoMoonLeastSquares:
         column = np.concatenate((it_column, oot_column))
         columns = np.column_stack((column, np.zeros(len(column)), np.full(len(column), -1)))
         inside = np.concatenate((np.ones(n_it, dtype=bool), np.zeros(len(oot_flux), dtype=bool)))
-        fit = ExoMoonLeastSquares.planet_fit(np.concatenate((it_flux, oot_flux)), inside, columns)
+        errors = None if it_err is None or oot_err is None else np.concatenate((it_err, oot_err))
+        fit = ExoMoonLeastSquares.planet_fit(np.concatenate((it_flux, oot_flux)), inside, columns, flux_err=errors)
         return (it_flux - fit["model"][:n_it], oot_flux - fit["model"][n_it:], fit["depth"], fit["inflation"])
 
     @staticmethod
-    def box_snr(it_flux, oot_flux):
+    def weighted_mean(flux, flux_err=None):
+        """Return the inverse-variance weighted mean (the plain mean without usable errors)."""
+        weights = ExoMoonLeastSquares.point_weights(flux_err, len(flux))
+        return float(np.sum(weights * flux) / np.sum(weights))
+
+    @staticmethod
+    def box_snr(it_flux, oot_flux, it_err=None, oot_err=None):
         """Return the SNR of the moon-window depth against its surroundings, as `search` scores it.
 
-        The depth is a difference of two means, so both contribute noise. NaN without in-window
-        data or with fewer than two points outside it.
+        The depth is a difference of two inverse-variance weighted means, so both contribute noise.
+        The noise scale is measured from the scatter outside the window, sqrt(mean(w (f - mean)^2)),
+        so errors that are all off by one factor do not change the SNR; with equal errors this is
+        the plain difference of means over std(oot) sqrt(1 / n_in + 1 / n_out). A light curve that
+        mixes cadences needs the weights: a 1-minute point carries 1/30 of the information of a
+        30-minute point. Without errors the weights are equal. NaN without in-window data or with
+        fewer than two points outside it.
         """
         if len(it_flux) == 0 or len(oot_flux) < 2:
             return np.nan
-        depth = np.mean(oot_flux) - np.mean(it_flux)
-        return float(depth / (np.std(oot_flux) * np.sqrt(1 / len(it_flux) + 1 / len(oot_flux))))
+        if ExoMoonLeastSquares.usable_errors(it_err, len(it_flux)) and \
+                ExoMoonLeastSquares.usable_errors(oot_err, len(oot_flux)):
+            it_weights, oot_weights = 1 / np.asarray(it_err) ** 2, 1 / np.asarray(oot_err) ** 2
+        else:
+            it_weights, oot_weights = np.ones(len(it_flux)), np.ones(len(oot_flux))
+        oot_mean = np.sum(oot_weights * oot_flux) / np.sum(oot_weights)
+        depth = oot_mean - np.sum(it_weights * it_flux) / np.sum(it_weights)
+        scale = np.sqrt(np.mean(oot_weights * (oot_flux - oot_mean) ** 2))
+        return float(depth / (scale * np.sqrt(1 / np.sum(it_weights) + 1 / np.sum(oot_weights))))
 
     @staticmethod
     def running_mean_equal_length(data, width_signal):
@@ -2535,7 +2836,7 @@ class ExoMoonLeastSquares:
             # with r^2 for a template of the same geometry and limb darkening), refined by moving
             # to the template closest to the estimate, so impact parameter and limb darkening are
             # inverted with the template, not assumed away by r = sqrt(mean depth).
-            deficit = (1 - t0_flux_mean_value) + np.mean(it_flux) - it_flux
+            deficit = (1 - t0_flux_mean_value) + ExoMoonLeastSquares.weighted_mean(it_flux, it_flux_err) - it_flux
             weights = 1 / it_flux_err ** 2
             radius = np.sqrt(1 - t0_flux_mean_value) * star_radius / R_earth_to_R_sun
             amplitude, shape = None, None
@@ -2771,7 +3072,7 @@ class ExoMoonLeastSquares:
         params.hill_sphere_threshold = 1
         model = pandora.moon_model(params)
         injected_flux_total, injected_flux_planet, injected_flux_moon = \
-            ExoMoonLeastSquares.pandora_light_curve(model, time, self.exposure_time)
+            ExoMoonLeastSquares.pandora_light_curve(model, time, self.exposure_at(time))
         self.injected_flux_moon_pandora = injected_flux_moon
         self.injected_flux_planet_pandora = injected_flux_planet
         self.injected_moon_period = moon_period
@@ -3024,7 +3325,7 @@ class ExoMoonLeastSquares:
             if np.sum(window) < 3:
                 continue
             moon_params.t0 = recovered_t0s[i]
-            local_model = ExoMoonLeastSquares.transit_model(moon_params, self.time[window], self.exposure_time) \
+            local_model = ExoMoonLeastSquares.transit_model(moon_params, self.time[window], self.exposure_at(time[window])) \
                 .light_curve(moon_params)
             moon_flux[window] = local_model
             heading = (f"Planet transit at {t0:.3f} d, moon P = {best_period:.3f} d, alpha = {best_alpha:.2f} rad, "
@@ -3166,7 +3467,7 @@ class ExoMoonLeastSquares:
             if np.any(window):
                 params.t0 = moon_t0
                 flux[window] *= ExoMoonLeastSquares.transit_model(params, time[window],
-                                                                  self.exposure_time).light_curve(params)
+                                                                  self.exposure_at(time[window])).light_curve(params)
         return flux
 
     def measure_absorbed_fraction(self, before_planet_fit, best_input, moon_t0s):
@@ -3350,7 +3651,7 @@ class ExoMoonLeastSquares:
                 alpha, snr = refined, float(refined_snr)
         return int(period_index), period, alpha, snr
 
-    def measure_red_noise(self, time, flux, exclusion, bin_width):
+    def measure_red_noise(self, time, flux, exclusion, bin_width, flux_err=None):
         """Return the red-noise factor beta on the moon-window time scale (audit item H11).
 
         The search SNR divides the depth by the point scatter over sqrt(N), which assumes
@@ -3361,6 +3662,12 @@ class ExoMoonLeastSquares:
         sigma / sqrt(n). Adjacent differences ignore variability slower than two windows, which
         the comparison of the moon window with its surroundings also cancels.
 
+        With flux errors the bins are inverse-variance weighted means, each difference is divided
+        by its own expected noise sqrt(1 / W_k + 1 / W_k+1) for bin weights W, and the white-noise
+        scale is sqrt(mean(w (f - mean)^2)), as in `box_snr`; a bin is full when it holds at least
+        half the median bin weight. Bins of different cadences then compare on one scale. With
+        equal errors and equal bin counts this is the unweighted beta.
+
         Parameters
         ----------
         time, flux : numpy.ndarray
@@ -3370,23 +3677,41 @@ class ExoMoonLeastSquares:
         bin_width : float
             Bin width in days, the moon transit duration.
 
+        flux_err : numpy.ndarray, optional
+            Flux errors; the bins are then weighted (see above).
+
         Returns
         -------
         float or None
             beta, or None when fewer than 10 pairs of adjacent bins are available.
         """
         order = np.argsort(time)
+        weighted = ExoMoonLeastSquares.usable_errors(flux_err, len(time))
         time, flux = np.asarray(time, dtype=float)[order], np.asarray(flux, dtype=float)[order]
+        weights = 1 / np.asarray(flux_err, dtype=float)[order] ** 2 if weighted else np.ones(len(time))
         epochs = self.planet_t0 + self.planet_period * np.arange(
             np.floor((time[0] - self.planet_t0) / self.planet_period) - 1,
             np.ceil((time[-1] - self.planet_t0) / self.planet_period) + 2)
         nearest = np.min(np.abs(time[:, None] - epochs[None, :]), axis=1) if len(time) else np.array([])
         keep = (nearest >= exclusion) & np.isfinite(flux)
-        time, flux = time[keep], flux[keep]
+        time, flux, weights = time[keep], flux[keep], weights[keep]
         if len(time) < 20 or not bin_width > 0:
             return None
         index = np.floor((time - time[0]) / bin_width).astype(int)
         bins, start, counts = np.unique(index, return_index=True, return_counts=True)
+        if weighted:
+            bin_weights = np.add.reduceat(weights, start)
+            means = np.add.reduceat(weights * flux, start) / bin_weights
+            full = (counts >= 2) & (bin_weights >= 0.5 * np.median(bin_weights))
+            adjacent = full[:-1] & full[1:] & (np.diff(bins) == 1)
+            if np.count_nonzero(adjacent) < 10:
+                return None
+            expected = np.sqrt(1 / bin_weights[:-1] + 1 / bin_weights[1:])
+            mean = np.sum(weights * flux) / np.sum(weights)
+            scale = np.sqrt(np.mean(weights * (flux - mean) ** 2))
+            if not scale > 0:
+                return None
+            return float(np.std((np.diff(means) / expected)[adjacent]) / scale)
         sums = np.add.reduceat(flux, start)
         full = counts >= max(2, 0.5 * np.median(counts))
         means = sums / counts
@@ -3511,7 +3836,7 @@ class ExoMoonLeastSquares:
             window = np.abs(time - t0) < half
             if np.any(window):
                 params.t0 = t0
-                model[window] = ExoMoonLeastSquares.transit_model(params, time[window], self.exposure_time) \
+                model[window] = ExoMoonLeastSquares.transit_model(params, time[window], self.exposure_at(time[window])) \
                     .light_curve(params)
         return model
 
@@ -3523,11 +3848,11 @@ class ExoMoonLeastSquares:
         """
         max_period = self.max_moon_period(np.max(self.planet_mass_grid))
         window = self.search_input(max_period, 0.0, self.planet_mass, max_period, self.planet_impact_param)
-        time, flux = before_trim.time, before_trim.flux
+        time, flux, flux_err = before_trim.time, before_trim.flux, before_trim.flux_err
         if self.detrend_window is not None:
-            time, flux, _ = self.detrend(time, flux, None)
+            time, flux, flux_err = self.detrend(time, flux, flux_err)
         self.red_noise_measured = self.measure_red_noise(time, flux, window.half_moon_max_orbit_transit_duration,
-                                                         window.moon_transit_duration)
+                                                         window.moon_transit_duration, flux_err)
         if self.red_noise_measured is None:
             self.red_noise_factor = 1.0
             logging.warning("Red-noise factor not measured: too little data away from the transits; the SNR "
@@ -3618,8 +3943,9 @@ class ExoMoonLeastSquares:
         Returns
         -------
         tuple or None
-            (time, flux, flux_err, epochs), or None when fewer than half the epochs have a usable
-            offset.
+            (time, flux, flux_err, epochs, exposures), or None when fewer than half the epochs have
+            a usable offset. exposures holds each moved point's own exposure when the light curve
+            has exposures per point, else None.
         """
         order = np.argsort(before_trim.time)
         time, flux, flux_err = before_trim.time[order], before_trim.flux[order], before_trim.flux_err[order]
@@ -3631,16 +3957,21 @@ class ExoMoonLeastSquares:
             offset = rng.choice(valid)
             window = np.abs(time - (t0 + offset)) < trim_half_window
             piece_time = time[window] - offset
+            piece_exposure = self.exposure_at(time[window])
             params.t0 = t0
-            planet = ExoMoonLeastSquares.transit_model(params, piece_time, self.exposure_time).light_curve(params)
-            pieces.append((piece_time, flux[window] * planet, flux_err[window]))
+            planet = ExoMoonLeastSquares.transit_model(params, piece_time, piece_exposure).light_curve(params)
+            pieces.append((piece_time, flux[window] * planet, flux_err[window],
+                           np.broadcast_to(np.asarray(piece_exposure if piece_exposure is not None else 0.0,
+                                                      dtype=float), piece_time.shape)))
             epochs.append(t0)
         if len(epochs) == 0 or len(epochs) < len(self.bary_t0s) / 2:
             return None
         null_time = np.concatenate([piece[0] for piece in pieces])
         order = np.argsort(null_time)
+        exposures = np.concatenate([piece[3] for piece in pieces])[order] if self.exposure_lookup is not None \
+            else None
         return (null_time[order], np.concatenate([piece[1] for piece in pieces])[order],
-                np.concatenate([piece[2] for piece in pieces])[order], epochs)
+                np.concatenate([piece[2] for piece in pieces])[order], epochs, exposures)
 
     def null_planet_params(self):
         """Return the fitted planet model that the null searches inject and subtract."""
@@ -3658,10 +3989,14 @@ class ExoMoonLeastSquares:
         params.limb_dark = "quadratic"
         return params
 
-    def null_statistic(self, before_trim, time, flux, flux_err, epochs):
+    def null_statistic(self, before_trim, time, flux, flux_err, epochs, exposures=None):
         """Return the detection SNR of the full search on one pseudo-epoch light curve."""
         null = copy.copy(before_trim)
         null.time, null.flux, null.flux_err = time, flux, flux_err
+        if exposures is not None:
+            # The moved points keep their own exposures, looked up now at their new times.
+            order = np.argsort(time, kind="stable")
+            null.exposure_lookup = (np.asarray(time, dtype=float)[order], np.asarray(exposures, dtype=float)[order])
         null.bary_t0s = list(epochs)
         null.null_runs = 0
         null.skip_fold_fit = True
@@ -3838,8 +4173,10 @@ class ExoMoonLeastSquares:
             if split is None or len(split[2]) == 0 or len(split[5]) < 2:
                 return None, None
             inflation = split[8] if column is not None else 1.0
-            return (float(np.mean(split[5]) - np.mean(split[2])),
-                    ExoMoonLeastSquares.box_snr(split[2], split[5]) / inflation / self.red_noise_factor)
+            return (ExoMoonLeastSquares.weighted_mean(split[5], split[6])
+                    - ExoMoonLeastSquares.weighted_mean(split[2], split[3]),
+                    ExoMoonLeastSquares.box_snr(split[2], split[5], split[3], split[6]) / inflation
+                    / self.red_noise_factor)
 
         self.epoch_stats = []
         for t0 in self.bary_t0s:
@@ -3937,8 +4274,8 @@ class ExoMoonLeastSquares:
                      (with_ld(nominal, 0, step), with_ld(nominal, 0, -step), 2 * step),
                      (with_ld(nominal, 1, step), with_ld(nominal, 1, -step), 2 * step)]
             for term, (upper, lower, width) in enumerate(pairs):
-                flux_upper = ExoMoonLeastSquares.transit_model(upper, time[near], self.exposure_time).light_curve(upper)
-                flux_lower = ExoMoonLeastSquares.transit_model(lower, time[near], self.exposure_time).light_curve(lower)
+                flux_upper = ExoMoonLeastSquares.transit_model(upper, time[near], self.exposure_at(time[near])).light_curve(upper)
+                flux_lower = ExoMoonLeastSquares.transit_model(lower, time[near], self.exposure_at(time[near])).light_curve(lower)
                 columns[near, term] = (flux_upper - flux_lower) / width
         return columns if np.any(columns != 0) else None
 
@@ -3967,9 +4304,9 @@ class ExoMoonLeastSquares:
                 continue
             later, earlier = copy.copy(params), copy.copy(params)
             later.t0, earlier.t0 = mid_time + step, mid_time - step
-            flux_later = ExoMoonLeastSquares.transit_model(later, time[near], self.exposure_time).light_curve(later)
+            flux_later = ExoMoonLeastSquares.transit_model(later, time[near], self.exposure_at(time[near])).light_curve(later)
             flux_earlier = ExoMoonLeastSquares.transit_model(earlier, time[near],
-                                                             self.exposure_time).light_curve(earlier)
+                                                             self.exposure_at(time[near])).light_curve(earlier)
             column[near] = (flux_later - flux_earlier) / (2 * step)
             epoch_index[near] = index
         if not np.any(column != 0):
@@ -3999,8 +4336,8 @@ class ExoMoonLeastSquares:
             nominal.t0 = mid_time
             deeper = copy.copy(nominal)
             deeper.rp = nominal.rp * (1 + step)
-            flux = ExoMoonLeastSquares.transit_model(nominal, time[near], self.exposure_time).light_curve(nominal)
-            flux_deeper = ExoMoonLeastSquares.transit_model(deeper, time[near], self.exposure_time).light_curve(deeper)
+            flux = ExoMoonLeastSquares.transit_model(nominal, time[near], self.exposure_at(time[near])).light_curve(nominal)
+            flux_deeper = ExoMoonLeastSquares.transit_model(deeper, time[near], self.exposure_at(time[near])).light_curve(deeper)
             column[near] = (flux_deeper - flux) / (deeper.rp ** 2 - nominal.rp ** 2)
         return column if np.any(column != 0) else None
 
@@ -4411,6 +4748,54 @@ class SearchInput:
         self.half_moon_orbit_transit_duration = half_moon_orbit_transit_duration
         self.half_moon_max_orbit_transit_duration = half_moon_max_orbit_transit_duration
 
+def combine_cadence_curves(curves):
+    """Combine light curves of one star taken at different cadences, each time kept once.
+
+    A mission archive can hold the same photons at two cadences, as Kepler's short and long
+    cadence of one quarter, so appending the curves counts them twice. The curves are added from
+    the shortest cadence (each curve's median point spacing) to the longest, and a point is
+    dropped when an already added point of a shorter cadence lies within half its spacing.
+    Nothing about the mission is assumed, but each curve must hold one cadence.
+
+    Parameters
+    ----------
+    curves : list of tuple
+        (time, flux, flux_err) of each cadence; flux_err may be None in all of them.
+
+    Returns
+    -------
+    tuple
+        (time, flux, flux_err) sorted by time.
+    """
+    def cadence(curve):
+        spacing = np.diff(np.sort(np.asarray(curve[0], dtype=float)))
+        spacing = spacing[spacing > 0]
+        return float(np.median(spacing)) if len(spacing) else np.inf
+
+    kept_time, kept_flux, kept_err, dropped = [], [], [], []
+    for curve in sorted((curve for curve in curves if len(curve[0]) > 0), key=cadence):
+        time = np.asarray(curve[0], dtype=float)
+        keep = np.ones(len(time), dtype=bool)
+        if kept_time:
+            shorter = np.sort(np.concatenate(kept_time))
+            position = np.clip(np.searchsorted(shorter, time), 1, max(len(shorter) - 1, 1))
+            distance = np.minimum(np.abs(time - shorter[position - 1]), np.abs(shorter[np.minimum(position, len(shorter) - 1)] - time))
+            keep = distance > cadence(curve) / 2
+        dropped.append((cadence(curve), int(np.count_nonzero(~keep))))
+        kept_time.append(time[keep])
+        kept_flux.append(np.asarray(curve[1], dtype=float)[keep])
+        kept_err.append(None if curve[2] is None else np.asarray(curve[2], dtype=float)[keep])
+    if not kept_time:
+        return np.array([]), np.array([]), None
+    time = np.concatenate(kept_time)
+    order = np.argsort(time, kind="stable")
+    errors = None if any(err is None for err in kept_err) else np.concatenate(kept_err)[order]
+    if any(count for _, count in dropped):
+        logging.info("Cadences combined: %s", "; ".join(f"{spacing * 1440:.2f} min, {count} points dropped as "
+                                                           f"observed at a shorter cadence" for spacing, count in dropped))
+    return time[order], np.concatenate(kept_flux)[order], errors
+
+
 def catalog_csv_path(catalog):
     """Return the path of a local catalog table.
 
@@ -4752,7 +5137,10 @@ if __name__ == '__main__':
     author = 'SPOC'
     if catalog == "kois":
         author = 'Kepler'
-        cadence = [60]
+        # Short cadence where a quarter has it, long cadence elsewhere; quarters held at both are
+        # kept once, at short cadence (see drop_overlapping_cadences), and EMLS models every point
+        # with its own exposure and weight.
+        cadence = [60, 1800]
         tois_df = prepare_koi_table(tois_df)
     confirmed_tois_df = tois_df.loc[(tois_df['Disposition'] == 'CP') | (tois_df['Disposition'] == 'KP') | (tois_df['Disposition'] == 'CONFIRMED') | (tois_df['Disposition'] == 'CANDIDATE')]
     companion_tois_df = confirmed_tois_df
@@ -4859,20 +5247,31 @@ if __name__ == '__main__':
         if not os.path.exists(object_dir):
             os.mkdir(object_dir)
         try:
-            object_info = lc_builder.build_object_info(target_name=target_name, author=[author], sectors="all", file=None, cadence=cadence,
-                                          initial_mask=[], initial_transit_mask=None, star_info=None, aperture=None,
-                                          eleanor_corr_flux="pdcsap_flux", outliers_sigma=3, high_rms_enabled=False,
-                                          high_rms_threshold=1.5, high_rms_bin_hours=4, smooth_enabled=False, binning=0,
-                                          auto_detrend_enabled=False, auto_detrend_method="cosine", auto_detrend_ratio=0.25,
-                                          auto_detrend_period=None, prepare_algorithm=None, reduce_simple_oscillations=False,
-                                          oscillation_snr_threshold=4, oscillation_amplitude_threshold=0.1, oscillation_ws_scale=60,
-                                          oscillation_min_period=0.002, oscillation_max_period=0.2)
-            lc_build = lc_builder.build(object_info, object_dir)
+            # One build per cadence: lcbuilder sorts a multi-cadence curve by time, after which a
+            # quarter held at two cadences cannot be told apart (see combine_cadence_curves).
+            curves, lc_build = [], None
+            for single_cadence in cadence:
+                try:
+                    object_info = lc_builder.build_object_info(target_name=target_name, author=[author], sectors="all", file=None, cadence=[single_cadence],
+                                                  initial_mask=[], initial_transit_mask=None, star_info=None, aperture=None,
+                                                  eleanor_corr_flux="pdcsap_flux", outliers_sigma=3, high_rms_enabled=False,
+                                                  high_rms_threshold=1.5, high_rms_bin_hours=4, smooth_enabled=False, binning=0,
+                                                  auto_detrend_enabled=False, auto_detrend_method="cosine", auto_detrend_ratio=0.25,
+                                                  auto_detrend_period=None, prepare_algorithm=None, reduce_simple_oscillations=False,
+                                                  oscillation_snr_threshold=4, oscillation_amplitude_threshold=0.1, oscillation_ws_scale=60,
+                                                  oscillation_min_period=0.002, oscillation_max_period=0.2)
+                    cadence_build = lc_builder.build(object_info, object_dir)
+                except Exception as error:
+                    logging.warning(f"No {single_cadence} s light curve for {target_name}: {error}")
+                    continue
+                lc_build = lc_build or cadence_build
+                curves.append((cadence_build.lc.time.value, cadence_build.lc.flux.value,
+                               cadence_build.lc.flux_err.value))
+            if lc_build is None:
+                raise ValueError(f"No light curve for {target_name} at cadences {cadence}")
             star_mass = lc_build.star_info.mass
             star_radius = lc_build.star_info.radius
-            times = lc_build.lc.time.value
-            flux = lc_build.lc.flux.value
-            flux_err = lc_build.lc.flux_err.value
+            times, flux, flux_err = combine_cadence_curves(curves)
             ld_coeffs = lc_build.star_info.ld_coefficients
             bjd_offset = 2454833 if catalog == "kois" else 2457000
             companions_df = tois_df.loc[(tois_df['Object Id'] == target_name) & (tois_df['OI'] != row['OI'])]

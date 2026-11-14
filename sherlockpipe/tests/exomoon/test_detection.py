@@ -104,7 +104,7 @@ def test_pseudo_epochs_hold_neither_the_planet_nor_a_moon(tmp_path):
     emls.flux = marked
 
     valid = emls.null_valid_offsets(emls, trim, offsets)
-    null_time, null_flux, _, epochs = emls.null_curve(emls, np.random.default_rng(0), trim, valid)
+    null_time, null_flux, _, epochs, _ = emls.null_curve(emls, np.random.default_rng(0), trim, valid)
     planet = emls.null_planet_params()
     model = np.ones_like(null_time)
     for t0 in epochs:

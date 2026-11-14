@@ -4,6 +4,31 @@
 
 ### Added
 
+- EMLS handles light curves that mix cadences without assuming a mission. With
+  `exposure_time="auto"` each point's exposure is measured from the spacing to its nearest
+  point (5-point running median, spacings within 10 % grouped, small groups at a whole
+  multiple of a larger one taken as missing points of it); when more than one cadence holds
+  over 5 % of the points or of the time, every point is modelled with its own exposure in the
+  planet fits, the injected moons, the null pseudo-epochs and the planet correction columns
+  (`exposure_at`, `PerPointExposureModel`), and an array of per-point exposures can be passed.
+  One cadence keeps one exposure as before. The flux errors of each cadence are put on one
+  scale by their point-to-point scatter. The moon statistic (`box_snr`), the joint planet fit
+  (`planet_fit`), the window depths, the upper-outlier clipping (now in units of each point's
+  error) and the red-noise factor (bins weighted, each adjacent difference divided by its own
+  expected noise) weight each point by its inverse variance, with the noise scale still
+  measured from the scatter, so with equal errors they are the unweighted statistics. The moon
+  templates use the exposure that carries most of the weight. Reason: the user wants the
+  highest resolution, Kepler short cadence covers only some quarters, and on a mixed curve
+  the unweighted mean lets the noisier 1-minute points dominate. On a synthetic curve with
+  2, 10 and 30-minute segments (6 h box moon, 17 epochs, 300 noise realisations) the
+  unweighted SNR was 3.39, the weighted 4.88 and binning everything to 30 minutes 4.83, with
+  null scatter 0.92 in all three; one median exposure for every point left a 1.95 % planet
+  with in-transit residuals of 0.74 sigma (chi-squared +792 over 1465 points), none with the
+  per-point exposure. The KOI driver asks for Kepler 60 s and 1800 s, one build per cadence,
+  and `combine_cadence_curves` keeps a quarter held at both once, at short cadence (lcbuilder
+  sorts a multi-cadence curve by time, after which the two cannot be told apart). The CLI
+  passes `exposure_time="auto"` to EMLS when the curve mixes cadences and no
+  `--exposure_time` is given.
 - EMLS figures (`sherlockpipe/exomoon_plots.py`) replace `stats.png`, `residuals_map.png`,
   `Residuals <n>.png`, `SDE <n>.png`, `SNR <n>.png` and `T0_<t0>_moon_model.png`:
   `search_overview.png` (SNR spectrum with the FAP threshold and the sampling aliases of the

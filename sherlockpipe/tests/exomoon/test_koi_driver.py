@@ -221,7 +221,7 @@ def test_mean_planet_mass_is_close_to_the_forecast_median():
 
 
 def run_driver_on_table(tmp_path, monkeypatch, table):
-    """Run the KOI driver on a catalog table and return the light-curve builds it started."""
+    """Run the KOI driver on a catalog table and return the number of targets whose light curve it started."""
     home = tmp_path / 'home'
     (home / '.sherlockpipe').mkdir(parents=True)
     table.to_csv(home / '.sherlockpipe' / 'kois.csv', index=False)
@@ -232,7 +232,7 @@ def run_driver_on_table(tmp_path, monkeypatch, table):
     builder.return_value.build.side_effect = StopAtSearch()
     with mock.patch('lcbuilder.lcbuilder_class.LcBuilder', builder), mock.patch('logging.exception'):
         runpy.run_module('sherlockpipe.exomoon', run_name='__main__')
-    return builder.return_value.build.call_count
+    return len({call.kwargs['target_name'] for call in builder.return_value.build_object_info.call_args_list})
 
 
 def test_driver_drops_a_target_with_a_close_faint_companion(tmp_path, monkeypatch):
