@@ -140,7 +140,8 @@ def test_red_noise_of_white_noise_with_mixed_cadences_is_one():
     time, exposures = segments([(1, 30), (30, 60), (1, 30)], gap=1.0)
     sigma = np.where(exposures < 2 * MINUTE, 5.5e-4, 1e-4)
     flux = 1 + np.random.default_rng(5).normal(0, sigma)
-    owner = types.SimpleNamespace(planet_t0=0.5, planet_period=1000.0)
+    owner = types.SimpleNamespace(planet_t0=0.5, planet_period=1000.0,
+                                  usable_errors=ExoMoonLeastSquares.usable_errors)
 
     beta = ExoMoonLeastSquares.measure_red_noise(owner, time, flux, 0.1, 0.25, sigma)
 

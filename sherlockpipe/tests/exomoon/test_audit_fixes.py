@@ -78,7 +78,7 @@ class CapturePool:
 
 def run_to_search(emls):
     """Run all the setup of EMLS and return the search inputs it builds."""
-    with mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
+    with mock.patch.object(exomoon.search, 'Pool', CapturePool), pytest.raises(StopAtSearch):
         emls.run()
     return CapturePool.inputs
 
@@ -270,7 +270,7 @@ def test_injection_does_not_fit_the_planet(tmp_path):
         return original(self, *args, **kwargs)
 
     with mock.patch.object(ExoMoonLeastSquares, 'subtract_planet_transit', spy), \
-            mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
+            mock.patch.object(exomoon.search, 'Pool', CapturePool), pytest.raises(StopAtSearch):
         emls.run(inject_params=MOON)
 
     assert len(calls) == 1

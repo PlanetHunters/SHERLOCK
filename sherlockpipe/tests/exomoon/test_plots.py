@@ -5,7 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 import numpy as np
 
-from sherlockpipe import exomoon_plots
+from sherlockpipe.exomoon import plots as exomoon_plots
 
 
 def test_spectrum_peaks_skip_neighbours_of_the_same_peak_and_the_selected_period():

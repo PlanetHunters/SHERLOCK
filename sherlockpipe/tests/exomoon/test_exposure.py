@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 import pandas as pd
 
-from sherlockpipe import exomoon_run
+from sherlockpipe.exomoon import run as exomoon_run
 from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquares
 from sherlockpipe.tests.exomoon.test_audit_fixes import LD, PERIOD, SMA, run_to_search, system
 from sherlockpipe.tests.exomoon.test_emls_run import guard_directory, write_lc

@@ -88,7 +88,7 @@ def test_toi_row_keeps_its_previous_setup():
 
 
 def test_catalog_mass_is_the_emls_command_forecast_not_r_to_the_1_5():
-    from sherlockpipe.exomoon_run import GIANT_RADIUS, JUPITER_MASS, guess_planet_mass
+    from sherlockpipe.exomoon.run import GIANT_RADIUS, JUPITER_MASS, guess_planet_mass
 
     # A giant: R^1.5 gave 37 M_earth for 11.2 R_earth, about 8 times too light for its Hill sphere.
     assert exomoon.catalog_planet_mass(11.2) == pytest.approx(JUPITER_MASS)
@@ -102,7 +102,7 @@ def test_catalog_mass_is_the_emls_command_forecast_not_r_to_the_1_5():
 def test_koi_table_mass_comes_from_the_forecast():
     row = koi_row(**{'Planet Radius (R_Earth)': 11.2})
 
-    from sherlockpipe.exomoon_run import JUPITER_MASS
+    from sherlockpipe.exomoon.run import JUPITER_MASS
     # The table leaves the mass empty; the driver forecasts it only for the rows it keeps.
     assert np.isnan(row['Predicted Mass (M_Earth)'])
     assert exomoon.catalog_planet_params(row, 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)['planet_mass'] == \
@@ -151,7 +151,7 @@ def test_koi_driver_reaches_the_search(tmp_path, monkeypatch):
     record = lambda *args, **kwargs: caught.append(sys.exc_info()[1])
 
     with mock.patch('lcbuilder.lcbuilder_class.LcBuilder', builder), \
-            mock.patch('multiprocessing.Pool', CapturePool), \
+            mock.patch('sherlockpipe.exomoon.search.Pool', CapturePool), \
             mock.patch('logging.exception', side_effect=record):
         runpy.run_module('sherlockpipe.exomoon', run_name='__main__')
 
@@ -163,7 +163,7 @@ def test_koi_driver_reaches_the_search(tmp_path, monkeypatch):
 
 def test_max_surviving_moon_mass_is_barnes_and_obrien_eq_8(monkeypatch):
     """Independent check against the audit's integration of da/dt (f = 0.36, k2 = 0.51, Q = 1e5)."""
-    monkeypatch.setattr(exomoon, 'planet_k2_over_q', lambda radius: 0.51 / 1e5)
+    monkeypatch.setattr(exomoon.catalog, 'planet_k2_over_q', lambda radius: 0.51 / 1e5)
     monkeypatch.setattr(ExoMoonLeastSquares, 'max_moon_semimajor_axis', staticmethod(
         lambda star_mass, planet_mass, a, ecc=0.0: 0.36 * ExoMoonLeastSquares.compute_hill_radius(star_mass,
                                                                                                     planet_mass, a)))
@@ -214,7 +214,7 @@ def test_catalog_radius_range_stops_at_the_largest_surviving_moon():
 def test_mean_planet_mass_is_close_to_the_forecast_median():
     for radius in (1.0, 2.0, 4.0, 6.0):
         assert exomoon.mean_planet_mass(radius) == pytest.approx(exomoon.catalog_planet_mass(radius), rel=0.15)
-    from sherlockpipe.exomoon_run import JUPITER_MASS
+    from sherlockpipe.exomoon.run import JUPITER_MASS
     assert exomoon.mean_planet_mass(11.2) == JUPITER_MASS
     assert exomoon.moon_radius_from_mass(exomoon.mean_planet_mass(3.0)) == pytest.approx(3.0)
     assert np.isnan(exomoon.mean_planet_mass(np.nan))

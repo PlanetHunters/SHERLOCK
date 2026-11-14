@@ -12,7 +12,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from sherlockpipe import exomoon, exomoon_run
+from sherlockpipe import exomoon
+from sherlockpipe.exomoon import run as exomoon_run
 from sherlockpipe.exomoon import AU_TO_RSUN, ExoMoonLeastSquares, R_earth_to_R_sun
 from sherlockpipe.tests.exomoon.test_audit_fixes import CapturePool, StopAtSearch
 from sherlockpipe.tests.exomoon import test_search_integrity as guard
@@ -341,7 +342,7 @@ def test_fold_fit_recovers_the_impact_parameter_from_a_short_search_duration(tmp
     write_star(tmp_path, ld=guard.LIMB_DARKENING)
     write_lc(tmp_path / 'lc_1.csv', time, flux, np.full(len(time), 1e-4))
 
-    with mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
+    with mock.patch.object(exomoon.search, 'Pool', CapturePool), pytest.raises(StopAtSearch):
         exomoon_run.run_emls(str(tmp_path), 1, planet_mass=300.0, period_grid_size=40, radius_grid_size=4, cpus=1)
 
     log = (tmp_path / 'emls_1.partial' / 'emls.log').read_text().splitlines()
@@ -434,7 +435,7 @@ def test_sparse_epoch_is_reported_with_its_point_count(tmp_path):
         closest = in_epoch[np.argsort(np.abs(lc['time'].to_numpy()[in_epoch] - t0s[3]))]
         lc.drop(index=closest[5:]).to_csv(tmp_path / name, index=False)
 
-    with mock.patch.object(exomoon, 'Pool', CapturePool), pytest.raises(StopAtSearch):
+    with mock.patch.object(exomoon.search, 'Pool', CapturePool), pytest.raises(StopAtSearch):
         exomoon_run.run_emls(str(tmp_path), 1, mask=[2], planet_mass=300.0, period_grid_size=40, radius_grid_size=4,
                              cpus=1)
 

@@ -4,7 +4,7 @@ Example: ``python -m sherlockpipe.emls --candidate 3 --mask_candidates 1 2 4``
 """
 from argparse import ArgumentParser
 
-from sherlockpipe.exomoon_run import run_emls
+from sherlockpipe.exomoon.run import run_emls
 
 
 def parse_args(argv=None):

@@ -238,7 +238,7 @@ def test_nan_snr_in_the_first_alpha_bin_keeps_the_period(tmp_path, caplog):
             return result[:3] + (np.nan,) + result[4:]
         return result
 
-    with mock.patch.object(exomoon, 'Pool', SerialPool), \
+    with mock.patch.object(exomoon.search, 'Pool', SerialPool), \
             mock.patch.object(ExoMoonLeastSquares, 'search', search_with_empty_first_bin), \
             caplog.at_level('WARNING'):
         emls.run()

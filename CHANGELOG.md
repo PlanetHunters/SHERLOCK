@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Changed
+
+- `sherlockpipe/exomoon.py` (5 659 lines) is now the package `sherlockpipe/exomoon/`, one module per
+  stage: `constants`, `exposure` (per-point exposures, averaged models, weights), `orbits` (moon
+  dynamics, limits, hypotheses), `planet` (fold fit, per-epoch times, subtraction, derivatives),
+  `joint_fit` (moon window with the planet corrections, numba kernels), `stacking` (epoch stacking
+  and clipping), `statistics` (SNR, template residuals, red noise, SDE), `templates`, `detrending`,
+  `injection` (Pandora, absorbed fraction, recovery), `nulls` (pseudo-epochs, FAP), `search`
+  (`ExoMoonLeastSquares`, which inherits one mixin class per stage module), `catalog` (KOI/TOI
+  parameters, dynamical filters, cadence combination), `__main__` (the catalog driver, `python -m
+  sherlockpipe.exomoon`), `plots` (was `exomoon_plots.py`) and `run` (was `exomoon_run.py`).
+  The code moved verbatim; references to `ExoMoonLeastSquares` inside moved methods became
+  `self.` or, for static methods, `cls.` (they are classmethods now), so patches on the class still
+  apply. `from sherlockpipe.exomoon import ...` keeps working through the package's re-exports. A
+  Pandora injection on the KOI-125.01 mixed-cadence curve gives the same SNR (30.0644855136334) as
+  before the split.
+- Fixed: since the per-point exposures (6ec025b) the per-epoch figures (`epochs/T0_<t0>.png`) and
+  the figures after them were not written: the moon model looked up the exposure of `time`, the
+  `time` module, instead of the curve's times, and the error only reached a warning. Found by
+  `regression_tests/test_emls_entrypoint.py`, which was not in the runs of `tests/exomoon`.
+
 ### Added
 
 - EMLS grid search: every hypothesis stacks the same points (the widest moon-orbit window

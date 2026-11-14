@@ -11,7 +11,8 @@ import pandas as pd
 from lcbuilder.helper import LcbuilderHelper
 
 from sherlockpipe import __version__
-from sherlockpipe.exomoon import AU_TO_RSUN, R_earth_to_R_sun, ExoMoonLeastSquares
+from sherlockpipe.exomoon.constants import AU_TO_RSUN, R_earth_to_R_sun
+from sherlockpipe.exomoon.search import ExoMoonLeastSquares
 from sherlockpipe.system_stability.mr_forecast import MrForecast
 
 MASK_DURATION_FACTOR = 2
