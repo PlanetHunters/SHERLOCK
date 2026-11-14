@@ -4,6 +4,15 @@
 
 ### Changed
 
+- EMLS figures are paper ready: one style for every figure (`plots.PAPER_RC`, `plots.paper_figure`) with
+  20-22 pt axis labels and tick labels, 19 pt titles, 16 pt legends, longer and thicker ticks, thicker lines
+  and markers, and the Okabe & Ito colour-blind safe palette (EMLS model vermillion, injected moon blue,
+  planet bluish green, nulls reddish purple; checked under simulated protanopia, deuteranopia and
+  tritanopia). Colour is never the only cue: each element also has its own line style or marker. Legends
+  go below the figure (`plots.legend_below`) so they never cover data, faint scatter points are shown at
+  full opacity in the legend, and long titles and labels are wrapped. The planet-stage figures
+  (`planet_figures.py`) use the same style, with times in hours from mid-transit, fluxes in ppm and
+  timing offsets in minutes against the epoch time.
 - EMLS catalog driver (`python -m sherlockpipe.exomoon`) now runs the set-up the validation used and the
   paper describes: no wotan pre-flattening (5 T14), EMLS detrends the raw curve itself with a 3 T14
   biweight and the 'auto' mask (`detrend_window`, `detrend_mask`), runs 100 pseudo-epoch nulls

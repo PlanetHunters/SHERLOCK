@@ -1,7 +1,13 @@
-"""Diagnostic figures of the planet stage: the fold fit, each subtracted or masked epoch, and the TTVs."""
+"""Diagnostic figures of the planet stage: the fold fit, each subtracted or masked epoch, and the TTVs.
+
+They use the paper style and colour code of `sherlockpipe.exomoon.plots`.
+"""
 import os
 import matplotlib.pyplot as plt
 import numpy as np
+from sherlockpipe.exomoon.plots import (ALIAS_STYLE, BIN_COLOR, DATA_COLOR, INJECTED_COLOR, INJECTED_STYLE,
+                                        MODEL_COLOR, MODEL_STYLE, PLANET_COLOR, REFERENCE_COLOR, _save, _style,
+                                        legend_below, paper_figure, wrap)
 
 
 class PlanetFigures:
@@ -13,87 +19,105 @@ class PlanetFigures:
         os.makedirs(view_dir, exist_ok=True)
         return view_dir
 
+    @paper_figure
     def plot_fold_fit(self, fold, start_params, params_best, guess, theta):
         """Plot the fold with the input-shape model and the fitted one (fold_fit.png)."""
         model_guess = self.transit_model(start_params, fold.time, fold.exposure).light_curve(start_params)
         model_best = self.transit_model(params_best, fold.time, fold.exposure).light_curve(params_best)
-        fig_fold, ax_fold = plt.subplots(1, 1, figsize=(10, 6))
-        ax_fold.scatter(fold.time, fold.flux, color='gray', alpha=0.5, s=5)
-        fold_order = np.argsort(fold.time)
-        ax_fold.plot(fold.time[fold_order], model_guess[fold_order], 'b--', alpha=0.7, label='Initial guess')
-        ax_fold.plot(fold.time[fold_order], model_best[fold_order], 'r-', alpha=1, label='Fold fit')
-        ax_fold.set_title(f"Phase-folded fit: T14={guess[1]:.4f}->{theta[1]:.4f} d, "
-                          f"b={guess[2]:.2f}->{theta[2]:.2f}, "
-                          f"depth={guess[3]**2*1e6:.0f}->{theta[3]**2*1e6:.0f} ppm")
-        ax_fold.set_xlabel('Time from T0 (days)')
-        ax_fold.set_ylabel('Flux')
-        ax_fold.legend()
-        plt.savefig(os.path.join(self.object_dir, "fold_fit.png"))
-        plt.close(fig_fold)
+        fig, ax = plt.subplots(figsize=(10, 6.5))
+        ax.scatter(fold.time * 24, (fold.flux - 1) * 1e6, color=DATA_COLOR, alpha=0.35, s=6, linewidths=0,
+                   rasterized=True, label="Folded flux")
+        order = np.argsort(fold.time)
+        ax.plot(fold.time[order] * 24, (model_guess[order] - 1) * 1e6, color=INJECTED_COLOR, linestyle=INJECTED_STYLE,
+                linewidth=2.5, label="Input shape")
+        ax.plot(fold.time[order] * 24, (model_best[order] - 1) * 1e6, color=MODEL_COLOR, linestyle=MODEL_STYLE,
+                linewidth=3, label="Fold fit")
+        ax.set_title(wrap(f"Fold fit: T14 {guess[1] * 24:.2f} -> {theta[1] * 24:.2f} h, b {guess[2]:.2f} -> "
+                          f"{theta[2]:.2f}, depth {guess[3] ** 2 * 1e6:.0f} -> {theta[3] ** 2 * 1e6:.0f} ppm"))
+        ax.set_xlabel("Time from mid-transit (h)")
+        ax.set_ylabel("Relative flux (ppm)")
+        _style(ax)
+        fig.tight_layout()
+        legend_below(fig, ax)
+        _save(fig, os.path.join(self.object_dir, "fold_fit.png"))
 
+    @paper_figure
     def plot_subtracted_epoch(self, epoch_time, epoch_flux, model, residual, best_t0, rejected):
         """Plot one epoch with its planet model and after the subtraction (t0s_view/T0_*_sub.png,
         or *_rejected.png for a dropped epoch).
         """
         suffix = "_rejected" if rejected else "_sub"
-        fig_transit, axs = plt.subplots(3, 1, figsize=(16, 10))
-        axs[0].scatter(epoch_time, epoch_flux, color='gray', alpha=1, rasterized=True, label="Flux")
-        axs[0].plot(epoch_time, model)
-        axs[0].set_title("Subtracting transit in t0 " + str(best_t0))
-        axs[0].set_xlabel('Time')
-        axs[0].set_ylabel('Flux')
-        axs[1].scatter(epoch_time, residual, color='gray', alpha=1, rasterized=True, label="Flux")
-        axs[1].set_title("Subtracted transit in t0 " + str(best_t0))
-        axs[1].set_xlabel('Time')
-        axs[1].set_ylabel('Flux')
-        plt.savefig(os.path.join(self.epoch_view_dir(), "T0_" + str(round(best_t0, 3)) + suffix + ".png"))
-        plt.close()
+        hours = (epoch_time - best_t0) * 24
+        fig, axs = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
+        axs[0].scatter(hours, (epoch_flux - 1) * 1e6, color=DATA_COLOR, s=10, linewidths=0, rasterized=True,
+                       label="Flux")
+        axs[0].plot(hours, (model - 1) * 1e6, color=MODEL_COLOR, linestyle=MODEL_STYLE, linewidth=3,
+                    label="Planet model")
+        axs[0].set_title(wrap(f"Epoch at {best_t0:.3f} d{' (rejected)' if rejected else ''}: planet model"))
+        axs[0].set_ylabel("Relative flux (ppm)")
+        axs[1].scatter(hours, (residual - 1) * 1e6, color=BIN_COLOR, s=10, linewidths=0, rasterized=True)
+        axs[1].axhline(0, color=REFERENCE_COLOR, linewidth=1)
+        axs[1].set_title("After the subtraction")
+        axs[1].set_xlabel("Time from the fitted mid-transit (h)")
+        axs[1].set_ylabel("Residual (ppm)")
+        for ax in axs:
+            _style(ax)
+        fig.tight_layout()
+        legend_below(fig, axs)
+        _save(fig, os.path.join(self.epoch_view_dir(), "T0_" + str(round(best_t0, 3)) + suffix + ".png"))
 
+    @paper_figure
     def plot_masked_epoch(self, epoch_time, epoch_flux, model, centre, half_mask):
         """Plot one epoch before and after its transit is masked (t0s_view/T0_*_mask.png)."""
-        fig_t, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-        ax1.scatter(epoch_time, epoch_flux, color='gray', alpha=0.7, s=10)
-        ax1.plot(epoch_time, model, color='orange', alpha=1, label='Planet model')
-        ax1.axvspan(centre - half_mask, centre + half_mask, color='red', alpha=0.15, label='Masked region')
-        ax1.axvline(centre, color='red', linestyle='--')
-        ax1.set_title(f"T0={centre:.4f} (before mask)")
-        ax1.set_ylabel('Flux')
-        ax1.legend()
+        hours = (epoch_time - centre) * 24
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
+        ax1.scatter(hours, (epoch_flux - 1) * 1e6, color=DATA_COLOR, s=10, linewidths=0, rasterized=True,
+                    label="Flux")
+        ax1.plot(hours, (model - 1) * 1e6, color=MODEL_COLOR, linestyle=MODEL_STYLE, linewidth=3, label='Planet model')
+        ax1.axvspan(-half_mask * 24, half_mask * 24, facecolor=PLANET_COLOR, alpha=0.15, edgecolor=PLANET_COLOR,
+                    linewidth=1.5, label='Masked region')
+        ax1.axvline(0, color=PLANET_COLOR, linestyle=ALIAS_STYLE, linewidth=2)
+        ax1.set_title(wrap(f"Epoch at {centre:.3f} d, before the mask"))
+        ax1.set_ylabel("Relative flux (ppm)")
         kept = np.abs(epoch_time - centre) > half_mask
         if np.any(kept):
-            ax2.scatter(epoch_time[kept], epoch_flux[kept], color='gray', alpha=0.7, s=10, label='After mask')
-        ax2.set_title(f"T0={centre:.4f} (after mask)")
-        ax2.set_xlabel('Time')
-        ax2.set_ylabel('Flux')
-        ax2.legend()
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.epoch_view_dir(), "T0_" + str(round(centre, 3)) + "_mask.png"))
-        plt.close()
+            ax2.scatter(hours[kept], (epoch_flux[kept] - 1) * 1e6, color=BIN_COLOR, s=10, linewidths=0,
+                        rasterized=True)
+        ax2.set_title("After the mask")
+        ax2.set_xlabel("Time from the mask centre (h)")
+        ax2.set_ylabel("Relative flux (ppm)")
+        for ax in (ax1, ax2):
+            _style(ax)
+        fig.tight_layout()
+        legend_below(fig, (ax1, ax2))
+        _save(fig, os.path.join(self.epoch_view_dir(), "T0_" + str(round(centre, 3)) + "_mask.png"))
 
+    @paper_figure
     def plot_ttvs(self):
         """Plot the fitted mid-time offsets of the kept epochs (ttvs.png)."""
         if not self.object_dir:
             return
-        plt.figure(figsize=(10, 6))
-        plt.scatter(range(len(self.ttvs)), self.ttvs, marker='o')
-        plt.xticks(range(len(self.ttvs)), [f"{t0:.4f}" for t0 in self.bary_t0s], rotation=45)
-        plt.xlabel("Barycentric T0 Values")
-        plt.ylabel("TTV (days)")
-        plt.title("Transit Timing Variations")
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.object_dir, "ttvs.png"))
-        plt.close()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(self.bary_t0s, np.asarray(self.ttvs) * 24 * 60, 'o', color=BIN_COLOR, markersize=8)
+        ax.axhline(0, color=REFERENCE_COLOR, linewidth=1)
+        ax.set_xlabel("Planet mid-transit time (d)")
+        ax.set_ylabel("Timing offset (min)")
+        ax.set_title("Fitted epoch times against the ephemeris")
+        _style(ax)
+        fig.tight_layout()
+        _save(fig, os.path.join(self.object_dir, "ttvs.png"))
 
+    @paper_figure
     def plot_ttv_periodogram(self, periods, power):
         """Plot the Lomb-Scargle periodogram of the TTVs (ttv_periodogram.png)."""
         if not self.object_dir:
             return
-        fig_ttv_per, ax_ttv = plt.subplots(1, 1, figsize=(10, 6))
-        ax_ttv.plot(periods, power, color='gray')
-        ax_ttv.set_xlabel("Period (days)")
-        ax_ttv.set_ylabel("Lomb-Scargle Power")
-        ax_ttv.set_title("TTV Periodogram")
-        ax_ttv.set_xscale('log')
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.object_dir, "ttv_periodogram.png"))
-        plt.close()
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(periods, power, color=REFERENCE_COLOR, linewidth=2)
+        ax.set_xlabel("Period (d)")
+        ax.set_ylabel("Lomb-Scargle power")
+        ax.set_title("Periodogram of the timing offsets")
+        ax.set_xscale('log')
+        _style(ax)
+        fig.tight_layout()
+        _save(fig, os.path.join(self.object_dir, "ttv_periodogram.png"))

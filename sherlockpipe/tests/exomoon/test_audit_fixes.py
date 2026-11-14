@@ -503,9 +503,9 @@ def test_sde_plot_title_shows_the_sde(tmp_path):
     with mock.patch.object(matplotlib.axes.Axes, 'set_title', spy):
         emls.run()
 
-    first = next(t for t in titles if 'peak SDE of the residual spectrum' in t)
-    assert float(first.split('peak SDE of the residual spectrum ')[1]) == pytest.approx(emls.max_sde, abs=0.005)
-    assert float(first.split('at the selected period ')[1].split(',')[0]) == pytest.approx(emls.sde, abs=0.005)
+    first = next(t for t in titles if 'residual peak' in t)
+    assert float(first.split('residual peak ')[1].rstrip(')')) == pytest.approx(emls.max_sde, abs=0.005)
+    assert float(first.split('(')[1].split(' at the selected period')[0]) == pytest.approx(emls.sde, abs=0.005)
 
 
 def test_late_transit_has_positive_timing_variation(tmp_path):
