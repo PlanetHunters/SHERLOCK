@@ -18,6 +18,21 @@
   apply. `from sherlockpipe.exomoon import ...` keeps working through the package's re-exports. A
   Pandora injection on the KOI-125.01 mixed-cadence curve gives the same SNR (30.0644855136334) as
   before the split.
+- EMLS planet stage split further: `transit_fits` (`TransitFits`: single-epoch and fold fits,
+  geometry from the shape, contact and ingress durations), `planet_derivatives`
+  (`PlanetDerivatives`: depth, mid-time and shape derivatives for the joint fit) and
+  `planet_figures` (`PlanetFigures`: fold, per-epoch and TTV figures); `PlanetModel` inherits
+  them. `subtract_planet_transit` (355 lines) is now a short sequence of named steps:
+  `input_transit_params`, `fold_epochs` (returns a `Fold` named tuple), `fold_fit_start` (B1/B2),
+  `fit_planet_fold` (B4), `epoch_t0_priors` (C1), `realign_fold` (B6), `fit_epoch`,
+  `epoch_fit_usable` (C4), `check_subtracted_epoch` (D1 and coverage; the coverage check was
+  written twice), `masked_epoch_centre` (D4), `drop_rejected_epochs` and `ttv_diagnostics`. On
+  KOI-125.01 and KOI-189.01 (mixed cadence) and Kepler-1514 b, in subtract and mask mode, with and
+  without a per-epoch radius, the subtracted curves, epochs, TTVs, fitted geometry, epoch flags
+  and figure lists are identical to before, as are the logs. Two behaviour changes in cases that
+  failed before: with the fold fit on and no epoch with `min_cadences_per_t0` points it raises
+  `NoUsableEpochsError` instead of a `NameError`, and without `object_dir` the TTV periodogram is
+  skipped instead of raising.
 - Fixed: since the per-point exposures (6ec025b) the per-epoch figures (`epochs/T0_<t0>.png`) and
   the figures after them were not written: the moon model looked up the exposure of `time`, the
   `time` module, instead of the curve's times, and the error only reached a warning. Found by

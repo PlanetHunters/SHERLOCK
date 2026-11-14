@@ -6,6 +6,9 @@ them. Everything is re-exported here, so ``from sherlockpipe.exomoon import ...`
 from sherlockpipe.exomoon.constants import *  # noqa: F401,F403
 from sherlockpipe.exomoon.exposure import *  # noqa: F401,F403
 from sherlockpipe.exomoon.orbits import *  # noqa: F401,F403
+from sherlockpipe.exomoon.transit_fits import *  # noqa: F401,F403
+from sherlockpipe.exomoon.planet_derivatives import *  # noqa: F401,F403
+from sherlockpipe.exomoon.planet_figures import *  # noqa: F401,F403
 from sherlockpipe.exomoon.planet import *  # noqa: F401,F403
 from sherlockpipe.exomoon.joint_fit import *  # noqa: F401,F403
 from sherlockpipe.exomoon.stacking import *  # noqa: F401,F403

@@ -2,21 +2,25 @@
 subtraction and the derivatives of the subtracted model that the joint fit corrects.
 """
 import copy
+from collections import namedtuple
 import logging
-import os
 import astropy.units as u
 from lcbuilder.helper import LcbuilderHelper
-from scipy.optimize import least_squares, minimize
 import batman
 import numpy as np
 from scipy import stats
 from scipy.signal import lombscargle
-import matplotlib.pyplot as plt
 from sherlockpipe.exomoon.constants import AU_TO_RSUN, MIN_RP_OVER_RSTAR, M_earth_to_M_sun, NoUsableEpochsError
 from sherlockpipe.exomoon.orbits import forecast_moon_mass
+from sherlockpipe.exomoon.planet_derivatives import PlanetDerivatives
+from sherlockpipe.exomoon.planet_figures import PlanetFigures
+from sherlockpipe.exomoon.transit_fits import TransitFits
+
+Fold = namedtuple('Fold', ['time', 'flux', 'flux_err', 'exposure'])
+"""The epochs of the planet folded on t0: times from t0, fluxes, errors (or None) and exposures."""
 
 
-class PlanetModel:
+class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
     """The planet stage: fold fit of the transit shape, per-epoch mid-times, the planet
     subtraction and the derivatives of the subtracted model that the joint fit corrects.
     """
@@ -31,255 +35,6 @@ class PlanetModel:
         logging.log(level, "Fitted T14 %.4f d against the input %.4f d (%+.1f%%)%s", self.planet_duration,
                     self.catalog_planet_duration, 100 * difference,
                     "; the moon offsets use the input duration, so check it" if level == logging.WARNING else "")
-
-    @staticmethod
-    def fit_status(result, bounds, names, free_edges=(), rtol=1e-3):
-        """Summarise an optimizer result: convergence, a finite cost, and the parameters left at a bound.
-
-        Parameters
-        ----------
-        result : scipy.optimize.OptimizeResult
-            Optimizer result.
-        bounds : list of (float, float)
-            Bounds of each parameter.
-        names : list of str
-            Name of each parameter.
-        free_edges : iterable of (str, str), optional
-            (name, 'lower' or 'upper') edges that are physical values rather than limits of the fit,
-            such as a central transit at b = 0. They are not reported.
-        rtol : float, optional
-            Distance to a bound, as a fraction of the bound width, that counts as at the bound.
-
-        Returns
-        -------
-        dict
-            {"converged": bool, "at_bound": [name, ...]}.
-        """
-        at_bound = []
-        for name, value, (lower, upper) in zip(names, np.atleast_1d(result.x), bounds):
-            width = upper - lower
-            if width <= 0:
-                continue
-            if value - lower <= rtol * width and (name, 'lower') not in free_edges:
-                at_bound.append(name)
-            elif upper - value <= rtol * width and (name, 'upper') not in free_edges:
-                at_bound.append(name)
-        return {"converged": bool(result.success) and bool(np.isfinite(result.fun)), "at_bound": at_bound}
-
-    @classmethod
-    def fit_single_t0(cls, time, flux, flux_err, t0_guess, duration_window, transit_params, exposure_time=None,
-                      t0_prior_sigma=None):
-        """Fit only t0 for a single transit. a, inc, rp must be pre-set on transit_params.
-
-        t0 may move half a transit duration (a quarter of duration_window) from t0_guess. With
-        t0_prior_sigma, a Gaussian prior centred on t0_guess keeps low-SNR epochs on the ephemeris.
-
-        Returns (best_theta, best_model, status) where best_theta is [t0] and status comes from
-        `fit_status`; with no data, status is None.
-        """
-        bounds = [(t0_guess - duration_window / 4, t0_guess + duration_window / 4)]
-
-        def model(t0_val, t):
-            transit_params.t0 = t0_val
-            m = cls.transit_model(transit_params, t, exposure_time)
-            return m.light_curve(transit_params)
-
-        def cost(theta):
-            m = model(theta[0], time)
-            prior = 0.0 if t0_prior_sigma is None else 0.5 * ((theta[0] - t0_guess) / t0_prior_sigma) ** 2
-            return 0.5 * np.sum(((flux - m) / flux_err) ** 2) + prior
-
-        status = None
-        if len(time) > 0:
-            res = minimize(cost, [t0_guess], method='Powell', bounds=bounds)
-            best_theta = res.x
-            status = cls.fit_status(res, bounds, ['t0'])
-        else:
-            best_theta = np.array([t0_guess])
-        best_model = model(float(best_theta[0]), time)
-        return best_theta, best_model, status
-
-    @classmethod
-    def fit_single_t0_rp(cls, time, flux, flux_err, t0_guess, rp_guess, rp_err,
-                         duration_window, transit_params, exposure_time=None, t0_prior_sigma=None):
-        """Fit t0 and rp for a single transit. a, inc pre-set on transit_params.
-
-        t0 has the same bound and prior as in `fit_single_t0`.
-
-        Returns (best_theta, best_model, status) where best_theta is [t0, rp].
-        """
-        bounds = [(t0_guess - duration_window / 4, t0_guess + duration_window / 4),
-                  (max(rp_guess - rp_err, 1e-5), rp_guess + rp_err)]
-
-        def model(theta, t):
-            transit_params.t0 = theta[0]
-            transit_params.rp = theta[1]
-            m = cls.transit_model(transit_params, t, exposure_time)
-            return m.light_curve(transit_params)
-
-        def cost(theta):
-            m = model(theta, time)
-            prior = 0.0 if t0_prior_sigma is None else 0.5 * ((theta[0] - t0_guess) / t0_prior_sigma) ** 2
-            return 0.5 * np.sum(((flux - m) / flux_err) ** 2) + prior
-
-        status = None
-        if len(time) > 0:
-            res = minimize(cost, [t0_guess, rp_guess], method='Powell', bounds=bounds)
-            best_theta = res.x
-            status = cls.fit_status(res, bounds, ['t0', 'rp'])
-        else:
-            best_theta = np.array([t0_guess, rp_guess])
-        best_model = model(best_theta, time)
-        return best_theta, best_model, status
-
-    @staticmethod
-    def geometry_from_shape(t14, impact_param, rp, period, ecc, arg_periastron):
-        """Return the orbit (a/R*, inclination) that gives a transit duration and impact parameter.
-
-        Inverts Winn (2010, Eqs. 7 and 14-16): b = a cos i (1 - e^2) / (1 + e sin w) and
-        T14 = P / pi * arcsin(sqrt((1 + k)^2 - b^2) / (a sin i)) * sqrt(1 - e^2) / (1 + e sin w).
-
-        Parameters
-        ----------
-        t14 : float
-            First-to-fourth contact duration in days.
-        impact_param : float
-            Impact parameter in stellar radii.
-        rp : float
-            Planet radius in stellar radii.
-        period : float
-            Orbital period in days.
-        ecc, arg_periastron : float
-            Eccentricity and argument of periastron in degrees.
-
-        Returns
-        -------
-        tuple or None
-            (a/R*, inclination in degrees), or None when no orbit has that shape.
-        """
-        sin_w = np.sin(np.deg2rad(arg_periastron))
-        speed_factor = np.sqrt(1 - ecc ** 2) / (1 + ecc * sin_w)
-        distance_factor = (1 - ecc ** 2) / (1 + ecc * sin_w)
-        chord_squared = (1 + rp) ** 2 - impact_param ** 2
-        angle = np.pi * t14 / (period * speed_factor)
-        if not (t14 > 0 and chord_squared > 0 and 0 < angle < np.pi / 2 and impact_param >= 0):
-            return None
-        a_sin_i = np.sqrt(chord_squared) / np.sin(angle)
-        a_cos_i = impact_param / distance_factor
-        return float(np.hypot(a_sin_i, a_cos_i)), float(np.rad2deg(np.arctan2(a_sin_i, a_cos_i)))
-
-    @classmethod
-    def fit_fold_shape(cls, time, flux, flux_err, guess_params, guess_params_bounds,
-                       transit_params: batman.TransitParams, exposure_time=None):
-        """Fit the folded transit in duration, impact parameter and radius (audit item B1).
-
-        Fitting (t0, T14, b, rp) instead of (t0, a/R*, inc, rp) lets the fit reach any transit
-        shape: a duration longer than the catalog a/R* allows no longer leaves a residual.
-
-        Parameters
-        ----------
-        time, flux, flux_err : array_like
-            Folded light curve, time relative to the transit centre.
-        guess_params : list
-            Starting [t0, t14, b, rp].
-        guess_params_bounds : list
-            Bounds for each parameter.
-        transit_params : batman.TransitParams
-            Period, eccentricity, argument of periastron and limb darkening are read from it; t0,
-            a, inc and rp are overwritten.
-        exposure_time : float, optional
-            Exposure time in days for the model.
-
-        Returns
-        -------
-        tuple
-            (best_theta, best_model, geometry, status): best_theta is [t0, t14, b, rp], geometry
-            is (a/R*, inclination) and status comes from `fit_status`.
-        """
-        def geometry(theta):
-            return cls.geometry_from_shape(theta[1], theta[2], theta[3], transit_params.per,
-                                                          transit_params.ecc, transit_params.w)
-
-        def model(theta, t):
-            transit_params.t0, transit_params.rp = theta[0], theta[3]
-            transit_params.a, transit_params.inc = geometry(theta)
-            return cls.transit_model(transit_params, t, exposure_time).light_curve(transit_params)
-
-        def cost(theta):
-            if geometry(theta) is None:
-                return 1e30
-            return 0.5 * np.sum(((flux - model(theta, time)) / flux_err) ** 2)
-
-        guess_params = list(guess_params)
-        if geometry(guess_params) is None:
-            raise ValueError(f"The fold starting point {guess_params} has no transiting orbit")
-        # b, rp and T14 are degenerate for grazing transits, so a single Powell run can stop in a
-        # wrong valley. Start from several impact parameters and keep the lowest cost.
-        b_lower, b_upper = guess_params_bounds[2]
-        starts = [guess_params]
-        for b_start in (0.0, 0.5, 0.8, 0.95 * (1 + guess_params[3])):
-            candidate = list(guess_params)
-            candidate[2] = float(np.clip(b_start, b_lower, b_upper))
-            if geometry(candidate) is not None and all(abs(candidate[2] - start[2]) > 1e-3 for start in starts):
-                starts.append(candidate)
-        res = min((minimize(cost, start, method='Powell', bounds=guess_params_bounds) for start in starts),
-                  key=lambda result: result.fun)
-        # Powell stops early in narrow valleys; one restart from its result finishes the descent.
-        polished = minimize(cost, res.x, method='Powell', bounds=guess_params_bounds)
-        if polished.fun <= res.fun:
-            res = polished
-        # B8: Powell's ftol is relative to a cost that grows with the number of points, so with
-        # correlated b, T14 and rp it stops early on large folds. A bounded least-squares run on
-        # the residuals from its result converges on the gradient instead.
-        n_points = len(flux)
-
-        def residuals(theta):
-            if geometry(theta) is None:
-                return np.full(n_points, 1e6)
-            return (flux - model(theta, time)) / flux_err
-
-        lower = np.array([bound[0] for bound in guess_params_bounds], dtype=float)
-        upper = np.array([bound[1] for bound in guess_params_bounds], dtype=float)
-        start = np.clip(np.asarray(res.x, dtype=float), lower, upper)
-        try:
-            refined = least_squares(residuals, start, bounds=(lower, upper), method='trf', x_scale='jac')
-            if refined.success and refined.cost <= res.fun and geometry(refined.x) is not None:
-                refined.fun = refined.cost
-                res = refined
-        except ValueError:
-            pass
-        best_theta = res.x if geometry(res.x) is not None else np.asarray(guess_params, dtype=float)
-        status = cls.fit_status(res, guess_params_bounds, ['t0', 't14', 'b', 'rp'],
-                                                free_edges=[('b', 'lower')])
-        best_model = model(best_theta, time)
-        return best_theta, best_model, geometry(best_theta), status
-
-    @classmethod
-    def ingress_duration(cls, transit_params, t14):
-        """Return the ingress duration (T14 - T23) / 2 in days, or T14 / 2 for a grazing transit.
-
-        Parameters
-        ----------
-        transit_params : batman.TransitParams
-            Planet geometry: a/R*, inclination, rp, period, eccentricity and argument of periastron.
-        t14 : float
-            First-to-fourth contact duration in days.
-
-        Returns
-        -------
-        float
-            Ingress duration in days.
-        """
-        sin_w = np.sin(np.deg2rad(transit_params.w))
-        speed_factor = np.sqrt(1 - transit_params.ecc ** 2) / (1 + transit_params.ecc * sin_w)
-        b = cls.impact_parameter(transit_params.a, transit_params.inc, transit_params.ecc,
-                                                 transit_params.w)
-        chord_squared = (1 - transit_params.rp) ** 2 - b ** 2
-        a_sin_i = transit_params.a * np.sin(np.deg2rad(transit_params.inc))
-        if chord_squared <= 0 or a_sin_i <= 0:
-            return t14 / 2
-        t23 = transit_params.per / np.pi * np.arcsin(min(np.sqrt(chord_squared) / a_sin_i, 1.0)) * speed_factor
-        return float(np.clip((t14 - t23) / 2, 0, t14 / 2))
 
     def epoch_timing_precision(self, epoch_time, epoch_flux, depth, ingress):
         """Return the mid-time precision of one epoch (Carter et al. 2008, Eq. 43).
@@ -590,6 +345,13 @@ class PlanetModel:
     def subtract_planet_transit(self, time, flux, flux_err, mode='subtract', plot=False):
         """Subtract or mask the planet transit signal from the light curve.
 
+        The stages are: the starting transit parameters (`input_transit_params`), the fold of every
+        epoch (`fold_epochs`) and its shape fit (`fold_fit_start`, `fit_planet_fold`), the t0 prior
+        of each epoch (`epoch_t0_priors`), the fold realigned on the fitted epoch times
+        (`realign_fold`), and the per-epoch fit (`fit_epoch`) whose model is subtracted
+        (`check_subtracted_epoch`) or whose transit is masked (`masked_epoch_centre`). Epochs that
+        cannot be used are dropped at the end (`drop_rejected_epochs`).
+
         Parameters
         ----------
         time : array_like
@@ -609,190 +371,44 @@ class PlanetModel:
         tuple
             (result_time, result_model, result_flux_err) after planet removal.
         """
-        star_radius_rearth = LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun, u.R_earth)
+        params = self.input_transit_params()
+        rp_err = self.planet_radius_err / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun, u.R_earth)
         duration_window = self.planet_duration * 2
-        result_model = flux.copy()
-        result_time = time.copy()
-        if flux_err is not None:
-            result_flux_err = flux_err.copy()
-        else:
-            result_flux_err = None
-        params = batman.TransitParams()
-        params.per = self.planet_period
-        params.ecc = self.planet_ecc  # eccentricity
-        params.w = self.planet_arg_periastron  # longitude of periastron (deg)
-        params.rp = self.planet_radius / star_radius_rearth  # planet radius / stellar radius
-        params.a = self.planet_semimajor_axis / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun,
-                                                                                u.au) \
-            if self.planet_a_over_rstar is None else self.planet_a_over_rstar
-        params.inc = self.planet_inc
-        params.u = self.ab
-        params.limb_dark = "quadratic"
         flux, flux_err = self.normalise_epochs(time, flux, flux_err)
-        result_model = flux.copy()
-        if flux_err is not None:
-            result_flux_err = flux_err.copy()
-        # Phase-fold all transits to get a reliable transit shape
-        fold_time = []
-        fold_flux = []
-        fold_flux_err = []
-        fold_exposure = []
-        for t0 in self.bary_t0s:
-            mask = np.abs(time - t0) < duration_window
-            if len(time[mask]) < self.min_cadences_per_t0:
-                continue
-            if self.exposure_lookup is not None:
-                fold_exposure.append(self.exposure_at(time[mask]))
-            fold_time.append(time[mask] - t0)
-            fold_flux.append(flux[mask])
-            if flux_err is not None:
-                fold_flux_err.append(flux_err[mask])
-        if len(fold_time) > 0:
-            fold_time = np.concatenate(fold_time)
-            fold_exposure = np.concatenate(fold_exposure) if fold_exposure else self.exposure_time
-            fold_flux = np.concatenate(fold_flux)
-            fold_flux_err = np.concatenate(fold_flux_err) if flux_err is not None else None
-            # B1: fit the fold in duration, impact parameter and radius, so any transit shape is
-            # reachable. The start is the shape of the input geometry.
-            rp_err = self.planet_radius_err / star_radius_rearth
-            start_params = copy.copy(params)
-            start_params.t0 = 0.0
-            start_t14 = self.model_transit_duration(start_params, duration_window)
-            if start_t14 <= 0:
-                start_t14 = self.planet_duration
-            start_b = self.impact_parameter(params.a, params.inc, params.ecc, params.w)
-            if not self.skip_fold_fit and fold_flux_err is not None:
-                # B2: the catalog radius comes from another stellar radius and may not match this
-                # depth, and the bound is only +-1 sigma wide. The start, and the centre of that
-                # bound, is the radius that gives the observed central fold depth with the input
-                # shape (limb darkening included); the width stays +-1 sigma, so the planet does not
-                # gain room to absorb a moon (audit item B3).
-                centre = np.abs(fold_time) < 0.25 * start_t14
-                if np.sum(centre) >= 10:
-                    observed = 1 - np.median(fold_flux[centre])
-                    model_centre = self.transit_model(
-                        start_params, fold_time[centre],
-                        self.exposure_subset(fold_exposure, centre)).light_curve(start_params)
-                    expected = 1 - np.median(model_centre)
-                    if observed > 0 and expected > 0:
-                        data_rp = float(params.rp * np.sqrt(observed / expected))
-                        if abs(data_rp / params.rp - 1) > 0.01:
-                            logging.info("Planet rp start from the fold depth: %.4f (catalog %.4f, %.0f ppm observed "
-                                         "against %.0f ppm expected at the centre)", data_rp, params.rp,
-                                         observed * 1e6, expected * 1e6)
-                        params.rp = data_rp
-            fold_guess = [0.0, start_t14, min(start_b, 1.0), params.rp]
-            fold_bounds = [(-start_t14 / 2, start_t14 / 2),
-                           (start_t14 / 2, start_t14 * 2),
-                           (0.0, 1.0 + params.rp + rp_err),
-                           (max(params.rp - rp_err, MIN_RP_OVER_RSTAR), params.rp + rp_err)]
-            if self.fix_impact_param and self.planet_impact_param is not None:
-                # The input impact parameter is kept: its bound is a point (a width the optimizers accept).
-                fixed_b = float(np.clip(self.planet_impact_param, 0.0, 1.0 + params.rp))
-                fold_guess[2] = fixed_b
-                fold_bounds[2] = (fixed_b, fixed_b + 1e-9)
+        fold = self.fold_epochs(time, flux, flux_err, duration_window)
+        fold_bounds = None
+        if fold is not None:
+            start_params, fold_guess, fold_bounds = self.fold_fit_start(params, fold, rp_err, duration_window)
         self.fold_fit_status = None
         if not self.skip_fold_fit:
-            fold_theta, _, (fold_a, fold_inc), self.fold_fit_status = self.fit_fold_shape(
-                fold_time, fold_flux, fold_flux_err, fold_guess, fold_bounds, params, fold_exposure)
-            logging.info("Fold fit: T14=%.4f->%.4f d, b=%.3f->%.3f, rp=%.4f->%.4f (depth %.1f->%.1f ppm), "
-                         "a/R*=%.2f->%.2f, inc=%.2f->%.2f", fold_guess[1], fold_theta[1], fold_guess[2],
-                         fold_theta[2], fold_guess[3], fold_theta[3], fold_guess[3] ** 2 * 1e6,
-                         fold_theta[3] ** 2 * 1e6, start_params.a, fold_a, start_params.inc, fold_inc)
-            if not self.fold_fit_status["converged"] or self.fold_fit_status["at_bound"]:
-                logging.warning("Fold fit did not converge cleanly (converged=%s, at bound: %s); the planet "
-                                "model may leave residuals", self.fold_fit_status["converged"],
-                                ", ".join(self.fold_fit_status["at_bound"]) or "none")
-            params.a, params.inc, params.rp = fold_a, fold_inc, fold_theta[3]
-            params_best = copy.copy(params)
-            params_best.t0 = fold_theta[0]
-            fitted_duration = self.model_transit_duration(params_best, duration_window)
-            if fitted_duration > 0:
-                self.planet_duration = fitted_duration
-            # B4: the moon stage uses the fitted transit geometry (a/R*, inclination, b) for durations
-            # and templates. The semi-major axis in AU, from Kepler's third law, still sets the
-            # Hill sphere; the moon offsets a_m / v_p use the input transit duration (`planet_speed`),
-            # and the fitted duration only checks it.
-            self.check_fitted_duration()
-            self.planet_inc = float(fold_inc)
-            self.planet_impact_param = float(fold_theta[2])
-            self.planet_a_over_rstar = float(fold_a)
-            self.planet_rp_over_rstar = float(fold_theta[3])
-            if plot:
-                guess_params = copy.copy(start_params)
-                model_guess = self.transit_model(guess_params, fold_time,
-                                                                fold_exposure).light_curve(guess_params)
-                model_best = self.transit_model(params_best, fold_time,
-                                                               fold_exposure).light_curve(params_best)
-                fig_fold, ax_fold = plt.subplots(1, 1, figsize=(10, 6))
-                ax_fold.scatter(fold_time, fold_flux, color='gray', alpha=0.5, s=5)
-                fold_order = np.argsort(fold_time)
-                ax_fold.plot(fold_time[fold_order], model_guess[fold_order], 'b--', alpha=0.7, label='Initial guess')
-                ax_fold.plot(fold_time[fold_order], model_best[fold_order], 'r-', alpha=1, label='Fold fit')
-                ax_fold.set_title(f"Phase-folded fit: T14={fold_guess[1]:.4f}->{fold_theta[1]:.4f} d, "
-                                  f"b={fold_guess[2]:.2f}->{fold_theta[2]:.2f}, "
-                                  f"depth={fold_guess[3]**2*1e6:.0f}->{fold_theta[3]**2*1e6:.0f} ppm")
-                ax_fold.set_xlabel('Time from T0 (days)')
-                ax_fold.set_ylabel('Flux')
-                ax_fold.legend()
-                plt.savefig(os.path.join(self.object_dir, "fold_fit.png"))
-                plt.close(fig_fold)
+            if fold is None:
+                raise NoUsableEpochsError("No planet transit epoch has enough points for the fold fit")
+            self.fit_planet_fold(params, start_params, fold, fold_guess, fold_bounds, duration_window, plot)
         self.ttvs = []
-        ttv_t0s = []
-        rejected_t0s = []
         self.epochs_dropped_fit = []
         self.epochs_flagged_rms = []
         self.epochs_flagged_rp = []
         self.epochs_dropped_coverage = []
-        ingress = self.ingress_duration(params, self.planet_duration)
-        if self.ttv_prior_width == "auto":
-            self.ttv_prior_width_used = self.max_moon_ttv()
-            logging.info("TTV allowed by the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth, "
-                         "%.1f M_earth forecast, on the widest searched orbit)", self.ttv_prior_width_used * 1440,
-                         self.max_radius, forecast_moon_mass(self.max_radius, self.max_moon_density))
-        else:
-            self.ttv_prior_width_used = self.ttv_prior_width
-            if self.ttv_prior_width is not None:
-                logging.info("TTV allowed by the t0 prior: %.1f min (given)", self.ttv_prior_width * 1440)
-        prior_sigmas = [None] * len(self.bary_t0s)
-        if self.ttv_prior_width_used is not None:
-            precisions = [self.epoch_timing_precision(time[np.abs(time - t0) < duration_window] - t0,
-                                                      flux[np.abs(time - t0) < duration_window], params.rp ** 2,
-                                                      ingress) for t0 in self.bary_t0s]
-            ephemeris = self.ephemeris_sigmas(self.bary_t0s, precisions)
-            prior_sigmas = [None if sigma is None else float(np.hypot(sigma, self.ttv_prior_width_used))
-                            for sigma in ephemeris]
-            known = [sigma for sigma in ephemeris if sigma is not None]
-            if known:
-                logging.info("Ephemeris uncertainty in the t0 prior (from %s): median %.1f min, largest %.1f min",
-                             self.ephemeris_source, np.median(known) * 1440, np.max(known) * 1440)
+        prior_sigmas = self.epoch_t0_priors(time, flux, params, duration_window)
         self.fold_realigned = False
-        if not self.skip_fold_fit and len(fold_time) > 0 and flux_err is not None:
+        if not self.skip_fold_fit and flux_err is not None:
             self.realign_fold(time, flux, flux_err, params, duration_window, prior_sigmas, fold_bounds)
+        result_time = time.copy()
+        result_flux = flux.copy()
+        result_flux_err = flux_err.copy() if flux_err is not None else None
+        rejected_t0s = []
         for t0, t0_prior_sigma in zip(self.bary_t0s, prior_sigmas):
-            mask = np.abs(time - t0) < duration_window
-            intransit_indexes = np.argwhere(np.abs(time - t0) < duration_window).flatten()
-            # Always fit t0 and compute TTV
-            epoch_params = copy.copy(params)
-            epoch_params.t0 = t0
-            epoch_params.u = self.ab
-            if self.fit_rp_per_transit:
-                best_theta, best_model, status = self.fit_single_t0_rp(
-                    time[mask], flux[mask], flux_err[mask], t0, params.rp,
-                    self.planet_radius_err / star_radius_rearth, duration_window, epoch_params, self.exposure_at(time[mask]),
-                    t0_prior_sigma)
-            else:
-                best_theta, best_model, status = self.fit_single_t0(
-                    time[mask], flux[mask], flux_err[mask], t0, duration_window, epoch_params, self.exposure_at(time[mask]),
-                    t0_prior_sigma)
+            window = np.abs(time - t0) < duration_window
+            indexes = np.flatnonzero(window)
+            best_theta, best_model, status = self.fit_epoch(time[window], flux[window], flux_err[window], t0,
+                                                            t0_prior_sigma, params, rp_err, duration_window)
             best_t0 = best_theta[0]
             self.ttvs.append(best_t0 - t0)
-            ttv_t0s.append(t0)
             # C4: a fit that did not converge, or whose t0 stopped at its bound, subtracts the planet
             # at the wrong time, so the epoch is dropped. An rp at its bound is only flagged: it
             # means extra depth, such as a moon inside the transit, which the bound keeps out of
             # the planet model (audit item B3).
-            if status is not None and (not status["converged"] or "t0" in status["at_bound"]):
+            if not self.epoch_fit_usable(status):
                 logging.info("  Rejecting transit T0=%.4f: epoch fit not usable (converged=%s, at bound: %s)", t0,
                              status["converged"], ", ".join(status["at_bound"]) or "none")
                 rejected_t0s.append(t0)
@@ -802,176 +418,276 @@ class PlanetModel:
                 logging.info("  Flagging transit T0=%.4f: epoch rp at its bound (%.4f), kept", t0, best_theta[1])
                 self.epochs_flagged_rp.append({"t0": float(t0), "rp": float(best_theta[1])})
             if mode == 'subtract':
-                result_model[intransit_indexes] = result_model[intransit_indexes] - (best_model - 1)
-                # Quality control: post-subtraction RMS ratio
-                transit_mask = np.abs(time[mask] - best_t0) < self.planet_duration / 2
-                oot_mask = ~transit_mask
-                # Quality control: in-transit completeness check. The points within T14 count, not
-                # those where the model dims: averaged over a long exposure it still dims half an
-                # exposure beyond T14, and an epoch short of in-transit points passed.
-                n_in_transit = int(np.sum(transit_mask))
-                cadence_d = np.median(np.diff(time[mask])) if len(time[mask]) > 1 else 0
-                n_expected = self.planet_duration / cadence_d if cadence_d > 0 else np.inf
-                incomplete = n_in_transit < self.min_transit_completeness * n_expected
-                if np.sum(transit_mask) > 5 and np.sum(oot_mask) > 5:
-                    post_res = result_model[intransit_indexes]
-                    it_rms = np.std(post_res[transit_mask])
-                    oot_rms = np.std(post_res[oot_mask])
-                    rms_ratio = it_rms / oot_rms if oot_rms > 0 else float('inf')
-                    if rms_ratio > self.max_subtraction_rms_ratio:
-                        # D1: a moon dip inside the transit also raises the in-transit scatter, so the
-                        # epoch is flagged, not dropped.
-                        logging.info("  Flagging transit T0=%.4f: post-sub RMS ratio=%.2f (it=%.6f, oot=%.6f), "
-                                     "kept because a moon dip also raises it", best_t0, rms_ratio, it_rms, oot_rms)
-                        self.epochs_flagged_rms.append({"t0": float(t0), "rms_ratio": float(rms_ratio)})
-                    if incomplete and t0 not in rejected_t0s:
-                        logging.info("  Rejecting transit T0=%.4f: incomplete in-transit coverage (%d pts vs %.0f expected)",
-                                     best_t0, n_in_transit, n_expected)
-                        rejected_t0s.append(t0)
-                        self.epochs_dropped_coverage.append({"t0": float(t0), "points": int(n_in_transit),
-                                                             "expected": float(n_expected)})
-                elif incomplete and t0 not in rejected_t0s:
-                    logging.info("  Rejecting transit T0=%.4f: incomplete in-transit coverage (%d pts vs %.0f expected)",
-                                 best_t0, n_in_transit, n_expected)
+                result_flux[indexes] = result_flux[indexes] - (best_model - 1)
+                points, expected = self.check_subtracted_epoch(t0, best_t0, time[window], result_flux[indexes])
+                if points < self.min_transit_completeness * expected and t0 not in rejected_t0s:
+                    logging.info("  Rejecting transit T0=%.4f: incomplete in-transit coverage (%d pts vs %.0f "
+                                 "expected)", best_t0, points, expected)
                     rejected_t0s.append(t0)
-                    self.epochs_dropped_coverage.append({"t0": float(t0), "points": int(n_in_transit),
-                                                         "expected": float(n_expected)})
+                    self.epochs_dropped_coverage.append({"t0": float(t0), "points": int(points),
+                                                         "expected": float(expected)})
                 if plot:
-                    suffix = "_rejected" if t0 in rejected_t0s else "_sub"
-                    view_dir = os.path.join(self.object_dir, "t0s_view")
-                    os.makedirs(view_dir, exist_ok=True)
-                    fig_transit, axs = plt.subplots(3, 1, figsize=(16, 10))
-                    axs[0].scatter(time[intransit_indexes], flux[
-                        intransit_indexes],
-                                   color='gray', alpha=1, rasterized=True, label="Flux")
-                    axs[0].plot(time[intransit_indexes], best_model)
-                    axs[0].set_title("Subtracting transit in t0 " + str(best_t0))
-                    axs[0].set_xlabel('Time')
-                    axs[0].set_ylabel('Flux')
-                    axs[1].scatter(time[intransit_indexes], result_model[intransit_indexes],
-                                color='gray', alpha=1, rasterized=True, label="Flux")
-                    axs[1].set_title(
-                        "Subtracted transit in t0 " + str(best_t0))
-                    axs[1].set_xlabel('Time')
-                    axs[1].set_ylabel('Flux')
-                    plt.savefig(os.path.join(view_dir, "T0_" + str(round(best_t0, 3)) + suffix + ".png"))
-                    plt.close()
+                    self.plot_subtracted_epoch(time[indexes], flux[indexes], best_model, result_flux[indexes],
+                                               best_t0, rejected=t0 in rejected_t0s)
             else:
-                # D4: the mask needs a usable mid-time. Without in-transit data, or with a fit that
-                # cannot be used, it is centred on the ephemeris time.
-                usable_fit = status is None or (status["converged"] and "t0" not in status["at_bound"])
-                covered = np.sum(np.abs(time[mask] - best_t0) < self.planet_duration / 2)
-                if not usable_fit or covered == 0:
-                    logging.info("  Masking transit T0=%.4f around the ephemeris time: %s", t0,
-                                 "no in-transit data" if covered == 0 else "the epoch fit is not usable")
-                    best_t0 = t0
-                half_mask = self.mask_half_width(time[mask])
-                intransit_mask_local = np.abs(result_time - best_t0) <= half_mask
+                centre = self.masked_epoch_centre(t0, best_t0, status, time[window])
+                half_mask = self.mask_half_width(time[window])
                 if plot:
-                    view_dir = os.path.join(self.object_dir, "t0s_view")
-                    os.makedirs(view_dir, exist_ok=True)
-                    fig_t, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-                    # Before mask: windowed flux + model
-                    ax1.scatter(time[mask], flux[mask], color='gray', alpha=0.7, s=10)
-                    ax1.plot(time[mask], best_model, color='orange', alpha=1, label='Planet model')
-                    ax1.axvspan(best_t0 - half_mask, best_t0 + half_mask,
-                                color='red', alpha=0.15, label='Masked region')
-                    ax1.axvline(best_t0, color='red', linestyle='--')
-                    ax1.set_title(f"T0={best_t0:.4f} (before mask)")
-                    ax1.set_ylabel('Flux'); ax1.legend()
-                    # After mask: remaining data at this window
-                    keep_mask_window = ~(np.abs(time[mask] - best_t0) <= half_mask)
-                    if np.any(keep_mask_window):
-                        ax2.scatter(time[mask][keep_mask_window], flux[mask][keep_mask_window],
-                                    color='gray', alpha=0.7, s=10, label='After mask')
-                    ax2.set_title(f"T0={best_t0:.4f} (after mask)")
-                    ax2.set_xlabel('Time'); ax2.set_ylabel('Flux')
-                    ax2.legend()
-                    plt.tight_layout()
-                    plt.savefig(os.path.join(view_dir, "T0_" + str(round(best_t0, 3)) + "_mask.png"))
-                    plt.close()
-                result_time = result_time[~intransit_mask_local]
-                result_model = result_model[~intransit_mask_local]
+                    self.plot_masked_epoch(time[window], flux[window], best_model, centre, half_mask)
+                keep = np.abs(result_time - centre) > half_mask
+                result_time = result_time[keep]
+                result_flux = result_flux[keep]
                 if result_flux_err is not None:
-                    result_flux_err = result_flux_err[~intransit_mask_local]
+                    result_flux_err = result_flux_err[keep]
+        self.drop_rejected_epochs(rejected_t0s)
+        if mode == 'subtract':
+            # Checked in run() once the red-noise factor is measured.
+            self.planet_shape_check_inputs = (result_time, result_flux,
+                                              [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)])
+        else:
+            self.warn_mask_mode_survival()
+        self.plot_ttvs()
+        self.ttv_diagnostics()
+        return result_time, result_flux, result_flux_err
+
+    def input_transit_params(self):
+        """Return the batman parameters of the input planet: catalog radius, a/R* and inclination,
+        with t0 left unset.
+        """
+        params = batman.TransitParams()
+        params.per = self.planet_period
+        params.ecc = self.planet_ecc
+        params.w = self.planet_arg_periastron  # longitude of periastron (deg)
+        params.rp = self.planet_radius / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun, u.R_earth)
+        params.a = self.planet_semimajor_axis / LcbuilderHelper.convert_from_to(self.star_radius, u.R_sun, u.au) \
+            if self.planet_a_over_rstar is None else self.planet_a_over_rstar
+        params.inc = self.planet_inc
+        params.u = self.ab
+        params.limb_dark = "quadratic"
+        return params
+
+    def fold_epochs(self, time, flux, flux_err, duration_window):
+        """Phase-fold the epochs with at least `min_cadences_per_t0` points on the linear ephemeris.
+
+        Returns
+        -------
+        Fold or None
+            The folded times (from each epoch's t0), fluxes, errors (None without errors) and
+            exposures, or None when no epoch has enough points.
+        """
+        parts = []
+        for t0 in self.bary_t0s:
+            near = np.abs(time - t0) < duration_window
+            if np.sum(near) < self.min_cadences_per_t0:
+                continue
+            parts.append((time[near] - t0, flux[near], None if flux_err is None else flux_err[near],
+                          self.exposure_at(time[near]) if self.exposure_lookup is not None else None))
+        if not parts:
+            return None
+        fold_time, fold_flux = (np.concatenate([part[i] for part in parts]) for i in range(2))
+        fold_err = np.concatenate([part[2] for part in parts]) if flux_err is not None else None
+        fold_exposure = np.concatenate([part[3] for part in parts]) if self.exposure_lookup is not None \
+            else self.exposure_time
+        return Fold(fold_time, fold_flux, fold_err, fold_exposure)
+
+    def fold_fit_start(self, params, fold, rp_err, duration_window):
+        """Return the start of the fold fit: the input-shape parameters, the guess and the bounds.
+
+        B1: the fold is fitted in duration, impact parameter and radius, so any transit shape is
+        reachable, starting from the shape of the input geometry. B2: the catalog radius comes from
+        another stellar radius and may not match this depth, and the radius bound is only +-1 sigma
+        wide, so its start and the centre of that bound are the radius that gives the observed
+        central fold depth with the input shape (limb darkening included). The width stays +-1
+        sigma, so the planet does not gain room to absorb a moon (audit item B3). params.rp is
+        updated in place.
+
+        Returns
+        -------
+        tuple
+            (start_params with t0 = 0 and the catalog radius, guess [t0, T14, b, rp], bounds).
+        """
+        start_params = copy.copy(params)
+        start_params.t0 = 0.0
+        start_t14 = self.model_transit_duration(start_params, duration_window)
+        if start_t14 <= 0:
+            start_t14 = self.planet_duration
+        start_b = self.impact_parameter(params.a, params.inc, params.ecc, params.w)
+        if not self.skip_fold_fit and fold.flux_err is not None:
+            centre = np.abs(fold.time) < 0.25 * start_t14
+            if np.sum(centre) >= 10:
+                observed = 1 - np.median(fold.flux[centre])
+                model_centre = self.transit_model(
+                    start_params, fold.time[centre],
+                    self.exposure_subset(fold.exposure, centre)).light_curve(start_params)
+                expected = 1 - np.median(model_centre)
+                if observed > 0 and expected > 0:
+                    data_rp = float(params.rp * np.sqrt(observed / expected))
+                    if abs(data_rp / params.rp - 1) > 0.01:
+                        logging.info("Planet rp start from the fold depth: %.4f (catalog %.4f, %.0f ppm observed "
+                                     "against %.0f ppm expected at the centre)", data_rp, params.rp,
+                                     observed * 1e6, expected * 1e6)
+                    params.rp = data_rp
+        guess = [0.0, start_t14, min(start_b, 1.0), params.rp]
+        bounds = [(-start_t14 / 2, start_t14 / 2),
+                  (start_t14 / 2, start_t14 * 2),
+                  (0.0, 1.0 + params.rp + rp_err),
+                  (max(params.rp - rp_err, MIN_RP_OVER_RSTAR), params.rp + rp_err)]
+        if self.fix_impact_param and self.planet_impact_param is not None:
+            # The input impact parameter is kept: its bound is a point (a width the optimizers accept).
+            fixed_b = float(np.clip(self.planet_impact_param, 0.0, 1.0 + params.rp))
+            guess[2] = fixed_b
+            bounds[2] = (fixed_b, fixed_b + 1e-9)
+        return start_params, guess, bounds
+
+    def fit_planet_fold(self, params, start_params, fold, guess, bounds, duration_window, plot=False):
+        """Fit the transit shape on the fold and adopt it: params (a, inc, rp), the planet duration
+        and the planet geometry attributes are updated in place, and fold_fit_status is set.
+
+        B4: the moon stage uses the fitted transit geometry (a/R*, inclination, b) for durations
+        and templates. The semi-major axis in AU, from Kepler's third law, still sets the Hill
+        sphere; the moon offsets a_m / v_p use the input transit duration (`planet_speed`), and the
+        fitted duration only checks it.
+        """
+        theta, _, (fold_a, fold_inc), self.fold_fit_status = self.fit_fold_shape(
+            fold.time, fold.flux, fold.flux_err, guess, bounds, params, fold.exposure)
+        logging.info("Fold fit: T14=%.4f->%.4f d, b=%.3f->%.3f, rp=%.4f->%.4f (depth %.1f->%.1f ppm), "
+                     "a/R*=%.2f->%.2f, inc=%.2f->%.2f", guess[1], theta[1], guess[2], theta[2], guess[3], theta[3],
+                     guess[3] ** 2 * 1e6, theta[3] ** 2 * 1e6, start_params.a, fold_a, start_params.inc, fold_inc)
+        if not self.fold_fit_status["converged"] or self.fold_fit_status["at_bound"]:
+            logging.warning("Fold fit did not converge cleanly (converged=%s, at bound: %s); the planet "
+                            "model may leave residuals", self.fold_fit_status["converged"],
+                            ", ".join(self.fold_fit_status["at_bound"]) or "none")
+        params.a, params.inc, params.rp = fold_a, fold_inc, theta[3]
+        params_best = copy.copy(params)
+        params_best.t0 = theta[0]
+        fitted_duration = self.model_transit_duration(params_best, duration_window)
+        if fitted_duration > 0:
+            self.planet_duration = fitted_duration
+        self.check_fitted_duration()
+        self.planet_inc = float(fold_inc)
+        self.planet_impact_param = float(theta[2])
+        self.planet_a_over_rstar = float(fold_a)
+        self.planet_rp_over_rstar = float(theta[3])
+        if plot:
+            self.plot_fold_fit(fold, start_params, params_best, guess, theta)
+
+    def epoch_t0_priors(self, time, flux, params, duration_window):
+        """Return the width of the t0 prior of each epoch, or None for no prior (audit item C1).
+
+        The prior combines the TTV the largest searched moon can cause (`ttv_prior_width`, 'auto'
+        for `max_moon_ttv`), which is stored in ttv_prior_width_used, with the ephemeris
+        uncertainty at each epoch.
+        """
+        if self.ttv_prior_width == "auto":
+            self.ttv_prior_width_used = self.max_moon_ttv()
+            logging.info("TTV allowed by the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth, "
+                         "%.1f M_earth forecast, on the widest searched orbit)", self.ttv_prior_width_used * 1440,
+                         self.max_radius, forecast_moon_mass(self.max_radius, self.max_moon_density))
+        else:
+            self.ttv_prior_width_used = self.ttv_prior_width
+            if self.ttv_prior_width is not None:
+                logging.info("TTV allowed by the t0 prior: %.1f min (given)", self.ttv_prior_width * 1440)
+        if self.ttv_prior_width_used is None:
+            return [None] * len(self.bary_t0s)
+        ingress = self.ingress_duration(params, self.planet_duration)
+        precisions = []
+        for t0 in self.bary_t0s:
+            near = np.abs(time - t0) < duration_window
+            precisions.append(self.epoch_timing_precision(time[near] - t0, flux[near], params.rp ** 2, ingress))
+        ephemeris = self.ephemeris_sigmas(self.bary_t0s, precisions)
+        known = [sigma for sigma in ephemeris if sigma is not None]
+        if known:
+            logging.info("Ephemeris uncertainty in the t0 prior (from %s): median %.1f min, largest %.1f min",
+                         self.ephemeris_source, np.median(known) * 1440, np.max(known) * 1440)
+        return [None if sigma is None else float(np.hypot(sigma, self.ttv_prior_width_used)) for sigma in ephemeris]
+
+    def fit_epoch(self, epoch_time, epoch_flux, epoch_err, t0, t0_prior_sigma, params, rp_err, duration_window):
+        """Fit one epoch's mid-time (and radius, with `fit_rp_per_transit`) with the fold shape.
+
+        Returns
+        -------
+        tuple
+            (theta [t0] or [t0, rp], model at epoch_time, fit status or None).
+        """
+        epoch_params = copy.copy(params)
+        epoch_params.t0 = t0
+        epoch_params.u = self.ab
+        exposure = self.exposure_at(epoch_time)
+        if self.fit_rp_per_transit:
+            return self.fit_single_t0_rp(epoch_time, epoch_flux, epoch_err, t0, params.rp, rp_err, duration_window,
+                                         epoch_params, exposure, t0_prior_sigma)
+        return self.fit_single_t0(epoch_time, epoch_flux, epoch_err, t0, duration_window, epoch_params, exposure,
+                                  t0_prior_sigma)
+
+    @staticmethod
+    def epoch_fit_usable(status):
+        """Whether an epoch fit gives a usable mid-time: converged, with t0 not at its bound."""
+        return status is None or (status["converged"] and "t0" not in status["at_bound"])
+
+    def check_subtracted_epoch(self, t0, best_t0, epoch_time, residual):
+        """Check one epoch after the subtraction and return its in-transit coverage.
+
+        D1: an in-transit residual scatter above `max_subtraction_rms_ratio` times the
+        out-of-transit one is flagged (epochs_flagged_rms), not dropped, because a moon dip inside
+        the transit also raises it. The coverage counts the points within T14, not those where the
+        model dims: averaged over a long exposure it still dims half an exposure beyond T14, and an
+        epoch short of in-transit points passed.
+
+        Returns
+        -------
+        tuple
+            (points within T14, points expected at the median cadence of the epoch).
+        """
+        in_transit = np.abs(epoch_time - best_t0) < self.planet_duration / 2
+        points = int(np.sum(in_transit))
+        cadence = np.median(np.diff(epoch_time)) if len(epoch_time) > 1 else 0
+        expected = self.planet_duration / cadence if cadence > 0 else np.inf
+        if points > 5 and np.sum(~in_transit) > 5:
+            it_rms = np.std(residual[in_transit])
+            oot_rms = np.std(residual[~in_transit])
+            rms_ratio = it_rms / oot_rms if oot_rms > 0 else float('inf')
+            if rms_ratio > self.max_subtraction_rms_ratio:
+                logging.info("  Flagging transit T0=%.4f: post-sub RMS ratio=%.2f (it=%.6f, oot=%.6f), "
+                             "kept because a moon dip also raises it", best_t0, rms_ratio, it_rms, oot_rms)
+                self.epochs_flagged_rms.append({"t0": float(t0), "rms_ratio": float(rms_ratio)})
+        return points, expected
+
+    def masked_epoch_centre(self, t0, best_t0, status, epoch_time):
+        """Return the centre of an epoch's mask (audit item D4): the fitted mid-time, or the ephemeris
+        time when the epoch has no in-transit data or its fit cannot be used.
+        """
+        covered = np.sum(np.abs(epoch_time - best_t0) < self.planet_duration / 2)
+        if self.epoch_fit_usable(status) and covered > 0:
+            return best_t0
+        logging.info("  Masking transit T0=%.4f around the ephemeris time: %s", t0,
+                     "no in-transit data" if covered == 0 else "the epoch fit is not usable")
+        return t0
+
+    def drop_rejected_epochs(self, rejected_t0s):
+        """Log the epoch checks and drop the rejected epochs from bary_t0s and ttvs."""
         if len(rejected_t0s) > 0 or self.epochs_flagged_rms or self.epochs_flagged_rp:
             logging.info("Dropped %d/%d transits: %d epoch fits at a bound or not converged, %d with incomplete "
                          "coverage; kept and flagged: %d for the residual RMS, %d for rp at its bound",
                          len(rejected_t0s), len(self.bary_t0s), len(self.epochs_dropped_fit),
                          len(self.epochs_dropped_coverage), len(self.epochs_flagged_rms), len(self.epochs_flagged_rp))
         if len(rejected_t0s) > 0:
+            self.ttvs = [ttv for t0, ttv in zip(self.bary_t0s, self.ttvs) if t0 not in rejected_t0s]
             self.bary_t0s = [t0 for t0 in self.bary_t0s if t0 not in rejected_t0s]
-            self.ttvs = [ttv for t0, ttv in zip(ttv_t0s, self.ttvs) if t0 not in rejected_t0s]
             self.require_usable_epochs()
-        if mode == 'subtract':
-            # Checked in run() once the red-noise factor is measured.
-            self.planet_shape_check_inputs = (result_time, result_model,
-                                              [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)])
-        else:
-            self.warn_mask_mode_survival()
-        plt.figure(figsize=(10, 6))
-        plt.scatter(range(len(self.ttvs)), self.ttvs, marker='o')
-        plt.xticks(range(len(self.ttvs)), [f"{t0:.4f}" for t0 in self.bary_t0s], rotation=45)
-        plt.xlabel("Barycentric T0 Values")
-        plt.ylabel("TTV (days)")
-        plt.title("Transit Timing Variations")
-        plt.tight_layout()
-        ttv_path = os.path.join(self.object_dir, "ttvs.png") if self.object_dir else None
-        if ttv_path:
-            plt.savefig(ttv_path)
-        plt.close()
-        if len(self.ttvs) > 5:
-            ttv_rms = np.std(self.ttvs)
-            logging.info("TTV diagnostics: RMS=%.4f d, median|O-C|=%.4f d, max|O-C|=%.4f d",
-                         ttv_rms, np.median(np.abs(self.ttvs)), np.max(np.abs(self.ttvs)))
-            ttv_times = np.array(self.bary_t0s)
-            freqs = np.linspace(1 / (ttv_times[-1] - ttv_times[0]),
-                                0.5 / np.median(np.diff(ttv_times)), 5000)
-            power = lombscargle(ttv_times, self.ttvs, 2 * np.pi * freqs)
-            periods = 1 / freqs
-            best_idx = np.argmax(power)
-            logging.info("TTV periodogram: best P=%.4f d, power=%.4f",
-                         periods[best_idx], power[best_idx])
-            fig_ttv_per, ax_ttv = plt.subplots(1, 1, figsize=(10, 6))
-            ax_ttv.plot(periods, power, color='gray')
-            ax_ttv.set_xlabel("Period (days)")
-            ax_ttv.set_ylabel("Lomb-Scargle Power")
-            ax_ttv.set_title("TTV Periodogram")
-            ax_ttv.set_xscale('log')
-            plt.tight_layout()
-            plt.savefig(self.object_dir + "/ttv_periodogram.png")
-            plt.close()
-        return result_time, result_model, result_flux_err
 
-    @staticmethod
-    def model_transit_duration(transit_params, half_window, samples=200001):
-        """Return the first-to-fourth contact duration of a transit model.
-
-        The model is evaluated on a fine grid independent of the data cadence, so the
-        result does not depend on how the light curve was sampled.
-
-        Parameters
-        ----------
-        transit_params : batman.TransitParams
-            Transit parameters, with t0 at the transit centre.
-        half_window : float
-            Half width of the grid around t0 in days. It must contain the transit.
-        samples : int, optional
-            Grid size, default 200001.
-
-        Returns
-        -------
-        float
-            Duration in days, or 0 when the model has no transit in the window.
-        """
-        grid = transit_params.t0 + np.linspace(-half_window, half_window, samples)
-        in_transit = batman.TransitModel(transit_params, grid).light_curve(transit_params) < 1.0
-        if not np.any(in_transit):
-            return 0.0
-        step = grid[1] - grid[0]
-        first, last = np.argmax(in_transit), len(in_transit) - 1 - np.argmax(in_transit[::-1])
-        # Contacts lie between the last out-of-transit and first in-transit samples, take the midpoint.
-        return (grid[last] - grid[first]) + step
+    def ttv_diagnostics(self):
+        """Log the TTV scatter and periodogram peak, with more than 5 epochs, and plot the periodogram."""
+        if len(self.ttvs) <= 5:
+            return
+        logging.info("TTV diagnostics: RMS=%.4f d, median|O-C|=%.4f d, max|O-C|=%.4f d",
+                     np.std(self.ttvs), np.median(np.abs(self.ttvs)), np.max(np.abs(self.ttvs)))
+        ttv_times = np.array(self.bary_t0s)
+        freqs = np.linspace(1 / (ttv_times[-1] - ttv_times[0]), 0.5 / np.median(np.diff(ttv_times)), 5000)
+        power = lombscargle(ttv_times, self.ttvs, 2 * np.pi * freqs)
+        periods = 1 / freqs
+        best_idx = np.argmax(power)
+        logging.info("TTV periodogram: best P=%.4f d, power=%.4f", periods[best_idx], power[best_idx])
+        self.plot_ttv_periodogram(periods, power)
 
     def is_skip_t0(self, time):
         """Check if a transit epoch should be skipped due to insufficient cadences.
@@ -1043,114 +759,3 @@ class PlanetModel:
         """
         if len(self.bary_t0s) == 0:
             raise NoUsableEpochsError("No usable planet transit epochs, so there is nothing to search")
-
-    def planet_shape_derivatives(self, time):
-        """Return the derivatives of the subtracted planet model with respect to its shape.
-
-        One column per term of PLANET_SHAPE_TERMS (squared impact parameter, u1, u2), each evaluated
-        at every epoch's mid-time, so it is the same shape in every epoch and zero away from the
-        transits. Like the depth, each gets one coefficient shared by all epochs (see
-        `planet_fit`), so it keeps the stacked power. The geometry column is taken in b^2: the
-        flux is even in b, so its b derivative vanishes at b = 0 and a near-central transit would
-        get an unbounded coefficient, while the b^2 derivative stays finite. It is a central
-        difference, forward when b^2 is below the step; None without a planet model to correct.
-        """
-        if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
-            return None
-        params = self.null_planet_params()
-        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)] \
-            if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
-        distance_factor = (1 - params.ecc ** 2) / (1 + params.ecc * np.sin(np.deg2rad(params.w)))
-        impact = self.impact_parameter(params.a, params.inc, params.ecc, params.w)
-        self.planet_shape_impact = float(impact)
-
-        def with_impact(base, value):
-            changed = copy.copy(base)
-            changed.inc = float(np.rad2deg(np.arccos(np.clip(value / (base.a * distance_factor), -1, 1))))
-            return changed
-
-        def with_ld(base, index, delta):
-            changed = copy.copy(base)
-            changed.u = list(base.u)
-            changed.u[index] = changed.u[index] + delta
-            return changed
-
-        step = 1e-3
-        columns = np.zeros((len(time), len(self.PLANET_SHAPE_TERMS)))
-        for mid_time in mid_times:
-            near = np.abs(time - mid_time) < self.planet_duration
-            if not np.any(near):
-                continue
-            nominal = copy.copy(params)
-            nominal.t0 = mid_time
-            high_b2, low_b2 = impact ** 2 + step, max(impact ** 2 - step, 0.0)
-            pairs = [(with_impact(nominal, np.sqrt(high_b2)), with_impact(nominal, np.sqrt(low_b2)), high_b2 - low_b2),
-                     (with_ld(nominal, 0, step), with_ld(nominal, 0, -step), 2 * step),
-                     (with_ld(nominal, 1, step), with_ld(nominal, 1, -step), 2 * step)]
-            for term, (upper, lower, width) in enumerate(pairs):
-                flux_upper = self.transit_model(upper, time[near], self.exposure_at(time[near])).light_curve(upper)
-                flux_lower = self.transit_model(lower, time[near], self.exposure_at(time[near])).light_curve(lower)
-                columns[near, term] = (flux_upper - flux_lower) / width
-        return columns if np.any(columns != 0) else None
-
-    def planet_t0_derivative(self, time):
-        """Return the derivative of the subtracted planet model with respect to each epoch's mid-time.
-
-        Returns
-        -------
-        tuple
-            (column, epoch_index): the derivative at `time`, zero away from the transits, and the
-            index in bary_t0s of the epoch each point belongs to (-1 away from the transits); both
-            None when there is no planet model to correct (see `planet_depth_derivative`).
-        """
-        if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
-            return None, None
-        params = self.null_planet_params()
-        ttvs = getattr(self, "ttvs", [])
-        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, ttvs)] if len(ttvs) == len(self.bary_t0s) \
-            else list(self.bary_t0s)
-        step = 1e-4
-        column = np.zeros(len(time))
-        epoch_index = np.full(len(time), -1, dtype=int)
-        for index, mid_time in enumerate(mid_times):
-            near = np.abs(time - mid_time) < self.planet_duration
-            if not np.any(near):
-                continue
-            later, earlier = copy.copy(params), copy.copy(params)
-            later.t0, earlier.t0 = mid_time + step, mid_time - step
-            flux_later = self.transit_model(later, time[near], self.exposure_at(time[near])).light_curve(later)
-            flux_earlier = self.transit_model(earlier, time[near],
-                                                             self.exposure_at(time[near])).light_curve(earlier)
-            column[near] = (flux_later - flux_earlier) / (2 * step)
-            epoch_index[near] = index
-        if not np.any(column != 0):
-            return None, None
-        return column, epoch_index
-
-    def planet_depth_derivative(self, time):
-        """Return the derivative of the subtracted planet model with respect to its depth at `time`.
-
-        It is evaluated with the fitted planet shape at the mid-time of each kept epoch (its TTV
-        included), so it is the same shape in every epoch, and it is zero away from the transits.
-        `search` fits one coefficient of it for all epochs (see `planet_depth_fit`). Only subtract
-        mode has a planet model to correct; mask mode and an empty curve give None.
-        """
-        if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
-            return None
-        params = self.null_planet_params()
-        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)] \
-            if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
-        step = 1e-3
-        column = np.zeros(len(time))
-        for mid_time in mid_times:
-            near = np.abs(time - mid_time) < self.planet_duration
-            if not np.any(near):
-                continue
-            nominal = copy.copy(params)
-            nominal.t0 = mid_time
-            deeper = copy.copy(nominal)
-            deeper.rp = nominal.rp * (1 + step)
-            flux = self.transit_model(nominal, time[near], self.exposure_at(time[near])).light_curve(nominal)
-            flux_deeper = self.transit_model(deeper, time[near], self.exposure_at(time[near])).light_curve(deeper)
-            column[near] = (flux_deeper - flux) / (deeper.rp ** 2 - nominal.rp ** 2)
-        return column if np.any(column != 0) else None
