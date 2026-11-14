@@ -95,7 +95,7 @@
   the outer moon limit from 0.49 to 0.41 Hill radii (F8). The TOI b = 0 start (B5) needs
   no change: the planet fold fit frees b.
 - EMLS catalog driver: the tidal survival filter is Barnes & O'Brien (2002) Eq. 8, applied
-  per target as in HEK VI (Teachey, Kipping & Schmitt 2018) and Fox et al. (2022): the
+  per target as in HEK VI (Teachey, Kipping & Schmitt 2018) and Kipping & Yahalomi (2023, MNRAS 518, 3482): the
   largest moon that survives tidal migration for 5 Gyr, with the EMLS outer moon limit as
   a_crit and log10(k2/Q) = -2.90 - 0.187 Rp/R_earth (kept at Jupiter's value above
   11.2 R_earth), converted to a radius with the Chen & Kipping (2017) relation. A target is

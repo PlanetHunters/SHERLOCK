@@ -4538,7 +4538,7 @@ def max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period
     stable orbit a_crit, which takes T = (2/13) a_crit^(13/2) sqrt(M_p / G) / (3 (k2/Q)_p M_m R_p^5),
     so M_m,max = (2/13) a_crit^(13/2) sqrt(M_p) / (3 (k2/Q)_p T R_p^5 sqrt(G)). a_crit is the outer
     moon limit EMLS searches up to (`ExoMoonLeastSquares.max_moon_semimajor_axis`, Domingos et al.
-    2006), and k2/Q comes from `planet_k2_over_q`. HEK VI (Teachey et al. 2018) and Fox et al. (2022)
+    2006), and k2/Q comes from `planet_k2_over_q`. HEK VI (Teachey et al. 2018) and Kipping & Yahalomi (2023)
     apply it to the Kepler catalog the same way. It is an order-of-magnitude bound: k2/Q is an
     empirical Solar System relation, the age is assumed, and the mass goes as a_crit^6.5.
 
