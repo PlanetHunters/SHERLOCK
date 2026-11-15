@@ -128,8 +128,13 @@ def test_alias_family_lists_the_sampling_aliases(tmp_path):
     assert ks[:3] == [0, -1, 2]
     assert family[0]['snr_below_best'] == 0
     assert family[1]['snr_below_best'] == pytest.approx(1.0)
+    assert not any(alias['mirror'] for alias in family[:3])
+    assert any(alias['mirror'] for alias in family)
     for alias in family:
-        assert 1 / alias['period'] == pytest.approx(1 / true_period + alias['k'] / PERIOD)
+        if alias['mirror']:
+            assert 1 / alias['period'] == pytest.approx(alias['k'] / PERIOD - 1 / true_period)
+        else:
+            assert 1 / alias['period'] == pytest.approx(1 / true_period + alias['k'] / PERIOD)
         assert grid[0] <= alias['period'] <= grid[-1]
 
 

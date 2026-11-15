@@ -46,13 +46,13 @@ def audit_fixture(moon_offset, seed, noise=1e-3, trend=None):
     return t0s, time, flux, planet, moon, t14
 
 
-def emls_for(t0s, time, flux, t14, planet_mass=3000.0, detrend_mask='moon_window', detrend_window=None):
+def emls_for(t0s, time, flux, t14, planet_mass=3000.0, detrend_mask='moon_window', detrend_window=None, retrograde=True):
     # A heavy planet, so the widest moon window (+-0.46 d) holds a moon at 1.5 T14.
     return ExoMoonLeastSquares(tempfile.mkdtemp(), 1, 1.0, 1.0, [0.4, 0.2], PLANET_RADIUS, 0.5, planet_mass, PERIOD,
                                0.0, t14, A_AU, 90.0, 0.5, 0.0, 0.0, 90.0, 0.0, 0.25, 2.5, list(t0s), time, flux,
                                np.full(len(time), 1e-3), 5.5, period_grid_size=40, radius_grid_size=4,
                                detrend_window=3 * t14 if detrend_window is None else detrend_window,
-                               detrend_mask=detrend_mask)
+                               detrend_mask=detrend_mask, retrograde=retrograde)
 
 
 def window_residual(scheme, variability_period, detrend_window=None):
@@ -173,9 +173,9 @@ def test_no_mask_divides_the_planet_out_first():
 
 @pytest.mark.parametrize('detrend_window, expected', [(None, 'moon_window'), (0.3, 'planet')])
 def test_auto_masks_the_planet_only_when_the_moon_window_is_wide(caplog, detrend_window, expected):
-    """The fixture's moon window is 0.92 d: 1.25 biweight windows of 3 T14, 3.1 of 0.3 d."""
+    """The fixture's prograde moon window is 0.92 d: 1.25 biweight windows of 3 T14, 3.1 of 0.3 d."""
     t0s, time, flux, _, _, t14 = audit_fixture(0.25, 0)
-    emls = emls_for(t0s, time, flux, t14, detrend_mask='auto', detrend_window=detrend_window)
+    emls = emls_for(t0s, time, flux, t14, detrend_mask='auto', detrend_window=detrend_window, retrograde=False)
 
     with caplog.at_level(logging.INFO):
         assert emls.resolved_detrend_mask() == expected

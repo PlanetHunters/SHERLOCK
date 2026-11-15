@@ -17,7 +17,8 @@ class MoonInjection:
     MAX_ALIAS_ORDER = 30
 
     def inject_moon(self, time, flux, flux_err, t0s, planet_semimajor_axis, planet_ecc, moon_radius,
-                    moon_period, moon_mass, initial_alpha=0, plot=False, inject_planet=False, inject_moon=True):
+                    moon_period, moon_mass, initial_alpha=0, plot=False, inject_planet=False, inject_moon=True,
+                    retrograde=False):
         """Inject a moon transit signal into the light curve.
 
         Parameters
@@ -42,6 +43,10 @@ class MoonInjection:
             Moon mass in Earth masses.
         initial_alpha : float, optional
             Initial moon orbital phase in radians, default 0.
+        retrograde : bool, optional
+            Inject a retrograde moon, default False: the orbit normal is reversed,
+            (i, Omega) -> (180 - i, Omega + 180), which mirrors the sky-plane x of the moon about
+            the planet and keeps y.
         plot : bool, optional
             If True, generate injection plots, default False.
         inject_planet : bool, optional
@@ -75,8 +80,8 @@ class MoonInjection:
         params.r_moon = moon_radius / star_radius_rearth  # [R_star]
         params.per_moon = moon_period  # [days]
         params.tau_moon = (params.t0_bary / moon_period - (initial_alpha + np.pi) / (2 * np.pi)) % 1
-        params.Omega_moon = 0  # [0..180]
-        params.i_moon = self.planet_inc  # [0..180]
+        params.Omega_moon = 180 if retrograde else 0  # [deg]
+        params.i_moon = 180 - self.planet_inc if retrograde else self.planet_inc  # [0..180]
         params.e_moon = 0  # [0..1]
         params.w_moon = self.planet_arg_periastron  # [deg]
         params.M_moon = LcbuilderHelper.convert_from_to(moon_mass, u.M_earth, u.kg)  # [kg]
@@ -202,8 +207,16 @@ class MoonInjection:
         return flux
 
     @classmethod
-    def find_period_alias(cls, moon_period, planet_period, found_period, start_error):
+    def find_period_alias(cls, moon_period, planet_period, found_period, start_error, mirror=False):
         """Find the alias of a moon period closest to a found period.
+
+        With one look per planet orbit the moon phase at epoch n is theta_n = alpha + 2 pi n P_p / P
+        and the moon offset goes as cos(theta_n). The sampling aliases 1/P' = 1/P + k/P_planet
+        repeat those phases. The mirror aliases 1/P' = k/P_planet - 1/P repeat them negated, and
+        with alpha' = -alpha give the same offsets, cos(-theta_n) = cos(theta_n), up to the orbit
+        size, which scales as P'^(2/3): they are the negative-frequency branch of the same family.
+        For the same reason a retrograde moon at (P, alpha) has the offsets of a prograde one at
+        (P, -alpha).
 
         Parameters
         ----------
@@ -215,6 +228,8 @@ class MoonInjection:
             Detected period in days.
         start_error : float
             Relative error an alias must beat.
+        mirror : bool, optional
+            Search the mirror family instead of the sampling family.
 
         Returns
         -------
@@ -223,25 +238,39 @@ class MoonInjection:
             no alias beats start_error, and relative_error is then start_error.
         """
         alias_period, alias_k, min_error = None, None, start_error
-        for k in range(-cls.MAX_ALIAS_ORDER, cls.MAX_ALIAS_ORDER + 1):
-            frequency = 1 / moon_period + k / planet_period
-            if frequency <= 0:
-                continue
+        for k, frequency in cls.alias_frequencies(moon_period, planet_period, mirror):
             error = abs(1 / frequency - found_period) / moon_period
             if error < min_error:
                 alias_period, alias_k, min_error = 1 / frequency, k, error
         return alias_period, alias_k, min_error
 
     @classmethod
-    def classify_recovered_period(cls, moon_period, planet_period, found_period):
-        """Classify a found period as the injected moon period, one of its sampling aliases, or neither.
+    def alias_frequencies(cls, moon_period, planet_period, mirror=False):
+        """Return (k, frequency) of the positive-frequency aliases of a moon period.
 
-        The found period is assigned to the nearest member of the alias family
-        1/P' = 1/P + k/P_planet, |k| up to MAX_ALIAS_ORDER, and must lie within
-        RECOVERY_PERIOD_TOLERANCE of it. A fixed tolerance around the injected period alone
-        counts a neighbouring alias as the period whenever the alias spacing, about
-        P^2 / P_planet, is below the tolerance: a 10 d moon of a 218 d planet has its k = 1
-        alias 4.4 % away.
+        The sampling family 1/P + k/P_planet takes |k| up to MAX_ALIAS_ORDER. The mirror family
+        k/P_planet - 1/P takes k within MAX_ALIAS_ORDER of round(2 P_planet / P), its member nearest
+        the moon period, so both families span the same frequency range.
+        """
+        if mirror:
+            centre = int(round(2 * planet_period / moon_period))
+            pairs = [(k, k / planet_period - 1 / moon_period)
+                     for k in range(centre - cls.MAX_ALIAS_ORDER, centre + cls.MAX_ALIAS_ORDER + 1)]
+        else:
+            pairs = [(k, 1 / moon_period + k / planet_period)
+                     for k in range(-cls.MAX_ALIAS_ORDER, cls.MAX_ALIAS_ORDER + 1)]
+        return [(k, frequency) for k, frequency in pairs if frequency > 0]
+
+    @classmethod
+    def classify_recovered_period(cls, moon_period, planet_period, found_period):
+        """Classify a found period as the injected moon period, one of its aliases, or neither.
+
+        The found period is assigned to the nearest member of the sampling family
+        1/P' = 1/P + k/P_planet or of the mirror family 1/P' = k/P_planet - 1/P (see
+        find_period_alias), and must lie within RECOVERY_PERIOD_TOLERANCE of it. A fixed tolerance
+        around the injected period alone counts a neighbouring alias as the period whenever the
+        alias spacing, about P^2 / P_planet, is below the tolerance: a 10 d moon of a 218 d planet
+        has its k = 1 alias 4.4 % away.
 
         Parameters
         ----------
@@ -255,14 +284,20 @@ class MoonInjection:
         Returns
         -------
         tuple
-            (period_match, alias_match, k, alias_period, relative_error): k is the order of the
-            nearest alias (0 for the injected period) and relative_error its distance to the
-            found period over the moon period. period_match needs k = 0, alias_match k != 0.
+            (period_match, alias_match, k, alias_period, relative_error, mirror): k is the order of
+            the nearest alias (0 for the injected period), relative_error its distance to the found
+            period over the moon period, and mirror whether it belongs to the mirror family.
+            period_match needs the sampling family with k = 0, alias_match any other member.
         """
-        alias_period, k, error = cls.find_period_alias(moon_period, planet_period, found_period,
-                                                                       np.inf)
+        alias_period, k, error = cls.find_period_alias(moon_period, planet_period, found_period, np.inf)
+        mirror_period, mirror_k, mirror_error = cls.find_period_alias(moon_period, planet_period, found_period,
+                                                                      error, mirror=True)
+        mirror = mirror_k is not None
+        if mirror:
+            alias_period, k, error = mirror_period, mirror_k, mirror_error
         close = k is not None and error < cls.RECOVERY_PERIOD_TOLERANCE
-        return bool(close and k == 0), bool(close and k != 0), k, alias_period, error
+        exact = close and k == 0 and not mirror
+        return bool(exact), bool(close and not exact), k, alias_period, error, mirror
 
     def measure_absorbed_fraction(self, before_planet_fit, best_input, moon_t0s):
         """Measure the fraction of the best moon signal that the planet fit absorbs (audit item B3).

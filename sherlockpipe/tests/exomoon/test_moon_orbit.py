@@ -1,6 +1,6 @@
 """Moon orbit model: audit items G3, G4, G5, G6, G11, G12, G14, G17 and G19.
 
-G5/G6: the outer moon orbit is the Domingos et al. (2006) prograde limit with the planet
+G5/G6: the outer moon orbit is the Domingos et al. (2006) limit (retrograde by default) with the planet
 eccentricity. G11: moon durations follow the eccentric transit geometry and the offsets a_m / v_p use the planet
 speed measured by the input T14 and b. G12: the dead moon inclination, eccentricity and periastron fields are gone; the
 model is coplanar and circular. G3/G4/G14: the run logs where that screening model stops holding.
@@ -48,8 +48,11 @@ def test_outer_moon_orbit_is_the_domingos_prograde_limit(ecc, ratio):
     assert a_max / hill == pytest.approx(ratio, abs=1e-3)
 
 
-def test_outer_limit_is_logged(tmp_path, caplog):
+@pytest.mark.parametrize('retrograde, logged', [(True, '0.931 r_H (Domingos et al. 2006, retrograde'),
+                                                 (False, '0.489 r_H (Domingos et al. 2006, prograde')])
+def test_outer_limit_is_logged(tmp_path, caplog, retrograde, logged):
     emls = system(tmp_path, JUPITER, 11.2, 300.0)
+    emls.search_retrograde = retrograde
     emls.models = [(1.0, np.array([-1.0, 1.0]), np.array([0.999, 0.999]))]
     emls.cpus = 1
 
@@ -57,8 +60,16 @@ def test_outer_limit_is_logged(tmp_path, caplog):
         period_grid, _, _, _ = emls.grid_search(progress=False)
 
     assert period_grid[-1] == pytest.approx(emls.max_moon_period(JUPITER), rel=1e-9)
-    assert any('Outer moon limit: a = 0.489 r_H (Domingos et al. 2006, prograde' in r.getMessage()
-               for r in caplog.records)
+    assert any('Outer moon limit: a = ' + logged in r.getMessage() for r in caplog.records)
+
+
+def test_retrograde_search_is_the_default_and_reaches_longer_periods(tmp_path):
+    emls = system(tmp_path, JUPITER, 11.2, 300.0)
+    assert emls.search_retrograde is True
+    retrograde = emls.max_moon_period(JUPITER)
+    emls.search_retrograde = False
+
+    assert retrograde / emls.max_moon_period(JUPITER) == pytest.approx((0.9309 / 0.4895) ** 1.5, rel=1e-6)
 
 
 def test_no_stable_orbit_for_a_very_eccentric_planet():
@@ -223,3 +234,34 @@ def test_search_duration_gives_way_to_the_fold_fit(tmp_path):
     emls.planet_a_over_rstar, emls.planet_rp_over_rstar = 60.0, 3.9 * R_earth_to_R_sun
     emls.planet_duration, emls.planet_impact_param = true_t14, 0.0
     assert emls.planet_speed() == pytest.approx(emls.keplerian_planet_speed(), rel=0.01)
+
+
+@pytest.mark.parametrize('ecc, ratio', [(0.0, 0.9309), (0.15, 0.9309 * (1 - 1.0764 * 0.15))])
+def test_retrograde_moon_limit_follows_domingos(ecc, ratio):
+    mass = JUPITER * M_earth_to_M_sun
+    a_max = ExoMoonLeastSquares.max_moon_semimajor_axis(SUN, mass, 1.0, ecc, retrograde=True)
+
+    assert a_max / ExoMoonLeastSquares.compute_hill_radius(SUN, mass, 1.0) == pytest.approx(ratio, rel=1e-6)
+
+
+def test_retrograde_injection_mirrors_the_moon_offsets(tmp_path):
+    """A retrograde Pandora moon has the opposite sky-plane offset of the prograde one with the same phase, so its
+    moon transits fall on the other side of the planet. The times are not exactly opposite: the moon crosses the
+    star at v_p + v_m in one sense and v_p - v_m in the other (v_m / v_p ~ 0.2 here), which the EMLS model,
+    with its projected offsets only, leaves out."""
+    emls = system(tmp_path, JUPITER, 11.2, 30.0)
+    time = np.concatenate([t0 + np.linspace(-0.6, 0.6, 12001) for t0 in emls.bary_t0s])
+    offsets = {}
+    for retrograde in (False, True):
+        emls.inject_moon(time, np.ones_like(time), np.full(len(time), 1e-4), emls.bary_t0s,
+                         emls.planet_semimajor_axis, 0.0, 2.0, 3.7, 1.0, initial_alpha=1.0, inject_planet=False,
+                         inject_moon=True, retrograde=retrograde)
+        moon = np.asarray(emls.injected_flux_moon_pandora)
+        offsets[retrograde] = np.array([time[np.abs(time - t0) < 0.6][np.argmin(moon[np.abs(time - t0) < 0.6])] - t0
+                                        for t0 in emls.bary_t0s])
+
+    wide = np.abs(offsets[False]) > 0.05
+    assert np.sum(wide) >= 3
+    assert np.all(np.sign(offsets[True][wide]) == -np.sign(offsets[False][wide]))
+    ratio = np.abs(offsets[True][wide] / offsets[False][wide])
+    assert np.all((ratio > 1 / 1.6) & (ratio < 1.6))

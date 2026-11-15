@@ -56,7 +56,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                   max_subtraction_rms_ratio: float = 3.0, exposure_time="auto",
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
-                 detrend_mask='auto', fix_impact_param=False):
+                 detrend_mask='auto', fix_impact_param=False, retrograde=True):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -176,6 +176,13 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             such as a catalog: their speed across the star sets the moon offsets. False for a
             search duration, such as a TLS one: the offsets use 2 pi a / P with e and w until the
             fold fit, then its T14 and b.
+        retrograde : bool, optional
+            True (default) extends the moon period grid to the widest stable retrograde orbit,
+            0.93 r_H against 0.49 r_H prograde (Domingos et al. 2006). The moon model only uses the
+            projected offset cos(alpha + 2 pi t / P), which is the same for a retrograde moon at
+            (P, alpha) and a prograde one at (P, -alpha), so the phase grid already holds the
+            retrograde moons; only their wider stable region needs the longer periods. False keeps
+            the prograde limit.
         """
         self.object_dir = object_dir
         self.cpus = cpus
@@ -215,6 +222,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.skip_fold_fit = skip_fold_fit
         # Keep the input impact parameter in the fold fit instead of fitting it.
         self.fix_impact_param = bool(fix_impact_param)
+        self.search_retrograde = bool(retrograde)
         self.fit_rp_per_transit = fit_rp_per_transit
         self.min_transit_completeness = min_transit_completeness
         self.max_subtraction_rms_ratio = max_subtraction_rms_ratio
@@ -260,6 +268,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.recovered = None
         self.recovered_alias = None
         self.injection_alias_k = None
+        self.injection_alias_mirror = None
         self.planet_rp_over_rstar = None
         self.fold_realigned = False
         self.model_validity = None
@@ -564,37 +573,39 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         return int(period_index), period, alpha, snr
 
     def alias_family(self, period_grid, snr_spectrum, best_period):
-        """Return the sampling aliases of the selected period with their SNR (audit item H9).
+        """Return the sampling and mirror aliases of the selected period with their SNR (audit item H9).
 
         With one look per planet orbit, the moon phase at epoch n is alpha + 2 pi n P_p / P, so
-        every P' with 1 / P' = 1 / P + k / P_p gives the same phases and differs only through
-        the timing offsets; in close-in geometry the data barely prefer one of them. Each alias
-        inside the grid, |k| up to MAX_ALIAS_ORDER, is listed with the best SNR over alpha at
-        the nearest grid period and its SNR below the selected one, highest SNR first.
+        every P' with 1 / P' = 1 / P + k / P_p gives the same phases, and every P' with
+        1 / P' = k / P_p - 1 / P the same phases negated, which alpha' = pi - alpha turns into the
+        same positions (find_period_alias). They differ only through the orbit size and the
+        timing offsets; in close-in geometry the data barely prefer one of them. Each alias inside
+        the grid (alias_frequencies) is listed with the best SNR over alpha at the nearest grid
+        period and its SNR below the selected one, highest SNR first.
 
         Returns
         -------
         list of dict
-            {"k", "period", "grid_period", "snr", "snr_below_best"} per alias, k = 0 included.
+            {"k", "mirror", "period", "grid_period", "snr", "snr_below_best"} per alias, the
+            selected period (k = 0, not mirror) included.
         """
         period_grid = np.asarray(period_grid, dtype=float)
         snr_spectrum = np.asarray(snr_spectrum, dtype=float)
         best_index = int(np.argmin(np.abs(np.log(period_grid / best_period))))
         best_snr = snr_spectrum[best_index]
         family = []
-        for k in range(-ExoMoonLeastSquares.MAX_ALIAS_ORDER, ExoMoonLeastSquares.MAX_ALIAS_ORDER + 1):
-            frequency = 1 / best_period + k / self.planet_period
-            if frequency <= 0:
-                continue
-            period = 1 / frequency
-            if not period_grid[0] <= period <= period_grid[-1]:
-                continue
-            index = int(np.argmin(np.abs(np.log(period_grid / period))))
-            snr = snr_spectrum[index]
-            family.append({"k": k, "period": float(period), "grid_period": float(period_grid[index]),
-                           "snr": float(snr) if np.isfinite(snr) else None,
-                           "snr_below_best": float(best_snr - snr) if np.isfinite(snr) and np.isfinite(best_snr)
-                           else None})
+        for mirror in (False, True):
+            for k, frequency in ExoMoonLeastSquares.alias_frequencies(best_period, self.planet_period, mirror):
+                period = 1 / frequency
+                if not period_grid[0] <= period <= period_grid[-1]:
+                    continue
+                index = int(np.argmin(np.abs(np.log(period_grid / period))))
+                snr = snr_spectrum[index]
+                family.append({"k": k, "mirror": mirror, "period": float(period),
+                               "grid_period": float(period_grid[index]),
+                               "snr": float(snr) if np.isfinite(snr) else None,
+                               "snr_below_best": float(best_snr - snr) if np.isfinite(snr) and np.isfinite(best_snr)
+                               else None})
         family.sort(key=lambda alias: -np.inf if alias["snr"] is None else -alias["snr"])
         return family
 
@@ -642,10 +653,12 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                          " and orbit window" if self.min_orbit_window > 0 else "")
             max_period = self.max_moon_period(planet_mass)
             a_max = self.max_moon_semimajor_axis(self.star_mass, planet_mass * M_earth_to_M_sun,
-                                                 self.planet_semimajor_axis, self.planet_ecc)
+                                                 self.planet_semimajor_axis, self.planet_ecc,
+                                                 retrograde=self.search_retrograde)
             hill = self.compute_hill_radius(self.star_mass, planet_mass * M_earth_to_M_sun, self.planet_semimajor_axis)
-            logging.info("Outer moon limit: a = %.3f r_H (Domingos et al. 2006, prograde, e_p = %.2f), P = %.4f d",
-                         a_max / hill, self.planet_ecc, max_period)
+            logging.info("Outer moon limit: a = %.3f r_H (Domingos et al. 2006, %s, e_p = %.2f), P = %.4f d",
+                         a_max / hill, "retrograde" if self.search_retrograde else "prograde", self.planet_ecc,
+                         max_period)
             period_grid = self.compute_moon_period_grid(min_period, max_period, samples=self.period_grid_size, mode="log")
             #period_grid = [2.5, 50]
             for impact_param in impact_params_grid:
@@ -688,9 +701,10 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                                              self.planet_semimajor_axis, self.planet_ecc, inject_params['moon_radius'],
                                              inject_params['moon_period'], inject_params['moon_mass'],
                                              initial_alpha=inject_params['initial_alpha'], inject_planet=False,
-                                             inject_moon=True)
-                logging.info("Injected moon before detrending: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
-                             inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
+                                             inject_moon=True, retrograde=inject_params.get('retrograde', False))
+                logging.info("Injected moon before detrending: P=%.4f d, R=%.2f R_e, alpha=%.4f rad, %s",
+                             inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'],
+                             "retrograde" if inject_params.get('retrograde', False) else "prograde")
                 self.inject_flux_time = self.time.copy()
             self.time, self.flux, self.flux_err = self.detrend(self.time, self.flux, self.flux_err)
             if inject_params is not None:
@@ -705,7 +719,8 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             self.flux = self.inject_moon(self.time, self.flux, self.flux_err, self.bary_t0s, self.planet_semimajor_axis,
                                          self.planet_ecc, inject_params['moon_radius'], inject_params['moon_period'],
                                          inject_params['moon_mass'], initial_alpha=inject_params['initial_alpha'],
-                                         inject_planet=False, inject_moon=True)
+                                         inject_planet=False, inject_moon=True,
+                                         retrograde=inject_params.get('retrograde', False))
             logging.info("Injected moon: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
                          inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
             self.inject_flux_time = self.time.copy()
@@ -884,16 +899,17 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         if inject_params is not None:
             period_err = abs(best_snr_period - inject_params['moon_period']) / inject_params['moon_period']
             alpha_err = abs(np.cos(best_snr_alpha) - np.cos(inject_params['initial_alpha']))
-            period_match, alias_match, alias_k, alias_period, min_alias_err = \
+            period_match, alias_match, alias_k, alias_period, min_alias_err, alias_mirror = \
                 ExoMoonLeastSquares.classify_recovered_period(inject_params['moon_period'], self.planet_period,
                                                               best_snr_period)
             self.injection_alias_k = alias_k
+            self.injection_alias_mirror = alias_mirror
             logging.info("INJECTION RECOVERY (SNR): injected P=%.4f d, alpha=%.4f rad -> recovered P=%.4f d, alpha=%.4f rad (delta_P=%.2f%%, delta_cos-alpha=%.4f)",
                          inject_params['moon_period'], inject_params['initial_alpha'],
                          best_snr_period, best_snr_alpha, period_err * 100, alpha_err)
-            if alias_k is not None and alias_k != 0:
-                logging.info("  Best alias match: k=%d, P_alias=%.4f d (delta=%.2f%%)",
-                             alias_k, alias_period, min_alias_err * 100)
+            if alias_k is not None and (alias_k != 0 or alias_mirror):
+                logging.info("  Best alias match: %s k=%d, P_alias=%.4f d (delta=%.2f%%)",
+                             "mirror" if alias_mirror else "sampling", alias_k, alias_period, min_alias_err * 100)
             self.recovered_period = float(best_snr_period)
             self.recovered_alpha = float(best_snr_alpha)
             # I1: recovered needs a detection, the moon times within half a moon transit, and the
@@ -911,12 +927,13 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.max_snr = float(selected_snr)
         self.max_sde = float(SDE)
         self.aliases = self.alias_family(period_grid, snr_spectrum, best_snr_period)
-        close = [alias for alias in self.aliases if alias["k"] != 0 and alias["snr_below_best"] is not None
-                 and alias["snr_below_best"] < 1]
+        close = [alias for alias in self.aliases if (alias["k"] != 0 or alias["mirror"])
+                 and alias["snr_below_best"] is not None and alias["snr_below_best"] < 1]
         if close:
             logging.info("Period aliases within 1 SNR of the best (P=%.4f d): %s; the period is not identified "
                          "among them (audit item H9)", best_snr_period,
-                         ", ".join(f"k={alias['k']} P={alias['period']:.4f} d SNR {alias['snr']:.2f}"
+                         ", ".join(f"{'mirror ' if alias['mirror'] else ''}k={alias['k']} P={alias['period']:.4f} d "
+                                   f"SNR {alias['snr']:.2f}"
                                    for alias in close[:5]))
         self.absorbed_fraction = self.measure_absorbed_fraction(before_planet_fit, best_input, rec_t0s)
         self.assess_single_event(best_input)

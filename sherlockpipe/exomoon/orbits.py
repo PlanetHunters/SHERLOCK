@@ -183,18 +183,21 @@ class MoonOrbits:
         """
         return semimajor_axis * (1 - eccentricity) * ((minor_mass / (3 * major_mass)) ** (1 / 3))
 
-    # Domingos, Winter & Yokoyama (2006), prograde: a_max = 0.4895 (1 - 1.0305 e_p) r_H, with r_H
-    # without the (1 - e_p) factor, as quoted by Rosario-Franco et al. (2020, Table 1) and
-    # Heller et al. (2014).
+    # Domingos, Winter & Yokoyama (2006), circular moon orbits: a_max = 0.4895 (1 - 1.0305 e_p) r_H
+    # prograde and 0.9309 (1 - 1.0764 e_p) r_H retrograde, with r_H without the (1 - e_p) factor, as
+    # quoted by Rosario-Franco et al. (2020, Table 1) and Heller et al. (2014).
     DOMINGOS_PROGRADE = (0.4895, 1.0305)
+    DOMINGOS_RETROGRADE = (0.9309, 1.0764)
 
     @classmethod
-    def max_moon_semimajor_axis(cls, star_mass, planet_mass, planet_semimajor_axis, planet_ecc=0.0):
-        """Return the widest stable prograde moon orbit in AU (audit items G5, G6).
+    def max_moon_semimajor_axis(cls, star_mass, planet_mass, planet_semimajor_axis, planet_ecc=0.0,
+                                retrograde=False):
+        """Return the widest stable moon orbit in AU (audit items G5, G6).
 
-        a_max = 0.4895 (1 - 1.0305 e_p) r_H (Domingos et al. 2006), with the Hill radius of a
-        circular orbit, so the eccentricity is counted once: 0.49 r_H for a circular planet orbit
-        and 0.34 r_H at e_p = 0.3.
+        a_max = 0.4895 (1 - 1.0305 e_p) r_H for a prograde moon and 0.9309 (1 - 1.0764 e_p) r_H for
+        a retrograde one (Domingos et al. 2006), with the Hill radius of a circular orbit, so the
+        eccentricity is counted once: 0.49 r_H prograde for a circular planet orbit and 0.34 r_H
+        at e_p = 0.3.
 
         Parameters
         ----------
@@ -204,22 +207,26 @@ class MoonOrbits:
             Planet semi-major axis in AU.
         planet_ecc : float, optional
             Planet eccentricity, default 0.
+        retrograde : bool, optional
+            Return the retrograde limit instead of the prograde one, default False.
 
         Returns
         -------
         float
             Semi-major axis in AU.
         """
-        coefficient, slope = cls.DOMINGOS_PROGRADE
+        coefficient, slope = cls.DOMINGOS_RETROGRADE if retrograde else cls.DOMINGOS_PROGRADE
         factor = coefficient * (1 - slope * planet_ecc)
         if not factor > 0:
-            raise ValueError(f"No stable prograde moon orbit for a planet eccentricity of {planet_ecc}")
+            raise ValueError(f"No stable {'retrograde' if retrograde else 'prograde'} moon orbit for a planet "
+                             f"eccentricity of {planet_ecc}")
         return factor * cls.compute_hill_radius(star_mass, planet_mass, planet_semimajor_axis)
 
     def check_model_validity(self):
         """Log where the screening moon model stops holding (audit items G3, G4, G14, G16).
 
-        The moon model is coplanar, circular and prograde, with the moon phase frozen at the
+        The moon model is coplanar and circular, with no sense of rotation (the projected offset
+        cos(alpha + 2 pi t / P) is the same for a retrograde moon at -alpha), the moon phase frozen at the
         planet mid-transit, one transit duration, a planet-only (not barycentric) moon orbit and
         no mutual planet-moon events. A photodynamical fit (Pandora) should confirm and refine a
         candidate. This logs, for the widest searched moons:
@@ -364,10 +371,15 @@ class MoonOrbits:
         return float(a_over_rstar)
 
     def max_moon_period(self, planet_mass):
-        """Return the period in days of the widest stable prograde moon orbit for a planet mass in Earth masses."""
+        """Return the period in days of the widest stable moon orbit searched for a planet mass in Earth masses.
+
+        It is the retrograde limit when `search_retrograde` is set (the default of the search), the
+        prograde one otherwise.
+        """
         mass = planet_mass * M_earth_to_M_sun
-        return self.au_to_period(mass, self.max_moon_semimajor_axis(self.star_mass, mass, self.planet_semimajor_axis,
-                                                                    self.planet_ecc))
+        return self.au_to_period(mass, self.max_moon_semimajor_axis(
+            self.star_mass, mass, self.planet_semimajor_axis, self.planet_ecc,
+            retrograde=getattr(self, 'search_retrograde', False)))
 
     @staticmethod
     def au_to_period(mass, au):

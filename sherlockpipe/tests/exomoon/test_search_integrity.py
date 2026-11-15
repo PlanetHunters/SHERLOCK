@@ -58,7 +58,8 @@ def moon_period():
     """Return a period on the search grid, wide enough to be identifiable."""
     limits = ExoMoonLeastSquares
     mass = PLANET_MASS * M_earth_to_M_sun
-    widest = limits.au_to_period(mass, limits.max_moon_semimajor_axis(1.0, mass, PLANET_SEMIMAJOR_AXIS))
+    widest = limits.au_to_period(mass, limits.max_moon_semimajor_axis(1.0, mass, PLANET_SEMIMAJOR_AXIS,
+                                                                       retrograde=True))
     grid = np.logspace(np.log10(limits.compute_roche_period(5.5)), np.log10(widest), PERIOD_GRID)
     return grid[MOON_PERIOD_INDEX]
 
@@ -138,8 +139,13 @@ def test_snr_grows_with_moon_depth(moon_run, tmp_path):
     assert larger.max_snr / moon_run.max_snr == pytest.approx((4.0 / 3.0) ** 2, rel=0.25)
 
 
-def test_snr_and_period_do_not_depend_on_error_bar_scale(moon_run, tmp_path):
-    scaled = execute(tmp_path, moon_radius=3.0, error_scale=3.0)
+def test_snr_and_period_do_not_depend_on_error_bar_scale(tmp_path):
+    # Both runs are built here: the module fixture moon_run is created before the autouse
+    # exposure_time=None patch of conftest, so it models a different exposure.
+    (tmp_path / 'reference').mkdir()
+    (tmp_path / 'scaled').mkdir()
+    reference = execute(tmp_path / 'reference', moon_radius=3.0)
+    scaled = execute(tmp_path / 'scaled', moon_radius=3.0, error_scale=3.0)
 
-    assert scaled.max_snr == pytest.approx(moon_run.max_snr, rel=0.02)
-    assert scaled.recovered_period == pytest.approx(moon_run.recovered_period, rel=0.01)
+    assert scaled.max_snr == pytest.approx(reference.max_snr, rel=0.02)
+    assert scaled.recovered_period == pytest.approx(reference.recovered_period, rel=0.01)

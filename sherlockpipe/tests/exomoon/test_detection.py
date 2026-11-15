@@ -254,23 +254,42 @@ def test_repeating_moon_is_not_a_single_event(moon_run):
 # --- I1: recovery ------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize('found, expected', [
-    (10.0, (True, False, 0)),
-    (10.2, (True, False, 0)),
+    (10.0, (True, False, 0, False)),
+    (10.1, (True, False, 0, False)),
     # Kepler-1514 b injection: the k = 1 alias of a 10 d moon of a 217.83 d planet is 4.4 % away,
     # inside the 5 % tolerance, and was counted as the period.
-    (9.5558, (False, True, 1)),
-    (8.1299, (False, True, 5)),
+    (9.5558, (False, True, 1, False)),
+    (8.1299, (False, True, 5, False)),
+    # 10.2 d is 2 % from the period but 0.7 % from the k = 43 mirror alias, 10.267 d.
+    (10.2, (False, True, 43, True)),
 ])
 def test_recovered_period_is_the_nearest_alias(found, expected):
-    period_match, alias_match, k, _, _ = ExoMoonLeastSquares.classify_recovered_period(10.0, 217.83, found)
+    period_match, alias_match, k, _, _, mirror = ExoMoonLeastSquares.classify_recovered_period(10.0, 217.83, found)
 
-    assert (period_match, alias_match, k) == expected
+    assert (period_match, alias_match, k, mirror) == expected
+
+
+def test_mirror_alias_repeats_the_projected_positions():
+    # KOI-855 injection of the 2026-11-15 I&R campaign: a 6.55 d moon of a 41.408 d planet was found at
+    # 7.291 d, the k = 12 mirror alias, with the moon times within 24 min.
+    moon_period, planet_period, alpha = 6.55, 41.408, 4.0
+    period_match, alias_match, k, alias_period, error, mirror = \
+        ExoMoonLeastSquares.classify_recovered_period(moon_period, planet_period, 7.291)
+
+    assert (period_match, alias_match, k, mirror) == (False, True, 12, True)
+    assert error < 1e-3
+    epochs = np.arange(40) * planet_period
+    true_positions = np.cos(2 * np.pi * epochs / moon_period + alpha)
+    mirror_positions = np.cos(2 * np.pi * epochs / alias_period - alpha)
+    retrograde_positions = np.cos(alpha - 2 * np.pi * epochs / moon_period)
+    assert mirror_positions == pytest.approx(true_positions, abs=1e-9)
+    assert retrograde_positions == pytest.approx(np.cos(2 * np.pi * epochs / moon_period - alpha), abs=1e-12)
 
 
 def test_period_tolerance_still_applies_without_close_aliases():
     # A 10 d moon of a 30 d planet: the nearest aliases are 7.5 d and 15 d, so 11 d is the
     # injected period's family member but 10 % off, which is neither a match nor an alias.
-    period_match, alias_match, k, _, error = ExoMoonLeastSquares.classify_recovered_period(10.0, 30.0, 11.0)
+    period_match, alias_match, k, _, error, _ = ExoMoonLeastSquares.classify_recovered_period(10.0, 30.0, 11.0)
 
     assert k == 0 and error == pytest.approx(0.1)
     assert (period_match, alias_match) == (False, False)
