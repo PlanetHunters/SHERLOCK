@@ -1,9 +1,15 @@
 """Moon survival against tidal migration (Barnes & O'Brien 2002) with a generous margin.
 
-The bound is an order-of-magnitude estimate: k2/Q is an empirical Solar System relation that
-can be off by one or two orders of magnitude for a given planet, the age is assumed, the moon is
-assumed to start next to the planet with the planet spin unchanged, and the mass goes as
-a_crit^6.5. It also assumes a prograde moon migrating outwards (a retrograde moon migrates inwards).
+The bound is the time a moon takes to cross the whole region between the planet and the widest
+stable orbit a_crit, which holds whether it migrates outwards (from the synchronous orbit) or
+inwards (from a_crit, once the star has slowed the planet spin). Barnes & O'Brien derive it for
+prograde primordial moons; for captured retrograde moons, which migrate inwards like Triton, the
+same expression with the retrograde stability limit bounds the lifetime (their Eq. 12), so the
+retrograde bound is (0.9309 / 0.4895)^6.5, about 65 times, more massive with the Domingos limits.
+It is an order-of-magnitude estimate: k2/Q is an empirical Solar System relation that can be off
+by one or two orders of magnitude for a given planet, the age is assumed, and the mass goes as
+a_crit^6.5. It also stops applying to moons massive enough to lock the planet spin (above about
+8 M_earth for a Jupiter-mass planet in Barnes & O'Brien), which are better treated as binary planets.
 So it is used with a generous margin, a planet ten times less dissipative (k2/Q divided by
 TIDAL_SURVIVAL_K2_Q_FACTOR) and a young 1 Gyr system, which lets a moon 50 times more massive survive
 than the nominal 5 Gyr bound. The catalog driver drops a target only when even this generous bound
@@ -36,14 +42,16 @@ def planet_k2_over_q(planet_radius):
 
 
 def max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period, planet_ecc=0.0,
-                            age_gyr=TIDAL_SURVIVAL_AGE_GYR, k2_q_factor=TIDAL_SURVIVAL_K2_Q_FACTOR):
+                            age_gyr=TIDAL_SURVIVAL_AGE_GYR, k2_q_factor=TIDAL_SURVIVAL_K2_Q_FACTOR, retrograde=False):
     """Return the largest moon mass in Earth masses that survives tidal migration for the system age.
 
     Barnes & O'Brien (2002, ApJ 575, 1087) Eq. 7 solved for the moon mass, as in their Eq. 8:
     a moon is lost once tides carry it across the region between the planet and the widest
     stable orbit a_crit, which takes T = (2/13) a_crit^(13/2) sqrt(M_p / G) / (3 (k2/Q)_p M_m R_p^5),
-    so M_m,max = (2/13) a_crit^(13/2) sqrt(M_p) / (3 (k2/Q)_p T R_p^5 sqrt(G)). a_crit is the prograde
-    Domingos et al. (2006) limit (`MoonOrbits.max_moon_semimajor_axis`), and k2/Q comes from
+    so M_m,max = (2/13) a_crit^(13/2) sqrt(M_p) / (3 (k2/Q)_p T R_p^5 sqrt(G)). a_crit is the
+    Domingos et al. (2006) limit of the orbit sense (`MoonOrbits.max_moon_semimajor_axis`): prograde
+    as Barnes & O'Brien Eq. 8, or retrograde for a captured moon migrating inwards (their Eq. 12).
+    k2/Q comes from
     `planet_k2_over_q` times `k2_q_factor`. HEK VI (Teachey et al. 2018) and Kipping & Yahalomi (2023)
     apply it to the Kepler catalog with 5 Gyr and a factor 1; the defaults are the generous margin
     of the module docstring.
@@ -62,6 +70,8 @@ def max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period
         System age in Gyr, default TIDAL_SURVIVAL_AGE_GYR.
     k2_q_factor : float, optional
         Factor on the empirical k2/Q, default TIDAL_SURVIVAL_K2_Q_FACTOR.
+    retrograde : bool, optional
+        Use the retrograde stability limit, default False.
 
     Returns
     -------
@@ -73,7 +83,7 @@ def max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period
         return np.nan
     planet_semimajor_axis = MoonOrbits.compute_semimajor_axis(star_mass, planet_period)
     a_crit = MoonOrbits.max_moon_semimajor_axis(star_mass, planet_mass * M_earth_to_M_sun,
-                                                planet_semimajor_axis, planet_ecc) * AU_TO_M
+                                                planet_semimajor_axis, planet_ecc, retrograde=retrograde) * AU_TO_M
     mass = planet_mass * Mearth_to_kg
     radius = planet_radius * ac.R_earth.value
     age = age_gyr * 1e9 * 365.25 * 86400
@@ -99,11 +109,11 @@ def moon_radius_from_mass(moon_mass):
 
 
 def max_surviving_moon_radius(star_mass, planet_mass, planet_radius, planet_period, planet_ecc=0.0,
-                              age_gyr=TIDAL_SURVIVAL_AGE_GYR, k2_q_factor=TIDAL_SURVIVAL_K2_Q_FACTOR):
+                              age_gyr=TIDAL_SURVIVAL_AGE_GYR, k2_q_factor=TIDAL_SURVIVAL_K2_Q_FACTOR, retrograde=False):
     """Return the radius in Earth radii of the largest moon that survives tidal migration.
 
     `max_surviving_moon_mass` converted with `moon_radius_from_mass`; NaN when an input is not usable.
     """
     mass = max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period, planet_ecc, age_gyr,
-                                   k2_q_factor)
+                                   k2_q_factor, retrograde)
     return float(mass) if not np.isfinite(mass) else moon_radius_from_mass(mass)

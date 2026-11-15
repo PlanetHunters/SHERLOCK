@@ -27,12 +27,12 @@ MOON_PERIOD_INDEX = 100
 MOON_ALPHA = 2 * np.pi * 8 / 25
 
 
-def build(flux, time, flux_err, output_dir, t0s, duration):
+def build(flux, time, flux_err, output_dir, t0s, duration, **kwargs):
     return ExoMoonLeastSquares(
         str(output_dir), 2, 1.0, STAR_RADIUS, LIMB_DARKENING, PLANET_RADIUS, 0.5, PLANET_MASS, PLANET_PERIOD, 0.0,
         duration, PLANET_SEMIMAJOR_AXIS, PLANET_INC, 0.5, 0.0, 0.0, 90.0,
         PLANET_SEMIMAJOR_AXIS * AU_TO_RSUN * np.cos(np.deg2rad(PLANET_INC)), 1.0, 4.0, t0s, time, flux, flux_err, 5.5,
-        period_grid_size=PERIOD_GRID, radius_grid_size=4, fit_rp_per_transit=False)
+        period_grid_size=PERIOD_GRID, radius_grid_size=4, fit_rp_per_transit=False, **kwargs)
 
 
 def planet_curve(seed):
@@ -91,11 +91,11 @@ def with_moon(flux, time, t0s, params, moon_radius):
     return flux
 
 
-def execute(output_dir, seed=3, moon_radius=None, error_scale=1.0):
+def execute(output_dir, seed=3, moon_radius=None, error_scale=1.0, **kwargs):
     t0s, time, flux, flux_err, duration, params = planet_curve(seed)
     if moon_radius is not None:
         flux = with_moon(flux, time, t0s, params, moon_radius)
-    emls = build(flux, time, flux_err * error_scale, output_dir, t0s, duration)
+    emls = build(flux, time, flux_err * error_scale, output_dir, t0s, duration, **kwargs)
     emls.run()
     return emls
 

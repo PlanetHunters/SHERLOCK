@@ -329,14 +329,24 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.best_snr_radius = np.nan
         self.best_snr_radius_above_range = False
         self.best_snr_radius_below_range = False
-        # Tidal survival (Barnes & O'Brien 2002, generous margin of `tides`): a warning, not a cut.
+        # Tidal survival (Barnes & O'Brien 2002, generous margin of `tides`): a warning, not a cut. The
+        # retrograde bound (their Eq. 12, a captured moon migrating inwards) applies when retrograde
+        # moons are searched.
         self.max_surviving_moon_radius = max_surviving_moon_radius(star_mass, planet_mass, planet_radius,
                                                                    planet_period, planet_ecc)
+        self.max_surviving_moon_radius_retrograde = max_surviving_moon_radius(star_mass, planet_mass, planet_radius,
+                                                                              planet_period, planet_ecc,
+                                                                              retrograde=True)
         self.best_snr_radius_above_tidal_survival = False
+        self.best_snr_radius_above_tidal_survival_retrograde = False
         if self.max_surviving_moon_radius < max_radius:
-            logging.info("Moons above %.2f R_earth are unlikely to survive tidal migration (Barnes & O'Brien 2002 with "
-                         "a generous margin: %.0f Gyr, k2/Q x %.1f); they are still searched", self.max_surviving_moon_radius,
-                         TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR)
+            retrograde_note = (f"; retrograde (captured, inward-migrating) moons above "
+                               f"{self.max_surviving_moon_radius_retrograde:.2f} R_earth"
+                               if self.search_retrograde else "")
+            logging.info("Prograde moons above %.2f R_earth%s are unlikely to survive tidal migration (Barnes & O'Brien "
+                         "2002 with a generous margin: %.0f Gyr, k2/Q x %.1f); they are still searched",
+                         self.max_surviving_moon_radius, retrograde_note, TIDAL_SURVIVAL_AGE_GYR,
+                         TIDAL_SURVIVAL_K2_Q_FACTOR)
         if period_grid_size < ExoMoonLeastSquares.SPECTRUM_KERNEL:
             raise ValueError(f"period_grid_size must be at least {ExoMoonLeastSquares.SPECTRUM_KERNEL}, "
                              f"got {period_grid_size}")
@@ -877,11 +887,22 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
                             "dip is shallower than the smallest moon searched for", moon_radius, self.min_radius)
         self.best_snr_radius_above_tidal_survival = bool(moon_radius > self.max_surviving_moon_radius)
-        if self.best_snr_radius_above_tidal_survival:
+        self.best_snr_radius_above_tidal_survival_retrograde = bool(moon_radius >
+                                                                    self.max_surviving_moon_radius_retrograde)
+        margin = f"Barnes & O'Brien 2002, {TIDAL_SURVIVAL_AGE_GYR:.0f} Gyr, k2/Q x {TIDAL_SURVIVAL_K2_Q_FACTOR:.1f}"
+        if self.best_snr_radius_above_tidal_survival and (not self.search_retrograde or
+                                                          self.best_snr_radius_above_tidal_survival_retrograde):
             logging.warning("Best SNR radius %.2f R_earth is above the largest moon that survives tidal migration, "
-                            "%.2f R_earth even with a generous margin (Barnes & O'Brien 2002, %.0f Gyr, k2/Q x %.1f): "
-                            "such a moon is unlikely, though the bound is an order-of-magnitude estimate", moon_radius,
-                            self.max_surviving_moon_radius, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR)
+                            "%.2f R_earth prograde%s even with a generous margin (%s): such a moon is unlikely, though "
+                            "the bound is an order-of-magnitude estimate", moon_radius, self.max_surviving_moon_radius,
+                            f" and {self.max_surviving_moon_radius_retrograde:.2f} R_earth retrograde"
+                            if self.search_retrograde else "", margin)
+        elif self.best_snr_radius_above_tidal_survival:
+            logging.warning("Best SNR radius %.2f R_earth is above the largest prograde moon that survives tidal "
+                            "migration, %.2f R_earth with a generous margin (%s), but below the retrograde bound "
+                            "%.2f R_earth: it is plausible as a captured retrograde moon, whose orbit sense EMLS "
+                            "cannot tell", moon_radius, self.max_surviving_moon_radius, margin,
+                            self.max_surviving_moon_radius_retrograde)
         if self.best_snr_radius_above_range:
             logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
                             "dip is deeper than any moon searched for, for example a planet residual or a "

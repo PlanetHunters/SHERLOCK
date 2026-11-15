@@ -182,7 +182,7 @@ def test_max_surviving_moon_mass_is_barnes_and_obrien_eq_8(monkeypatch):
     import sherlockpipe.exomoon.tides as tides
     monkeypatch.setattr(tides, 'planet_k2_over_q', lambda radius: 0.51 / 1e5)
     monkeypatch.setattr(tides.MoonOrbits, 'max_moon_semimajor_axis', staticmethod(
-        lambda star_mass, planet_mass, a, ecc=0.0: 0.36 * ExoMoonLeastSquares.compute_hill_radius(star_mass,
+        lambda star_mass, planet_mass, a, ecc=0.0, **kwargs: 0.36 * ExoMoonLeastSquares.compute_hill_radius(star_mass,
                                                                                                     planet_mass, a)))
     nominal = {'age_gyr': 5.0, 'k2_q_factor': 1.0}
     assert exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 30, **nominal) == pytest.approx(0.091, rel=0.05)
@@ -196,6 +196,15 @@ def test_default_tidal_bound_is_the_generous_margin():
     assert exomoon.max_surviving_moon_radius(1.0, 318, 11.2, 30) == pytest.approx(
         exomoon.moon_radius_from_mass(50 * nominal))
     assert np.isnan(exomoon.max_surviving_moon_radius(1.0, np.nan, 11.2, 30))
+
+
+def test_retrograde_tidal_bound_uses_the_retrograde_stability_limit():
+    """Barnes & O'Brien Eq. 12: a captured retrograde moon crosses the region up to the retrograde limit."""
+    prograde = exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 30)
+    retrograde = exomoon.max_surviving_moon_mass(1.0, 318, 11.2, 30, retrograde=True)
+    assert retrograde / prograde == pytest.approx((0.9309 / 0.4895) ** 6.5, rel=1e-6)
+    assert exomoon.max_surviving_moon_radius(1.0, 318, 11.2, 30, retrograde=True) > \
+        exomoon.max_surviving_moon_radius(1.0, 318, 11.2, 30)
 
 
 def test_moons_survive_around_wide_giants_not_around_close_small_planets():

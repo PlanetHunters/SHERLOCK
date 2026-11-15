@@ -41,24 +41,55 @@ def test_run_states_that_no_assessment_is_applied(tmp_path, caplog):
     assert not os.path.exists(tmp_path / 'emls_assessment.json')
 
 
-def test_moon_above_the_tidal_survival_radius_is_searched_and_only_warned(tmp_path, caplog, monkeypatch):
+def patch_tidal_bounds(monkeypatch, prograde, retrograde):
     import sherlockpipe.exomoon.search as search
-    monkeypatch.setattr(search, 'max_surviving_moon_radius', lambda *args: 1.5)
+    monkeypatch.setattr(search, 'max_surviving_moon_radius',
+                        lambda *args, retrograde_bound=retrograde, **kwargs:
+                        retrograde_bound if kwargs.get('retrograde') else prograde)
+
+
+def test_moon_above_both_tidal_bounds_is_searched_and_only_warned(tmp_path, caplog, monkeypatch):
+    patch_tidal_bounds(monkeypatch, 1.0, 1.5)
     with caplog.at_level(logging.INFO):
         emls = guard.execute(tmp_path, moon_radius=3.0)
 
-    assert emls.max_surviving_moon_radius == 1.5
+    assert (emls.max_surviving_moon_radius, emls.max_surviving_moon_radius_retrograde) == (1.0, 1.5)
     assert emls.max_radius == MAX_RADIUS
     assert emls.best_snr_radius > 1.5
-    assert emls.best_snr_radius_above_tidal_survival
+    assert emls.best_snr_radius_above_tidal_survival and emls.best_snr_radius_above_tidal_survival_retrograde
     messages = [record.getMessage() for record in caplog.records]
-    assert any(message.startswith('Moons above 1.50 R_earth are unlikely to survive') for message in messages)
-    assert any('above the largest moon that survives tidal migration' in message for message in messages)
+    assert any(message.startswith('Prograde moons above 1.00 R_earth; retrograde (captured, inward-migrating) moons '
+                                  'above 1.50 R_earth are unlikely to survive') for message in messages)
+    assert any('above the largest moon that survives tidal migration, 1.00 R_earth prograde and 1.50 R_earth '
+               'retrograde' in message for message in messages)
+
+
+def test_moon_between_the_bounds_is_warned_as_a_possible_captured_retrograde_moon(tmp_path, caplog, monkeypatch):
+    patch_tidal_bounds(monkeypatch, 1.0, 10.0)
+    with caplog.at_level(logging.WARNING):
+        emls = guard.execute(tmp_path, moon_radius=3.0)
+
+    assert emls.best_snr_radius_above_tidal_survival
+    assert not emls.best_snr_radius_above_tidal_survival_retrograde
+    messages = [record.getMessage() for record in caplog.records]
+    assert any('plausible as a captured retrograde moon' in message for message in messages)
+    assert not any('above the largest moon that survives' in message for message in messages)
+
+
+def test_prograde_only_search_warns_on_the_prograde_bound(tmp_path, caplog, monkeypatch):
+    patch_tidal_bounds(monkeypatch, 1.0, 10.0)
+    with caplog.at_level(logging.WARNING):
+        emls = guard.execute(tmp_path, moon_radius=3.0, retrograde=False)
+
+    assert not emls.search_retrograde
+    messages = [record.getMessage() for record in caplog.records]
+    assert any('above the largest moon that survives tidal migration, 1.00 R_earth prograde even' in message
+               for message in messages)
+    assert not any('retrograde' in message for message in messages if 'tidal' in message)
 
 
 def test_moon_below_the_tidal_survival_radius_is_not_warned(tmp_path, caplog, monkeypatch):
-    import sherlockpipe.exomoon.search as search
-    monkeypatch.setattr(search, 'max_surviving_moon_radius', lambda *args: 10.0)
+    patch_tidal_bounds(monkeypatch, 10.0, 20.0)
     with caplog.at_level(logging.INFO):
         emls = guard.execute(tmp_path, moon_radius=3.0)
 
