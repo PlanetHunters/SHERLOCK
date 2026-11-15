@@ -39,3 +39,30 @@ def test_run_states_that_no_assessment_is_applied(tmp_path, caplog):
     assert not any('exomoon_ir' in message or 'assess_candid' in message for message in messages)
     assert not any(record.levelno >= logging.ERROR for record in caplog.records)
     assert not os.path.exists(tmp_path / 'emls_assessment.json')
+
+
+def test_moon_above_the_tidal_survival_radius_is_searched_and_only_warned(tmp_path, caplog, monkeypatch):
+    import sherlockpipe.exomoon.search as search
+    monkeypatch.setattr(search, 'max_surviving_moon_radius', lambda *args: 1.5)
+    with caplog.at_level(logging.INFO):
+        emls = guard.execute(tmp_path, moon_radius=3.0)
+
+    assert emls.max_surviving_moon_radius == 1.5
+    assert emls.max_radius == MAX_RADIUS
+    assert emls.best_snr_radius > 1.5
+    assert emls.best_snr_radius_above_tidal_survival
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(message.startswith('Moons above 1.50 R_earth are unlikely to survive') for message in messages)
+    assert any('above the largest moon that survives tidal migration' in message for message in messages)
+
+
+def test_moon_below_the_tidal_survival_radius_is_not_warned(tmp_path, caplog, monkeypatch):
+    import sherlockpipe.exomoon.search as search
+    monkeypatch.setattr(search, 'max_surviving_moon_radius', lambda *args: 10.0)
+    with caplog.at_level(logging.INFO):
+        emls = guard.execute(tmp_path, moon_radius=3.0)
+
+    assert not emls.best_snr_radius_above_tidal_survival
+    messages = [record.getMessage() for record in caplog.records]
+    assert not any('survive tidal migration' in message or 'survives tidal migration' in message
+                   for message in messages)

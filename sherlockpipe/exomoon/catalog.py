@@ -10,6 +10,9 @@ import numpy as np
 import astropy.constants as ac
 from sherlockpipe.exomoon.constants import AU_TO_M, AU_TO_RSUN, G, M_earth_to_M_sun, Mearth_to_kg, Msolar_to_kg
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
+from sherlockpipe.exomoon.tides import (TIDAL_K2_Q_MAX_RADIUS, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR,  # noqa: F401
+                                        max_surviving_moon_mass, max_surviving_moon_radius, moon_radius_from_mass,
+                                        planet_k2_over_q)
 
 
 def combine_cadence_curves(curves):
@@ -166,85 +169,6 @@ CATALOG_MIN_MOON_RADIUS_FRACTION = 1 / 20
 CATALOG_MAX_MOON_RADIUS_FRACTION = 1 / 2
 
 
-# Moon survival against tidal migration (Barnes & O'Brien 2002): assumed system age, and the
-# planet radius in Earth radii above which k2/Q stays at its Jupiter value.
-TIDAL_SURVIVAL_AGE_GYR = 5.0
-
-
-TIDAL_K2_Q_MAX_RADIUS = 11.2
-
-
-def planet_k2_over_q(planet_radius):
-    """Return the planet tidal efficiency k2/Q from its radius in Earth radii.
-
-    Empirical Solar System relation of Teachey, Kipping & Schmitt (2018, HEK VI, Fig. 1),
-    log10(k2/Q) = -2.90 - 0.187 Rp/R_earth, fitted to the Moon, the Earth, Neptune and Jupiter.
-    Above Jupiter's radius it is kept at Jupiter's value instead of extrapolated.
-    """
-    return 10 ** (-2.90 - 0.187 * min(float(planet_radius), TIDAL_K2_Q_MAX_RADIUS))
-
-
-def max_surviving_moon_mass(star_mass, planet_mass, planet_radius, planet_period, planet_ecc=0.0,
-                            age_gyr=TIDAL_SURVIVAL_AGE_GYR):
-    """Return the largest moon mass in Earth masses that survives tidal migration for the system age.
-
-    Barnes & O'Brien (2002, ApJ 575, 1087) Eq. 7 solved for the moon mass, as in their Eq. 8:
-    a moon is lost once tides carry it across the region between the planet and the widest
-    stable orbit a_crit, which takes T = (2/13) a_crit^(13/2) sqrt(M_p / G) / (3 (k2/Q)_p M_m R_p^5),
-    so M_m,max = (2/13) a_crit^(13/2) sqrt(M_p) / (3 (k2/Q)_p T R_p^5 sqrt(G)). a_crit is the outer
-    moon limit EMLS searches up to (`ExoMoonLeastSquares.max_moon_semimajor_axis`, Domingos et al.
-    2006), and k2/Q comes from `planet_k2_over_q`. HEK VI (Teachey et al. 2018) and Kipping & Yahalomi (2023)
-    apply it to the Kepler catalog the same way. It is an order-of-magnitude bound: k2/Q is an
-    empirical Solar System relation, the age is assumed, and the mass goes as a_crit^6.5.
-
-    Parameters
-    ----------
-    star_mass : float
-        Stellar mass in solar masses.
-    planet_mass, planet_radius : float
-        Planet mass in Earth masses and radius in Earth radii.
-    planet_period : float
-        Planet period in days.
-    planet_ecc : float, optional
-        Planet eccentricity, default 0.
-    age_gyr : float, optional
-        System age in Gyr, default TIDAL_SURVIVAL_AGE_GYR.
-
-    Returns
-    -------
-    float
-        Mass in Earth masses, NaN when an input is not finite and positive.
-    """
-    values = (star_mass, planet_mass, planet_radius, planet_period, age_gyr)
-    if not all(value is not None and np.isfinite(value) and value > 0 for value in values):
-        return np.nan
-    planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
-    a_crit = ExoMoonLeastSquares.max_moon_semimajor_axis(star_mass, planet_mass * M_earth_to_M_sun,
-                                                         planet_semimajor_axis, planet_ecc) * AU_TO_M
-    mass = planet_mass * Mearth_to_kg
-    radius = planet_radius * ac.R_earth.value
-    age = age_gyr * 1e9 * 365.25 * 86400
-    moon_mass = 2 / 13 * a_crit ** 6.5 * np.sqrt(mass) / (3 * planet_k2_over_q(planet_radius) * age * radius ** 5 *
-                                                          np.sqrt(G))
-    return float(moon_mass / Mearth_to_kg)
-
-
-def moon_radius_from_mass(moon_mass):
-    """Return a moon radius in Earth radii from its mass in Earth masses.
-
-    Mean mass-radius relation of Chen & Kipping (2017, ApJ 834, 17, Table 1): R = 1.008 M^0.279
-    for rocky bodies up to 2.04 M_earth, then R proportional to M^0.589 (continuous at the
-    transition). Bodies more massive than 131.6 M_earth keep that radius.
-    """
-    if moon_mass is None or not np.isfinite(moon_mass) or moon_mass <= 0:
-        return 0.0
-    transition = 2.04
-    rocky = 1.008 * min(moon_mass, transition) ** 0.279
-    if moon_mass <= transition:
-        return float(rocky)
-    return float(rocky * (min(moon_mass, 131.6) / transition) ** 0.589)
-
-
 def catalog_planet_orbit(row, catalog):
     """Return the eccentricity and argument of periastron in degrees of a catalog row.
 
@@ -333,8 +257,9 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
     -------
     dict
         Keyword values named as the `ExoMoonLeastSquares` arguments, plus
-        "max_surviving_moon_radius". The moon radius range is Rp/20 to the smaller of Rp/2 and
-        the largest moon that survives tidal migration (`max_surviving_moon_mass`).
+        "max_surviving_moon_radius". The moon radius range is Rp/20 to Rp/2; the largest moon that
+        survives tidal migration with the generous margin (`max_surviving_moon_radius`) is only
+        reported, because the bound is too uncertain to cut the search.
     """
     planet_radius = row['Planet Radius (R_Earth)']
     planet_period = row['Period (days)']
@@ -344,13 +269,12 @@ def catalog_planet_params(row, catalog, star_mass, star_radius, first_time, bjd_
     if planet_mass is None or np.isnan(planet_mass):
         planet_mass = catalog_planet_mass(planet_radius, row.get('Planet Radius (R_Earth) err'))
     planet_ecc, planet_arg_periastron = catalog_planet_orbit(row, catalog)
-    # The largest moon is the smaller of half the planet radius and the largest moon that
-    # survives tidal migration (Barnes & O'Brien 2002, as in HEK VI); the catalog filter has
-    # already dropped targets where it is below the smallest moon searched.
+    # The tidal survival bound (Barnes & O'Brien 2002, generous margin) is reported, not used to
+    # cut the radius range; the catalog filter has already dropped targets where even it is below
+    # the smallest moon searched.
     min_radius = planet_radius * CATALOG_MIN_MOON_RADIUS_FRACTION
-    surviving_radius = moon_radius_from_mass(max_surviving_moon_mass(star_mass, planet_mass, planet_radius,
-                                                                     planet_period, planet_ecc))
-    max_radius = max(min_radius, min(planet_radius * CATALOG_MAX_MOON_RADIUS_FRACTION, surviving_radius))
+    surviving_radius = max_surviving_moon_radius(star_mass, planet_mass, planet_radius, planet_period, planet_ecc)
+    max_radius = planet_radius * CATALOG_MAX_MOON_RADIUS_FRACTION
     planet_semimajor_axis = ExoMoonLeastSquares.compute_semimajor_axis(star_mass, planet_period)
     if catalog == "kois":
         planet_impact_param = float(row["planet_impact"])

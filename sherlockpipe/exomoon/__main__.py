@@ -9,7 +9,7 @@ from lcbuilder.helper import LcbuilderHelper
 import numpy as np
 from lcbuilder.lcbuilder_class import LcBuilder
 import pandas as pd
-from sherlockpipe.exomoon.catalog import CATALOG_MIN_MOON_RADIUS_FRACTION, TIDAL_SURVIVAL_AGE_GYR, catalog_csv_path, catalog_planet_orbit, catalog_planet_params, combine_cadence_curves, emls_output_dir, max_surviving_moon_mass, mean_planet_mass, moon_radius_from_mass, prepare_koi_table
+from sherlockpipe.exomoon.catalog import CATALOG_MIN_MOON_RADIUS_FRACTION, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, catalog_csv_path, catalog_planet_orbit, catalog_planet_params, combine_cadence_curves, emls_output_dir, max_surviving_moon_radius, mean_planet_mass, prepare_koi_table
 from sherlockpipe.exomoon.constants import AU_TO_RSUN, M_earth_to_M_sun, R_earth_to_R_sun
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
 
@@ -95,12 +95,14 @@ if __name__ == '__main__':
     def moon_tidal_stable(row, period, p_mass, p_radius, star_mass):
         """Check if a moon at least as large as the smallest one searched survives tidal migration.
 
-        Barnes & O'Brien (2002) Eq. 8 for the system age (`max_surviving_moon_mass`), with the
-        moon radius from the Chen & Kipping (2017) relation; HEK VI (Teachey et al. 2018) filters
-        the Kepler catalog the same way. It replaces a P > 10 d M^(1/6) age^(1/4) rule that
+        Barnes & O'Brien (2002) Eq. 8 with the generous margin of `sherlockpipe.exomoon.tides`
+        (k2/Q ten times lower, 1 Gyr), with the moon radius from the Chen & Kipping (2017) relation;
+        HEK VI (Teachey et al. 2018) filters the Kepler catalog the same way with the nominal bound.
+        The margin keeps targets that a planet less dissipative than the Solar System relation, or a
+        younger system, would let keep a moon. It replaces a P > 10 d M^(1/6) age^(1/4) rule that
         could not be traced to its cited source (Heller et al. 2014)."""
         ecc, _ = catalog_planet_orbit(row, catalog)
-        surviving = moon_radius_from_mass(max_surviving_moon_mass(star_mass, p_mass, p_radius, period, ecc))
+        surviving = max_surviving_moon_radius(star_mass, p_mass, p_radius, period, ecc)
         return surviving >= p_radius * CATALOG_MIN_MOON_RADIUS_FRACTION
 
     keep_mask = []
@@ -146,9 +148,10 @@ if __name__ == '__main__':
             n_companion += 1
         keep_mask.append(companion_ok)
     confirmed_tois_df = confirmed_tois_df[keep_mask]
-    logging.info("Dynamical filter: Hill-Roche=%d, Tidal (Barnes & O'Brien 2002, %.0f Gyr)=%d, Companion=%d removed, "
-                 "%d remain",
-                 n_hillroche, TIDAL_SURVIVAL_AGE_GYR, n_tidal, n_companion, len(confirmed_tois_df))
+    logging.info("Dynamical filter: Hill-Roche=%d, Tidal (Barnes & O'Brien 2002, %.0f Gyr, k2/Q x %.1f)=%d, "
+                 "Companion=%d removed, %d remain",
+                 n_hillroche, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, n_tidal, n_companion,
+                 len(confirmed_tois_df))
     #confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Object Id'] == 'TIC 309792357']
     confirmed_tois_df = confirmed_tois_df.iloc[0:100]
     for index, row in confirmed_tois_df.iterrows():
@@ -215,9 +218,7 @@ if __name__ == '__main__':
             planet_impact_param = planet['planet_impact_param']
             min_radius = planet['min_radius']
             max_radius = planet['max_radius']
-            logging.info("Moon radius range %.2f-%.2f R_earth: the largest moon that survives tidal migration for "
-                         "%.0f Gyr is %.2f R_earth (Barnes & O'Brien 2002)", min_radius, max_radius,
-                         TIDAL_SURVIVAL_AGE_GYR, planet['max_surviving_moon_radius'])
+            logging.info("Moon radius range %.2f-%.2f R_earth", min_radius, max_radius)
             # planet_radius = 11.8142656578
             # planet_radius_err = 1.00
             # planet_period = 141.834025

@@ -22,6 +22,7 @@ from sherlockpipe.exomoon.planet import PlanetModel
 from sherlockpipe.exomoon.stacking import MoonStacking
 from sherlockpipe.exomoon.statistics import SearchStatistics
 from sherlockpipe.exomoon.templates import MoonTemplates
+from sherlockpipe.exomoon.tides import TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, max_surviving_moon_radius
 
 
 _WORKER_SEARCH = None
@@ -328,6 +329,14 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.best_snr_radius = np.nan
         self.best_snr_radius_above_range = False
         self.best_snr_radius_below_range = False
+        # Tidal survival (Barnes & O'Brien 2002, generous margin of `tides`): a warning, not a cut.
+        self.max_surviving_moon_radius = max_surviving_moon_radius(star_mass, planet_mass, planet_radius,
+                                                                   planet_period, planet_ecc)
+        self.best_snr_radius_above_tidal_survival = False
+        if self.max_surviving_moon_radius < max_radius:
+            logging.info("Moons above %.2f R_earth are unlikely to survive tidal migration (Barnes & O'Brien 2002 with "
+                         "a generous margin: %.0f Gyr, k2/Q x %.1f); they are still searched", self.max_surviving_moon_radius,
+                         TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR)
         if period_grid_size < ExoMoonLeastSquares.SPECTRUM_KERNEL:
             raise ValueError(f"period_grid_size must be at least {ExoMoonLeastSquares.SPECTRUM_KERNEL}, "
                              f"got {period_grid_size}")
@@ -867,6 +876,12 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         if self.best_snr_radius_below_range:
             logging.warning("Best SNR radius %.2f R_earth is below the searched range (min %.2f R_earth): the "
                             "dip is shallower than the smallest moon searched for", moon_radius, self.min_radius)
+        self.best_snr_radius_above_tidal_survival = bool(moon_radius > self.max_surviving_moon_radius)
+        if self.best_snr_radius_above_tidal_survival:
+            logging.warning("Best SNR radius %.2f R_earth is above the largest moon that survives tidal migration, "
+                            "%.2f R_earth even with a generous margin (Barnes & O'Brien 2002, %.0f Gyr, k2/Q x %.1f): "
+                            "such a moon is unlikely, though the bound is an order-of-magnitude estimate", moon_radius,
+                            self.max_surviving_moon_radius, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR)
         if self.best_snr_radius_above_range:
             logging.warning("Best SNR radius %.2f R_earth is above the searched range (max %.2f R_earth): the "
                             "dip is deeper than any moon searched for, for example a planet residual or a "

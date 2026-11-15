@@ -13,6 +13,7 @@ from lcbuilder.helper import LcbuilderHelper
 from sherlockpipe import __version__
 from sherlockpipe.exomoon.constants import AU_TO_RSUN, R_earth_to_R_sun
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
+from sherlockpipe.exomoon.tides import TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR
 from sherlockpipe.system_stability.mr_forecast import MrForecast
 
 MASK_DURATION_FACTOR = 2
@@ -654,7 +655,11 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "cadences": inputs["cadences"],
         "mixed_cadence": len(significant_cadences(inputs["cadences"])) > 1,
         "planet": planet,
-        "moon_radius_range": moon, "sources": inputs["sources"], "period_grid_size": period_grid_size,
+        "moon_radius_range": moon,
+        "tidal_survival": {"max_moon_radius": emls.max_surviving_moon_radius,
+                           "best_radius_above": emls.best_snr_radius_above_tidal_survival,
+                           "age_gyr": TIDAL_SURVIVAL_AGE_GYR, "k2_q_factor": TIDAL_SURVIVAL_K2_Q_FACTOR},
+        "sources": inputs["sources"], "period_grid_size": period_grid_size,
         "radius_grid_size": radius_grid_size, "epochs_in_span": len(inputs["t0s"]),
         "min_points_per_epoch": min_points, "epochs_kept": len(kept), "epochs_skipped": skipped,
         "epochs_used": len(emls.bary_t0s), "epochs_dropped_fit": emls.epochs_dropped_fit,
