@@ -523,7 +523,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
              max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None,
              null_runs=100, fap_threshold=0.01, detrend_window=None,
-             detrend_mask='auto', impact_param=None, fix_impact_param=False, null_stop_fap=0.1):
+             detrend_mask='auto', impact_param=None, fix_impact_param=False, null_stop_fap=0.1,
+             scramble_runs=100, scramble_trigger_fap=0.1):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -569,6 +570,11 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     null_stop_fap : float or None, optional
         Stop the null searches once the false-alarm probability cannot end below this value,
         default 0.1; None runs all null_runs (see `ExoMoonLeastSquares.run_nulls`).
+    scramble_runs : int, optional
+        Searches on the real epochs with the moon phases permuted, default 100, run only when the
+        false-alarm probability is below scramble_trigger_fap (default 0.1; None always). They vet
+        the hypothesis against the real planet residuals and do not change the detection (see
+        `ExoMoonLeastSquares.run_scrambled_nulls`).
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -592,7 +598,8 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
                        subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold, detrend_window,
-                       detrend_mask, impact_param, fix_impact_param, null_stop_fap)
+                       detrend_mask, impact_param, fix_impact_param, null_stop_fap, scramble_runs,
+                       scramble_trigger_fap)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -609,7 +616,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
          ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None, detrend_mask='auto',
-         impact_param=None, fix_impact_param=False, null_stop_fap=0.1):
+         impact_param=None, fix_impact_param=False, null_stop_fap=0.1, scramble_runs=0, scramble_trigger_fap=0.1):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -639,7 +646,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         fap_threshold=fap_threshold, duration_from_fit=inputs["sources"].get("duration") != "candidates.csv",
         detrend_window=(DETREND_DURATIONS * planet["duration"] if detrend_window is None else float(detrend_window))
         if inputs["detrend"] else None, detrend_mask=detrend_mask, fix_impact_param=fix_impact_param,
-        null_stop_fap=null_stop_fap)
+        null_stop_fap=null_stop_fap, scramble_runs=scramble_runs, scramble_trigger_fap=scramble_trigger_fap)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -710,6 +717,11 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "null_runs_requested": null_runs, "null_runs_completed": len(emls.null_snrs or []),
         "null_stop_fap": emls.null_stop_fap, "null_stopped_early": emls.null_stopped_early,
         "null_independent_offsets": emls.null_independent_offsets, "null_snrs": emls.null_snrs,
+        "scramble_runs_requested": scramble_runs, "scramble_trigger_fap": emls.scramble_trigger_fap,
+        "scramble_snrs": emls.scramble_snrs, "scramble_stopped_early": emls.scramble_stopped_early,
+        "scramble_fap": emls.scramble_fap, "scramble_fap_upper": emls.scramble_fap_upper,
+        "scramble_fap_empirical": emls.scramble_fap_empirical, "scramble_passed": emls.scramble_passed,
+        "period_constrained": emls.period_constrained,
         "alias_family": (emls.aliases or [])[:10],
         "red_noise_factor": emls.red_noise_factor, "red_noise_measured": emls.red_noise_measured,
         "single_event": emls.single_event, "loo_snr_min": emls.loo_snr_min, "epoch_stats": emls.epoch_stats,

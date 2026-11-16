@@ -240,7 +240,7 @@ if __name__ == '__main__':
                                        period_grid_size=10000, radius_grid_size=20, subtract_mode='subtract', fit_rp_per_transit=False,
                                        min_transit_completeness=0.75, max_subtraction_rms_ratio=1.5,
                                        null_runs=NULL_RUNS, detrend_window=DETREND_DURATIONS * planet_duration,
-                                       detrend_mask='auto', exposure_time='auto')
+                                       detrend_mask='auto', exposure_time='auto', scramble_runs=NULL_RUNS)
             # emls.flux = emls.inject_moon(emls.time, emls.flux, emls.flux_err, emls.bary_t0s, planet_semimajor_axis,
             #                             planet_ecc, moon_radius, moon_period, moon_mass, plot=True, initial_alpha=moon_alpha,
             #                              inject_planet=False, inject_moon=False)

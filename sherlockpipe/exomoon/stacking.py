@@ -15,7 +15,7 @@ class MoonStacking:
     #@njit(fastmath=True, parallel=False)
     def compute_moon_transit_scenarios(cls, time, flux, flux_err, planet_t0, moon_initial_alpha, moon_period, bary_t0s,
                                        half_moon_orbit_transit_duration, half_moon_max_orbit_transit_duration,
-                                       half_moon_transit_duration, extra=None):
+                                       half_moon_transit_duration, extra=None, phase_times=None):
         """Compute moon transit scenarios for all barycentric transit times.
 
         Parameters
@@ -55,9 +55,13 @@ class MoonStacking:
         # On a sorted curve each epoch's window is one slice, found by bisection instead of a pass
         # over every point (the same points as the comparison below).
         time_sorted = len(time) < 2 or bool(np.all(time[1:] >= time[:-1]))
-        for t0 in bary_t0s:
+        for index, t0 in enumerate(bary_t0s):
             max_moon_t0_tau = cls.compute_moon_ts(t0, half_moon_orbit_transit_duration, half_moon_transit_duration)
-            moon_t0, moon_alpha = cls.compute_moon_t0(planet_t0, t0, moon_period, moon_initial_alpha, max_moon_t0_tau)
+            phase_time = t0 if phase_times is None else phase_times[index]
+            moon_t0, moon_alpha = cls.compute_moon_t0(planet_t0, phase_time, moon_period, moon_initial_alpha,
+                                                      max_moon_t0_tau)
+            # The phase may come from another epoch; the window stays on this one.
+            moon_t0 = moon_t0 - phase_time + t0
             moon_t1 = moon_t0 - half_moon_transit_duration
             # t1 = moon_orbit_range[1]
             # phase_delta = (t0 - planet_t0) % moon_period * 2 * np.pi
@@ -128,7 +132,8 @@ class MoonStacking:
                                                                                search_input.half_moon_orbit_transit_duration,
                                                                 search_input.half_moon_max_orbit_transit_duration,
                                                                                search_input.half_moon_transit_duration,
-                                                                               extra=extra)
+                                                                               extra=extra,
+                                                                phase_times=self.moon_phase_times(bary_t0s))
         if len(transit_scenarios) == 0:
             return None
         scenario_extra = []
@@ -206,6 +211,18 @@ class MoonStacking:
                     break
             return ~finite | (values < lower) | (values > upper)
 
+    def moon_phase_times(self, epochs):
+        """Return the time that sets the moon phase at each epoch, or None when every epoch uses its own.
+
+        moon_phase_map, set only by the scrambled nulls (see `run_scrambled_nulls`), maps each epoch
+        to the epoch whose phase it takes: the stacked data stay the same, and only the moon
+        positions move, so the coherence of the moon orbit between epochs is lost.
+        """
+        phase_map = getattr(self, "moon_phase_map", None)
+        if not phase_map:
+            return None
+        return [float(phase_map.get(float(t0), t0)) for t0 in epochs]
+
     def search_stack(self, search_input, extra):
         """Return the points every grid hypothesis stacks, with their fixed planet normal equations, or None.
 
@@ -217,7 +234,8 @@ class MoonStacking:
         """
         half_window = search_input.half_moon_max_orbit_transit_duration
         key = (id(self.time), len(self.time), id(self.flux), id(self.flux_err), id(extra), tuple(self.bary_t0s),
-               float(half_window), bool(self.fit_planet_epoch_depth))
+               float(half_window), bool(self.fit_planet_epoch_depth),
+               tuple(self.moon_phase_times(self.bary_t0s) or ()))
         cached = getattr(self, "_search_stack_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -249,6 +267,7 @@ class MoonStacking:
                     if n_columns > 2 else (None, None)
                 stack = {"time": time[index], "flux": flux, "flux_err": flux_err, "weights": weights,
                          "root_weights": np.sqrt(weights), "slot": np.concatenate(slots), "epochs": np.asarray(epochs),
+                         "phase_epochs": np.asarray(self.moon_phase_times(epochs) or epochs, dtype=float),
                          "names": names, "n_columns": n_columns, "terms": terms, "normal": normal, "right": right,
                          "total_weight": float(np.sum(weights))}
         self._search_stack_cache = (key, stack)
@@ -286,7 +305,7 @@ class MoonStacking:
                                                   search_input.half_moon_transit_duration)
         epochs = stack["epochs"]
         period = search_input.moon_period
-        phase = search_input.moon_alpha + (((epochs - self.planet_t0) % period) / period) * 2 * np.pi
+        phase = search_input.moon_alpha + (((stack["phase_epochs"] - self.planet_t0) % period) / period) * 2 * np.pi
         moon_t0 = epochs + np.cos(phase) * tau
         half = search_input.half_moon_transit_duration
         centre = (moon_t0 - half) + half

@@ -57,7 +57,8 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                   max_subtraction_rms_ratio: float = 3.0, exposure_time="auto",
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
-                 detrend_mask='auto', fix_impact_param=False, retrograde=True, null_stop_fap=0.1):
+                 detrend_mask='auto', fix_impact_param=False, retrograde=True, null_stop_fap=0.1,
+                 scramble_runs=0, scramble_trigger_fap=0.1):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -166,6 +167,15 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             Stop the null searches once the false-alarm probability is certain to end above this
             value, default 0.1 (see `run_nulls`). It must be above fap_threshold. None runs all
             null_runs searches.
+        scramble_runs : int, optional
+            Number of searches on the real epochs with the moon phases permuted between epochs
+            (see `run_scrambled_nulls`), which vet a promising hypothesis against the real
+            planet residuals. Default 0, none. They set scramble_fap and scramble_passed and do
+            not change detected.
+        scramble_trigger_fap : float or None, optional
+            Run the scrambled nulls only when the pseudo-epoch false-alarm probability is below
+            this value, default 0.1. None runs them whenever scramble_runs > 0, also without
+            pseudo-epoch nulls.
         detrend_window : float, optional
             Biweight window in days. When given, the light curve is taken as undetrended and
             `run` detrends it with every moon window masked (audit item A1), after any injected
@@ -262,6 +272,17 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                              f"got {null_stop_fap}")
         self.null_stop_fap = None if null_stop_fap is None else float(null_stop_fap)
         self.null_stopped_early = None
+        if int(scramble_runs) < 0:
+            raise ValueError(f"scramble_runs must be zero or positive, got {scramble_runs}")
+        self.scramble_runs = int(scramble_runs)
+        self.scramble_trigger_fap = None if scramble_trigger_fap is None else float(scramble_trigger_fap)
+        self.moon_phase_map = None
+        self.scramble_snrs = None
+        self.scramble_stopped_early = None
+        self.scramble_fap = None
+        self.scramble_fap_empirical = None
+        self.scramble_fap_upper = None
+        self.scramble_passed = None
         self.null_seed = null_seed
         self.null_snrs = None
         self.null_independent_offsets = None
@@ -1002,6 +1023,22 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             if self.null_fit_rejected:
                 logging.warning("An Anderson-Darling test rejects the Gumbel fit to the %d null SNRs at 5 %%, so "
                                 "the extrapolated false-alarm probability is less reliable", len(self.null_snrs))
+        if self.scramble_runs > 0 and np.isfinite(self.max_snr) and (
+                self.scramble_trigger_fap is None or (self.fap is not None and self.fap < self.scramble_trigger_fap)):
+            self.scramble_snrs = self.run_scrambled_nulls(self.max_snr)
+            self.assess_scrambled_false_alarm(self.max_snr)
+            if self.scramble_fap is not None:
+                logging.log(logging.INFO if self.scramble_passed else logging.WARNING,
+                            "Scrambled-phase nulls: false-alarm probability %.2g (%d%% bootstrap upper value %.2g; "
+                            "empirical %.2g over %d runs) -> %s. They keep the real planet residuals, so a signal "
+                            "they reproduce does not need a moon%s", self.scramble_fap, FAP_UPPER_PERCENTILE,
+                            self.scramble_fap_upper, self.scramble_fap_empirical, len(self.scramble_snrs),
+                            "passes" if self.scramble_passed else "fails",
+                            "" if self.period_constrained is not False else "; the period is not constrained "
+                            "(audit item G17), where even a real moon tends to fail")
+        elif self.scramble_runs > 0:
+            logging.info("Scrambled-phase nulls not run: false-alarm probability %s is not below the trigger %s",
+                         None if self.fap is None else f"{self.fap:.2g}", self.scramble_trigger_fap)
         if inject_params is not None:
             timing_match, period_match, alias_match = pending_recovery
             if self.detected is None:

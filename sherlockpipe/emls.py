@@ -49,6 +49,13 @@ def parse_args(argv=None):
                     help="Stop the null searches once the false-alarm probability cannot end below this value, "
                          "because enough nulls already reach the observed SNR; it must be above --fap_threshold. "
                          "0 runs all --null_runs.")
+    ap.add_argument('--scramble_runs', type=int, default=100,
+                    help="Searches on the real transits with the moon phases permuted between epochs, run when the "
+                         "false-alarm probability is below --scramble_trigger_fap. They keep the real planet "
+                         "residuals and vet the best hypothesis (scramble_passed); they do not change detected. "
+                         "0 skips them.")
+    ap.add_argument('--scramble_trigger_fap', type=float, default=0.1,
+                    help="Run the scrambled-phase nulls only below this false-alarm probability; 0 runs them always.")
     ap.add_argument('--detrend_window', type=float, default=None,
                     help="Biweight window in days for the EMLS detrending of lc_0.csv. Default: 3 planet durations.")
     ap.add_argument('--detrend_mask', default='auto', choices=['auto', 'moon_window', 'planet', 'none'],
@@ -69,4 +76,5 @@ if __name__ == '__main__':
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
              args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes,
              args.null_runs, args.fap_threshold, args.detrend_window, args.detrend_mask, args.impact_param,
-             args.fix_impact_param, args.null_stop_fap or None)
+             args.fix_impact_param, args.null_stop_fap or None, args.scramble_runs,
+             args.scramble_trigger_fap or None)
