@@ -204,7 +204,11 @@ def moon_with_nulls(tmp_path_factory):
 
 def test_noise_is_not_a_detection(noise_with_nulls):
     emls = noise_with_nulls
-    assert len(emls.null_snrs) == 30
+    # Enough nulls reach the noise SNR that the false-alarm probability cannot end below 0.1,
+    # so the null searches stop early.
+    assert emls.null_stopped_early is True
+    assert exomoon.MIN_NULL_RUNS <= len(emls.null_snrs) < 30
+    assert (np.sum(np.array(emls.null_snrs) >= emls.max_snr) + 1) / 31 > emls.null_stop_fap
     assert emls.null_independent_offsets >= 3
     assert emls.fap > 0.05
     assert emls.detected is False
@@ -213,10 +217,48 @@ def test_noise_is_not_a_detection(noise_with_nulls):
 def test_moon_is_a_detection(moon_with_nulls):
     emls = moon_with_nulls
     assert emls.max_snr > 10
+    assert emls.null_stopped_early is False and len(emls.null_snrs) == 30
     assert emls.fap < 1e-6
     assert emls.fap_empirical == pytest.approx(1 / 31)
     assert emls.detected is True
     assert emls.single_event is False
+
+
+def test_nulls_stop_only_when_the_fap_cannot_end_below_the_stop_value(tmp_path):
+    emls = gumbel_nulls(tmp_path, 0)
+    emls.null_runs = 100
+    below, above = [1.0] * 30, [6.0] * 30
+    # (k + 1) / 101 > 0.1 needs k >= 10 nulls at or above the observed SNR of 5.
+    assert not emls.null_can_stop(below[:21] + above[:9], 5.0)
+    assert emls.null_can_stop(below[:20] + above[:10], 5.0)
+    assert not emls.null_can_stop(above[:exomoon.MIN_NULL_RUNS - 1], 5.0)  # too few nulls yet
+    assert not emls.null_can_stop(above, np.nan)
+    emls.null_stop_fap = None
+    assert not emls.null_can_stop(above, 5.0)
+
+
+def test_a_sequential_stop_never_changes_the_full_null_verdict():
+    """Whenever the nulls stop early, all null_runs would have given an empirical fap above the stop value."""
+    rng = np.random.default_rng(4)
+    stops = 0
+    for _ in range(2000):
+        nulls = stats.gumbel_r.rvs(loc=4.0, scale=0.5, size=100, random_state=rng)
+        observed = rng.uniform(3.5, 8.0)
+        reached = np.cumsum(nulls >= observed)
+        for n in range(exomoon.MIN_NULL_RUNS, 101):
+            if (reached[n - 1] + 1) / 101 > 0.1:
+                stops += 1
+                assert (reached[-1] + 1) / 101 > 0.1
+                assert stats.gumbel_r.sf(observed, *stats.gumbel_r.fit(nulls[:n])) > 0.01
+                break
+    assert stops > 500
+
+
+def test_the_stop_value_must_be_above_the_detection_threshold(tmp_path):
+    t0s, time, flux, flux_err, duration, _ = guard.planet_curve(3)
+    with pytest.raises(ValueError, match="null_stop_fap"):
+        guard.build(flux, time, flux_err, tmp_path, t0s, duration, null_stop_fap=0.01)
+    assert guard.build(flux, time, flux_err, tmp_path, t0s, duration, null_stop_fap=None).null_stop_fap is None
 
 
 def test_given_nulls_are_used_without_new_searches(tmp_path):

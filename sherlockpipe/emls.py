@@ -45,6 +45,10 @@ def parse_args(argv=None):
     ap.add_argument('--fap_threshold', type=float, default=0.01,
                     help="False-alarm probability below which the best hypothesis is a detection; the 95th percentile "
                          "of the false-alarm probability over bootstrap resamples of the nulls must be below it.")
+    ap.add_argument('--null_stop_fap', type=float, default=0.1,
+                    help="Stop the null searches once the false-alarm probability cannot end below this value, "
+                         "because enough nulls already reach the observed SNR; it must be above --fap_threshold. "
+                         "0 runs all --null_runs.")
     ap.add_argument('--detrend_window', type=float, default=None,
                     help="Biweight window in days for the EMLS detrending of lc_0.csv. Default: 3 planet durations.")
     ap.add_argument('--detrend_mask', default='auto', choices=['auto', 'moon_window', 'planet', 'none'],
@@ -65,4 +69,4 @@ if __name__ == '__main__':
              args.max_moon_radius, args.period_grid_size, args.radius_grid_size, args.cpus, args.curve, args.lc_file,
              args.use_fit, args.max_moon_density, args.subtract_mode, args.exposure_time, args.ttv_prior_minutes,
              args.null_runs, args.fap_threshold, args.detrend_window, args.detrend_mask, args.impact_param,
-             args.fix_impact_param)
+             args.fix_impact_param, args.null_stop_fap or None)

@@ -147,7 +147,7 @@ class NullDistribution:
                                     self.snr_matrix(residuals, len(alpha_grid), len(period_grid)))
         return np.nan if best is None else best[3]
 
-    def run_nulls(self, before_trim, period_grid):
+    def run_nulls(self, before_trim, period_grid, observed_snr=None):
         """Return the null distribution of the detection SNR from null_runs pseudo-epoch searches (audit item H10).
 
         Each null search uses windows of this light curve placed away from the planet transits
@@ -156,11 +156,27 @@ class NullDistribution:
         The windows of different null runs overlap, so they are not independent; the number of
         independent offsets per epoch is recorded in null_independent_offsets.
 
+        Sequential stop: with null_stop_fap set and the observed SNR given, the searches stop once
+        k nulls reach the observed SNR with (k + 1) / (null_runs + 1) > null_stop_fap, after at least
+        MIN_NULL_RUNS. k can only grow with more nulls, so the empirical false-alarm probability of
+        the full null_runs could not end below null_stop_fap, and the target cannot be a detection at
+        fap_threshold < null_stop_fap. The probabilities are then computed from the nulls run so far.
+
+        Parameters
+        ----------
+        before_trim : ExoMoonLeastSquares
+            Copy of this search before the epochs were trimmed.
+        period_grid : numpy.ndarray
+            Moon period grid of the real search.
+        observed_snr : float, optional
+            SNR of the real search, needed for the sequential stop.
+
         Returns
         -------
         list of float
             The SNR of each completed null search.
         """
+        self.null_stopped_early = False
         trim_half_window = self.trim_half_window(np.max(self.planet_mass_grid))
         search_half_window = self.search_input(period_grid[-1], 0.0, self.planet_mass, period_grid[-1],
                                                self.planet_impact_param).half_moon_max_orbit_transit_duration
@@ -202,8 +218,15 @@ class NullDistribution:
                     snrs.append(float(snr))
                 else:
                     failed += 1
+                if self.null_can_stop(snrs, observed_snr):
+                    self.null_stopped_early = True
+                    break
         finally:
             logging.disable(previous_disable)
+        if self.null_stopped_early:
+            logging.info("Null searches stopped after %d of %d: %d reach the observed SNR %.2f, so the false-alarm "
+                         "probability cannot end below %.2g", len(snrs), self.null_runs,
+                         int(np.sum(np.array(snrs) >= observed_snr)), observed_snr, self.null_stop_fap)
         if failed:
             logging.warning("%d/%d null runs failed: too few pseudo-epochs with data, or the search gave no SNR",
                             failed, self.null_runs)
@@ -211,6 +234,19 @@ class NullDistribution:
             logging.info("Null SNR over %d runs: median %.2f, 95th percentile %.2f, largest %.2f", len(snrs),
                          np.median(snrs), np.percentile(snrs, 95), np.max(snrs))
         return snrs
+
+    def null_can_stop(self, snrs, observed_snr):
+        """Return whether the null searches can stop: the false-alarm probability cannot end below null_stop_fap.
+
+        True after at least MIN_NULL_RUNS nulls when k of them reach the observed SNR and
+        (k + 1) / (null_runs + 1) > null_stop_fap, the lowest empirical probability the full null_runs
+        could give (see `run_nulls`).
+        """
+        stop_fap = getattr(self, "null_stop_fap", None)
+        if stop_fap is None or observed_snr is None or not np.isfinite(observed_snr) or len(snrs) < MIN_NULL_RUNS:
+            return False
+        reached = int(np.sum(np.asarray(snrs) >= observed_snr))
+        return (reached + 1) / (self.null_runs + 1) > stop_fap
 
     def false_alarm(self, snr):
         """Return (Gumbel, empirical) false-alarm probabilities of an SNR against the null runs.

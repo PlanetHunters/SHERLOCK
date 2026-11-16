@@ -523,7 +523,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
              period_grid_size=10000, radius_grid_size=20, cpus=None, curve=None, lc_file=None, use_fit=True,
              max_moon_density=5.5, subtract_mode='subtract', exposure_time=None, ttv_prior_minutes=None,
              null_runs=100, fap_threshold=0.01, detrend_window=None,
-             detrend_mask='auto', impact_param=None, fix_impact_param=False):
+             detrend_mask='auto', impact_param=None, fix_impact_param=False, null_stop_fap=0.1):
     """Run EMLS for one candidate of a SHERLOCK results directory.
 
     Outputs go to ``<object_dir>/emls_<candidate>``: the EMLS plots, ``emls.log`` and
@@ -566,6 +566,9 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
     fix_impact_param : bool, optional
         Keep the impact parameter in the planet fold fit instead of fitting it, default False. The
         search still fits one impact parameter correction shared by all epochs with each moon.
+    null_stop_fap : float or None, optional
+        Stop the null searches once the false-alarm probability cannot end below this value,
+        default 0.1; None runs all null_runs (see `ExoMoonLeastSquares.run_nulls`).
     Other parameters are passed to `build_inputs`.
 
     Returns
@@ -589,7 +592,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
         results = _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius,
                        period_grid_size, radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density,
                        subtract_mode, exposure_time, ttv_prior_minutes, null_runs, fap_threshold, detrend_window,
-                       detrend_mask, impact_param, fix_impact_param)
+                       detrend_mask, impact_param, fix_impact_param, null_stop_fap)
     except Exception:
         logging.exception("EMLS failed for candidate %d; previous results, if any, are kept in %s", candidate,
                           final_dir)
@@ -606,7 +609,7 @@ def run_emls(object_dir, candidate, mask=None, planet_mass=None, min_moon_radius
 def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, max_moon_radius, period_grid_size,
          radius_grid_size, cpus, curve, lc_file, use_fit, max_moon_density, subtract_mode, exposure_time,
          ttv_prior_minutes=None, null_runs=0, fap_threshold=0.01, detrend_window=None, detrend_mask='auto',
-         impact_param=None, fix_impact_param=False):
+         impact_param=None, fix_impact_param=False, null_stop_fap=0.1):
     inputs = build_inputs(object_dir, candidate, mask, planet_mass, min_moon_radius, max_moon_radius, curve, lc_file,
                           use_fit, exposure_time)
     star, planet, moon = inputs["star"], inputs["planet"], inputs["moon"]
@@ -635,7 +638,8 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         planet_t0_err=planet.get("t0_err"), planet_period_err=planet.get("period_err"), null_runs=null_runs,
         fap_threshold=fap_threshold, duration_from_fit=inputs["sources"].get("duration") != "candidates.csv",
         detrend_window=(DETREND_DURATIONS * planet["duration"] if detrend_window is None else float(detrend_window))
-        if inputs["detrend"] else None, detrend_mask=detrend_mask, fix_impact_param=fix_impact_param)
+        if inputs["detrend"] else None, detrend_mask=detrend_mask, fix_impact_param=fix_impact_param,
+        null_stop_fap=null_stop_fap)
     # EMLS keeps an epoch only with at least min_cadences_per_t0 points within two durations.
     kept = list(emls.bary_t0s)
     window = planet["duration"] * 2
@@ -704,6 +708,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "fap_threshold": emls.fap_threshold,
         "detected": emls.detected,
         "null_runs_requested": null_runs, "null_runs_completed": len(emls.null_snrs or []),
+        "null_stop_fap": emls.null_stop_fap, "null_stopped_early": emls.null_stopped_early,
         "null_independent_offsets": emls.null_independent_offsets, "null_snrs": emls.null_snrs,
         "alias_family": (emls.aliases or [])[:10],
         "red_noise_factor": emls.red_noise_factor, "red_noise_measured": emls.red_noise_measured,

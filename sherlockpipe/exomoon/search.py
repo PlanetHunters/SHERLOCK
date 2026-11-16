@@ -57,7 +57,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                   max_subtraction_rms_ratio: float = 3.0, exposure_time="auto",
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
-                 detrend_mask='auto', fix_impact_param=False, retrograde=True):
+                 detrend_mask='auto', fix_impact_param=False, retrograde=True, null_stop_fap=0.1):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -162,6 +162,10 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             probability over bootstrap resamples of the nulls (see `false_alarm_upper`).
         null_seed : int, optional
             Seed of the pseudo-epoch offsets, default 0.
+        null_stop_fap : float or None, optional
+            Stop the null searches once the false-alarm probability is certain to end above this
+            value, default 0.1 (see `run_nulls`). It must be above fap_threshold. None runs all
+            null_runs searches.
         detrend_window : float, optional
             Biweight window in days. When given, the light curve is taken as undetrended and
             `run` detrends it with every moon window masked (audit item A1), after any injected
@@ -253,6 +257,11 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self._detrend_mask_logged = False
         self.null_runs = int(null_runs)
         self.fap_threshold = float(fap_threshold)
+        if null_stop_fap is not None and not (np.isfinite(null_stop_fap) and self.fap_threshold < null_stop_fap < 1):
+            raise ValueError(f"null_stop_fap must be None or between fap_threshold ({self.fap_threshold}) and 1, "
+                             f"got {null_stop_fap}")
+        self.null_stop_fap = None if null_stop_fap is None else float(null_stop_fap)
+        self.null_stopped_early = None
         self.null_seed = null_seed
         self.null_snrs = None
         self.null_independent_offsets = None
@@ -976,7 +985,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         if null_snrs is not None:
             self.null_snrs = [float(value) for value in null_snrs]
         elif self.null_runs > 0:
-            self.null_snrs = self.run_nulls(before_trim, period_grid)
+            self.null_snrs = self.run_nulls(before_trim, period_grid, self.max_snr)
         self.assess_false_alarm(self.max_snr)
         if self.fap is None:
             logging.info("No false-alarm probability: SNR %.2f at P=%.4f d, alpha=%.3f rad is a search statistic "
