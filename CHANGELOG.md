@@ -4,6 +4,11 @@
 
 ### Changed
 
+- Update WATSON integration to `dearwatson==2.1.2`: the vetting report is a compact landscape PDF (verdict and
+  signal, WATSON-NET and TRICERATOPS, source offset, centroids and optical ghost with the per-sector pixel maps,
+  every single transit as a thumbnail, and detailed sheets only for the flagged transits) instead of 80+ portrait
+  pages. The separate `*_summary.pdf` is no longer generated, so `--only_summary` has no effect.
+
 - The ground-based observation plan report (`python -m sherlockpipe.plan`) is a landscape document instead of a
   portrait one with a table of miniature airmass plots (1.25 x 0.75 inches, without tick labels). It has the target,
   the candidate and the constraints; a calendar of opportunities with one row per observatory, every transit of

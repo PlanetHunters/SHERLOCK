@@ -35,7 +35,7 @@ setuptools.setup(
                         'batman-package', # Single-transit models
                         "celerite==0.4.3", # Allesfitter dependency
                         "corner==2.2.3", # Allesfitter dependency
-                        "dearwatson==2.0.0", # Vetting
+                        "dearwatson==2.1.2", # Vetting
                         "pypdfium2>=4.0", # Target info report: renders the TRICERATOPS field of view PDFs
                         "dynesty==2.1.5", # Allesfitter dependency
                         "emcee==3.1.6", # Allesfitter dependency

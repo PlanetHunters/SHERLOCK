@@ -10,7 +10,7 @@ if __name__ == '__main__':
     ap.add_argument('--ml', action='store_true', default=True, help="Whether tu run WATSON-NET.", required=False)
     ap.add_argument('--properties', help="The YAML file to be used as input.", required=False)
     ap.add_argument('--cpus', type=int, default=None, help="The number of CPU cores to be used.", required=False)
-    ap.add_argument('--only_summary', action='store_true', default=False, help="Whether only the summary report should be created.", required=False)
+    ap.add_argument('--only_summary', action='store_true', default=False, help="Deprecated: the landscape vetting report (dearwatson>=2.1.0) has no separate summary, so this has no effect.", required=False)
     ap.add_argument('--gpt', action='store_true', default=False, help="Whether the GPT analysis should be run.", required=False)
     ap.add_argument('--gpt_key', type=str, default=None, help="The GPT api key.", required=False)
     ap.add_argument('--triceratops_bins', type=int, default=200, help="The number of bins to be used for the folded curve "
