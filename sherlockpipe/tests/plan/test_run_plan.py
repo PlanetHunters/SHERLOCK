@@ -55,6 +55,14 @@ def called_with(mock_call):
     return dict(bound.arguments)
 
 
+def report_called_with(mock_call):
+    """The arguments of a recorded ObservationReport(...) call, by parameter name."""
+    signature = inspect.signature(plan_run.ObservationReport.__init__)
+    bound = signature.bind(None, *mock_call.args, **mock_call.kwargs)
+    bound.apply_defaults()
+    return dict(bound.arguments)
+
+
 def alles_for(candidates=("SOI_1",), epoch=1713.45):
     rng = np.random.default_rng(1)
     posteriors = {}
@@ -182,6 +190,14 @@ class TestOrchestration(unittest.TestCase):
         self.assertEqual(["TIC 224298134_SOI_1", "TIC 224298134_SOI_2"], [called_with(c)["name"] for c in planner.call_args_list])
         self.assertEqual(2, report.return_value.create_report.call_count)
 
+    def test_the_depth_reaches_the_report_in_ppt_with_its_errors(self):
+        """The fit tables are in ppt; extract_depth returns them multiplied by 1000 and the report writes ppt."""
+        _, report = self._run()
+        args = report_called_with(report.call_args)
+        self.assertAlmostEqual(0.6486, float(args["depth"]), places=4)
+        self.assertAlmostEqual(0.04, float(args["depth_low_err"]), places=4)
+        self.assertAlmostEqual(0.05, float(args["depth_up_err"]), places=4)
+
     def test_the_report_gets_the_transits_of_the_plan_the_start_and_the_number_of_cards(self):
         _, report = self._run()
         kwargs = report.call_args.kwargs
@@ -257,12 +273,21 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("Calar Alto", text)
         self.assertIn("the target never rises above 30°", text)   # Trappist South has no events and says why
 
-    @unittest.expectedFailure
-    def test_the_depth_of_the_fit_is_written_in_ppt(self):
-        """Known bug: the fit tables already give the depth in ppt (0.6486) and AllesfitterDataExtractor.extract_depth
-        multiplies it by 1000 again. The extractor is shared with the vetting and single transits runs."""
-        depth, _, _ = AllesfitterDataExtractor.extract_depth(0, pd.read_csv(self.fit + "/results/ns_derived_table.csv"))
-        self.assertAlmostEqual(0.6486, float(depth), places=3)
+    def test_the_depth_in_the_pdf_is_the_one_of_the_fit_in_ppt(self):
+        plan_dir = self._run()
+        document = pypdfium2.PdfDocument(plan_dir + "/TIC 224298134_SOI_1_observation_plan.pdf")
+        first_page = document[0].get_textpage().get_text_range()
+        self.assertIn("depth 0.649 +0.050 −0.040 ppt", first_page)
+        self.assertNotIn("648", first_page)
+
+    def test_the_extractor_keeps_returning_ppm_because_other_runs_divide_it_by_1000(self):
+        """vetting/run.py and single_transits/run.py do `depth / 1000` after extract_depth: changing the unit of the
+        extractor needs those two to change with it."""
+        derived = pd.read_csv(self.fit + "/results/ns_derived_table.csv")
+        depth, low, up = AllesfitterDataExtractor.extract_depth(0, derived)
+        self.assertAlmostEqual(648.6, float(depth), places=1)
+        self.assertAlmostEqual(40.0, float(low), places=1)
+        self.assertAlmostEqual(50.0, float(up), places=1)
 
 
 if __name__ == '__main__':

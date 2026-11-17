@@ -239,6 +239,9 @@
   column was called "long" where the code reads "lon"); the coordinates are now read as numbers. A K2 target
   ignored the time unit given with `--time_unit`. The moon illumination of the report was truncated (0.29 was
   shown as 28%). The table captions of the old report repeated "Table 3" and skipped "Table 4".
+  The depth of the candidate was written 1000 times too big (`AllesfitterDataExtractor.extract_depth` gives parts per
+  million and the plan labelled it ppt); the plan converts it to ppt, as the vetting and single transits runs
+  already did.
 - EMLS catalog driver: a planet without a catalog mass gets the same mass as in the
   `sherlockpipe.emls` command (Chen & Kipping forecast, one Jupiter mass for giants)
   instead of R^1.5, which made giants about 8 times too light and their Hill sphere,
