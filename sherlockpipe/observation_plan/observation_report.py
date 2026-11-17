@@ -1,45 +1,77 @@
 import datetime
-import logging
-import os.path
-
-import pandas as pd
-from astropy.coordinates import Angle
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import inch, cm
-from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, Image, Table, TableStyle
+import os
+import tempfile
 from os import path
-from uncertainties import ufloat
+
+import numpy as np
+import pandas as pd
+from astroplan import FixedTarget
 from astropy import units as u
-from astropy.time import Time
-from dateutil.parser import parse
+from astropy.coordinates import Angle, SkyCoord
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import cm
+from reportlab.platypus import (BaseDocTemplate, Frame, Image, KeepTogether, PageBreak, PageTemplate, Paragraph, Spacer,
+                                Table, TableStyle)
 
+from sherlockpipe.observation_plan import plan_data, plan_figures
 
-width, height = A4
+width, height = landscape(A4)
 resources_dir = path.join(path.dirname(__file__))
+
+INK = "#1f2933"
+MUTED = "#6b7785"
+GRID = "#e3e7ec"
+ACCENT = "#2a6f97"
+GOOD, FAIR = "#d6efdf", "#f7ecc9"
+#: How many events the shortlist of the first page shows.
+SHORTLIST_SIZE = 10
+#: Default number of event cards: the transits with the best opportunity.
+DEFAULT_MAX_CARDS = 20
+
+
+def format_with_errors(value, low, up):
+    """
+    ``value ± error`` with as many decimals as the smallest error needs plus one, or ``value +up −low`` when the
+    errors are not the same.
+    """
+    errors = [float(e) for e in (low, up) if e is not None and np.isfinite(e) and e > 0]
+    decimals = 3 if not errors else int(np.clip(-np.floor(np.log10(min(errors))) + 1, 0, 8))
+    if not errors:
+        return f"{value:.{decimals}f}"
+    low, up = float(low), float(up)
+    if abs(low - up) < 0.5 * 10 ** -decimals:
+        return f"{value:.{decimals}f} ± {up:.{decimals}f}"
+    return f"{value:.{decimals}f} +{up:.{decimals}f} −{low:.{decimals}f}"
+
+
+def minutes_text(hours):
+    return f"{hours * 60:.0f} min"
 
 
 class ObservationReport:
     """
-    Used to create a pdf file from the parameters and images generated in the plan stage.
+    Creates the pdf of the observation plan: a landscape document with the target and candidate, a calendar of the
+    observation opportunities, a shortlist of the best ones, one event card per transit (the best ``max_cards``) that
+    compares the observatories that can observe it, and an appendix with every observation window.
     """
     LOGO_IMAGE = resources_dir + "/../resources/images/sherlock3.png"
     ALERT_IMAGE = resources_dir + "/../resources/images/alert.png"
 
-    def __init__(self, df_observatories, df, alert_date, object_id, name, working_path, ra, dec, t0, t0_low_err, t0_up_err, period,
-                 period_low_err, period_up_err, duration, duration_low_err, duration_up_err, depth, depth_low_err,
-                 depth_up_err, observable, min_dist, max_dist, min_altitude, max_days, v, j, h, k):
+    def __init__(self, df_observatories, df, alert_date, object_id, name, working_path, ra, dec, t0, t0_low_err, t0_up_err,
+                 period, period_low_err, period_up_err, duration, duration_low_err, duration_up_err, depth, depth_low_err,
+                 depth_up_err, observable, min_dist, max_dist, min_altitude, max_days, v, j, h, k,
+                 midtransit_times=None, since=None, max_cards=DEFAULT_MAX_CARDS):
         """Initialize the observation report.
 
         Parameters
         ----------
         df_observatories : DataFrame
-            DataFrame containing observatory information.
+            The observatories of the plan: name, tz, lat, lon and alt.
         df : DataFrame
-            DataFrame containing the observation events.
-        alert_date : str or None
+            The observation events of the planner.
+        alert_date : Time or str or None
             The date after which error propagation makes observations unreliable.
         object_id : str
             The target object identifier.
@@ -47,60 +79,33 @@ class ObservationReport:
             The name for the output report file.
         working_path : str
             The directory where the report will be saved.
-        ra : float
-            Right ascension of the target in degrees.
-        dec : float
-            Declination of the target in degrees.
-        t0 : float
-            The transit epoch.
-        t0_low_err : float
-            The lower error of the transit epoch.
-        t0_up_err : float
-            The upper error of the transit epoch.
-        period : float
-            The orbital period in days.
-        period_low_err : float
-            The lower error of the orbital period.
-        period_up_err : float
-            The upper error of the orbital period.
-        duration : float
-            The transit duration in hours.
-        duration_low_err : float
-            The lower error of the transit duration.
-        duration_up_err : float
-            The upper error of the transit duration.
-        depth : float
-            The transit depth in ppt.
-        depth_low_err : float
-            The lower error of the transit depth.
-        depth_up_err : float
-            The upper error of the transit depth.
+        ra, dec : float
+            Coordinates of the target in degrees.
+        t0, period, duration, depth : float
+            The candidate parameters (the duration in hours, the depth in ppt) with their lower and upper errors.
         observable : float
             The minimum transit observability fraction.
-        min_dist : float
-            The minimum moon distance in degrees for new moon.
-        max_dist : float
-            The minimum moon distance in degrees for full moon.
+        min_dist, max_dist : float
+            The minimum moon distance in degrees for new moon and for full moon.
         min_altitude : float
             The minimum altitude above the horizon in degrees.
         max_days : int
             The maximum number of days to search for observables.
-        v : float
-            The V-band magnitude of the target.
-        j : float
-            The J-band magnitude of the target.
-        h : float
-            The H-band magnitude of the target.
-        k : float
-            The K-band magnitude of the target.
+        v, j, h, k : float
+            The magnitudes of the target.
+        midtransit_times : Time, optional
+            Every mid-transit of the plan, so the transits that nobody can observe show in the calendar too.
+        since : Time or str, optional
+            The first day of the plan.
+        max_cards : int
+            The number of transits that get an event card, the best ones. Zero or less gives all of them.
         """
         self.df = df
-        self.df_observatories = df_observatories.drop(['tz'], axis=1)
+        self.df_observatories = df_observatories.reset_index(drop=True)
         self.alert_date = alert_date
         self.object_id = object_id
         self.name = name
         self.working_path = working_path
-        self.images_path = working_path + "/images/"
         self.observable = observable
         self.min_dist = min_dist
         self.max_dist = max_dist
@@ -124,117 +129,83 @@ class ObservationReport:
         self.j = j
         self.h = h
         self.k = k
+        self.midtransit_times = midtransit_times
+        self.since = since
+        self.max_cards = max_cards
+        self.styles = self._styles()
 
-    def df_manipulations(self):
-        """
-        Performs changes of data from the initial dataframe for better formatting in the report.
+    # ------------------------------------------------------------------ data
+    def _prepare(self):
+        self.enriched = plan_data.enrich_events(self.df, self.df_observatories, self.ra, self.dec)
+        self.summary = plan_data.observatory_summary(self.df_observatories, self.enriched, self.dec, self.min_altitude)
+        self.observers = plan_data.observers_of(self.df_observatories)
+        self.target = FixedTarget(SkyCoord(self.ra, self.dec, unit="deg"))
 
-        :return: the final dataframe
-        """
-        self.df['Observatory'] = self.df['observatory'].str.replace("-", " ")
-        self.df['TZ'] = self.df['timezone'].fillna(0).astype('int')
-        self.df['TZ'] = self.df['TZ'].astype('str')
-        self.df['timezone'].astype(str)
-        df_output = pd.DataFrame(columns=['Observatory', 'TZ', 'Event times', 'TT Error', 'Moon', 'Image'])
-        # Removing milliseconds from dates:
-        if len(self.df) > 0:
-            self.df.loc[(self.df["ingress"].apply(lambda x: len(str(x)) > 4)), 'ingress'] = \
-                self.df[(self.df["ingress"].apply(lambda x: len(str(x)) > 4))]['ingress'].str[:-4]
-            self.df.loc[(self.df["twilight_evening"].apply(lambda x: len(str(x)) > 4)), 'twilight_evening'] = \
-                self.df[(self.df["twilight_evening"].apply(lambda x: len(str(x)) > 4))]['twilight_evening'].str[:-4]
-            self.df.loc[(self.df["midtime"].apply(lambda x: len(str(x)) > 4)), 'midtime'] = \
-                self.df[(self.df["midtime"].apply(lambda x: len(str(x)) > 4))]['midtime'].str[:-4]
-            self.df.loc[(self.df["egress"].apply(lambda x: len(str(x)) > 4)), 'egress'] = \
-                self.df[(self.df["egress"].apply(lambda x: len(str(x)) > 4))]['egress'].str[:-4]
-            self.df.loc[(self.df["twilight_morning"].apply(lambda x: len(str(x)) > 4)), 'twilight_morning'] = \
-                self.df[(self.df["twilight_morning"].apply(lambda x: len(str(x)) > 4))]['twilight_morning'].str[:-4]
-            self.df.loc[(self.df["start_obs"].apply(lambda x: len(str(x)) > 4)), 'start_obs'] = \
-                self.df[(self.df["start_obs"].apply(lambda x: len(str(x)) > 4))]['start_obs'].str[:-4]
-            self.df.loc[(self.df["end_obs"].apply(lambda x: len(str(x)) > 4)), 'end_obs'] = \
-                self.df[(self.df["end_obs"].apply(lambda x: len(str(x)) > 4))]['end_obs'].str[:-4]
-            self.df.loc[(self.df["ingress"].apply(lambda x: len(str(x)) <= 4)), 'ingress'] = '--'
-            self.df.loc[(self.df["midtime"].apply(lambda x: len(str(x)) <= 4)), 'midtime'] = '--'
-            self.df.loc[(self.df["egress"].apply(lambda x: len(str(x)) <= 4)), 'egress'] = '--'
-            self.df.loc[(self.df["twilight_evening"].apply(lambda x: len(str(x)) <= 4)), 'twilight_evening'] = '--'
-            self.df.loc[(self.df["twilight_morning"].apply(lambda x: len(str(x)) <= 4)), 'twilight_morning'] = '--'
-            self.df.loc[(self.df["start_obs"].apply(lambda x: len(str(x)) <= 4)), 'start_obs'] = '--'
-            self.df.loc[(self.df["end_obs"].apply(lambda x: len(str(x)) <= 4)), 'end_obs'] = '--'
-            # Generamos la columna que contendrá el nombre de las imágenes:
-            self.df['image_path'] = self.images_path + self.df['observatory'] + "_" + self.df['midtime'] + ".png"
-            # Finalmente con las rutas creamos los objetos:
-            self.df['Image'] = self.df['image_path'].apply(lambda x: Image(x) if os.path.exists(x) else Paragraph(""))
+    def _period_of_the_plan(self):
+        """First and last day of the plan, from the date given or from the times that are known."""
+        if self.since is not None:
+            first = pd.Timestamp(self.since.datetime if hasattr(self.since, "datetime") else self.since)
+        elif self.midtransit_times is not None and len(self.midtransit_times):
+            first = pd.Timestamp(self.midtransit_times.to_datetime().min())
+        elif len(self.enriched):
+            first = self.enriched["event"].min()
+        else:
+            first = pd.Timestamp.now()
+        first = first.normalize()
+        return first, first + pd.Timedelta(days=int(self.max_days))
 
-
-            # We want to sort the dates row-wise, only keeping the interesting columns
-            df_dates = self.df[['twilight_evening', 'ingress', 'midtime', 'egress', 'start_obs', 'end_obs', 'twilight_morning', 'timezone']]
-            df_dates.columns = ['TWE', 'I', 'M', 'E', 'SO', 'EO', 'TWM', 'tz']
-            dict_fechas = df_dates.to_dict('index')
-            new_dict_fechas = {}
-            for index, row in df_dates.iterrows():
-                # Lo ordenamos por los valores de cada key:
-                items = row[['TWE', 'I', 'M', 'E', 'SO', 'EO', 'TWM']].to_dict()
-                list_of_tuples = sorted(items.items(), key=lambda item: item[1])
-                # Definimos la noche como false:
-                night = 0
-                # Recorremos las tuplas y si noche es uno (lo que sucede a partir del TWE) ponemos en negrita la fecha.
-                # Con esto vamos a generar una nueva lista de tuplas que tendrá las fechas apropiadas en negrita:
-                list_of_tuples_with_night = []
-                for tup in list_of_tuples:
-                    try:
-                        y = list(tup)
-                        if tup[1] != '--':
-                            local_time = parse(tup[1])
-                            utime = Time(local_time)
-                            y[1] = str(tup[1]) + ' (' + str(round(utime.jd, 2)) + ' JD)'
-                            tup = tuple(y)
-                    except Exception as e:
-                        logging.exception(f"Can't convert to date {tup[1]}")
-                    if night == 1 and tup[0] != 'TWM':
-                        y = list(tup)
-                        y[1] = '<strong>' + str(tup[1]) + '</strong>'
-                        tup = tuple(y)
-                    if tup[0] == 'TWM':
-                        night = 0
-                    if tup[0] == 'TWE':
-                        night = 1
-                    list_of_tuples_with_night.append(tup)
-                # Unimos las tuplas separando key y value con ":":
-                join_list = [': '.join(tup) for tup in list_of_tuples_with_night]
-                # Para terminar, el nuevo diccionario une los elementos de la lista separando por saltos de línea:
-                new_dict_fechas[index] = '<font name="HELVETICA" size="8">' + '<br/>'.join(join_list) + '</font>'
-            # Finalmente, creamos la columna Event times mapeando el index del dataframe con el del diccionario:
-            self.df['Event times'] = self.df.index.to_series().map(new_dict_fechas)
-            # La columna Transit Times Error será el concatenado de los errores:
-            self.df['TT Error'] = '-' + self.df['midtime_low_err_h'].map(str) + '<br/>+' + self.df['midtime_up_err_h'].map(
-                str)
-            # La columna Moon será el concatenado de la moon_phase y de moon_dist:
-            self.df['moon_phase'] = (self.df['moon_phase'] * 100).astype(int)
-            self.df['moon_dist'] = self.df['moon_dist'].astype(int)
-            self.df['Moon'] = self.df['moon_phase'].map(str) + '%<br/>' + self.df['moon_dist'].map(str) + 'º'
-            # El dataframe final solo tendrá unas pocas columnas del excel inicial:
-            df_output = self.df[['Observatory', 'TZ', 'Event times', 'TT Error', 'Moon', 'Image']]
-        return df_output
+    # ------------------------------------------------------------------ styles and helpers
+    @staticmethod
+    def _styles():
+        base = ParagraphStyle("base", fontName="Helvetica", fontSize=8.5, leading=11, textColor=colors.HexColor(INK))
+        return {"base": base,
+                "small": ParagraphStyle("small", parent=base, fontSize=7.5, leading=9.5, textColor=colors.HexColor(MUTED)),
+                "title": ParagraphStyle("title", parent=base, fontName="Helvetica-Bold", fontSize=17, leading=21),
+                "h2": ParagraphStyle("h2", parent=base, fontName="Helvetica-Bold", fontSize=10.5, leading=13,
+                                     textColor=colors.HexColor(ACCENT), spaceBefore=6, spaceAfter=3),
+                "card": ParagraphStyle("card", parent=base, fontName="Helvetica-Bold", fontSize=9.5, leading=12,
+                                       spaceBefore=4, spaceAfter=1),
+                "alert": ParagraphStyle("alert", parent=base, textColor=colors.HexColor("#c0392b"))}
 
     @staticmethod
-    def row_colors(df, table_object):
-        """Apply alternating row colors to a ReportLab table.
+    def _table(rows, widths, header=True, font_size=8, extra=None):
+        table = Table(rows, colWidths=widths, repeatRows=1 if header else 0)
+        style = [("FONTNAME", (0, 0), (-1, -1), "Helvetica"), ("FONTSIZE", (0, 0), (-1, -1), font_size),
+                 ("TEXTCOLOR", (0, 0), (-1, -1), colors.HexColor(INK)), ("TOPPADDING", (0, 0), (-1, -1), 1.8),
+                 ("BOTTOMPADDING", (0, 0), (-1, -1), 1.8), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                 ("LINEBELOW", (0, 0), (-1, -1), 0.25, colors.HexColor(GRID))]
+        if header:
+            style += [("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"), ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor(MUTED))]
+        table.setStyle(TableStyle(style + (extra or [])))
+        return table
 
-        Parameters
-        ----------
-        df : DataFrame
-            The dataframe whose rows are used to determine the number of rows.
-        table_object : Table
-            The ReportLab Table object to style.
-        """
-        data_len = len(df)
-        for each in range(1, data_len + 1):
-            if each % 2 == 1:
-                bg_color = colors.whitesmoke
-            else:
-                bg_color = colors.lightgrey
+    @staticmethod
+    def _image(figure, directory, file, dpi=200):
+        file_path = os.path.join(directory, file)
+        figure.savefig(file_path, dpi=dpi)
+        figure_width, figure_height = figure.get_size_inches()
+        frame_width = width - 2.4 * cm
+        return Image(file_path, width=frame_width, height=frame_width * figure_height / figure_width)
 
-            table_object.setStyle(TableStyle([('BACKGROUND', (0, each), (-1, each), bg_color)]))
+    def _window_text(self, event):
+        start, end = event["start_obs"], event["end_obs"]
+        return f"{start:%H:%M}–{end:%H:%M}" if pd.notna(start) and pd.notna(end) else "–"
 
+    def _event_row(self, event, with_rank=True, with_observatory=True):
+        altitude = f"{event['alt_t0']:.0f}°" if np.isfinite(event["alt_t0"]) else "–"
+        airmass = f"{event['airmass']:.2f}" if np.isfinite(event["airmass"]) else "–"
+        tz = int(event["tz"]) if float(event["tz"]).is_integer() else event["tz"]
+        row = []
+        if with_rank:
+            row.append(str(int(event["rank"])))
+        row += [f"{event['event']:%a %d %b %Y  %H:%M}", f"{event['local_t0']:%H:%M} (UTC{tz:+})"]
+        if with_observatory:
+            row.append(event["observatory"].replace("-", " "))
+        row += [f"{event['observable'] * 100:.0f}%", self._window_text(event), altitude, airmass,
+                f"{event['moon_phase'] * 100:.0f}% · {event['moon_dist']:.0f}°", minutes_text(event["err_h"])]
+        return row
+
+    # ------------------------------------------------------------------ sections
     def create_header(self, canvas, doc):
         """
         Initializes the common header for all the pages.
@@ -243,18 +214,19 @@ class ObservationReport:
         :param doc: the report document
         """
         canvas.saveState()
-        canvas.drawImage(self.LOGO_IMAGE, x=0, y=26.8 * cm, height=2.7 * cm, width=2.7 * cm, preserveAspectRatio=True)
-        object_id_text = 'Sherlock observation plan: %s' % self.object_id
-        canvas.setFont(psfontname="Helvetica", size=12)
-        canvas.drawRightString(x=12 * cm, y=28 * cm, text=object_id_text)
-        if doc.page == 1:
-            object_id_text = '%s OBSERVATION PLAN' % self.object_id
-            canvas.setFont(psfontname="Helvetica-Bold", size=25)
-            canvas.drawCentredString(x=10 * cm, y=25.5 * cm, text=object_id_text)
-        report_date = datetime.datetime.now().strftime("%a, %d %B %Y, %H:%M:%S")
-        report_date_text = '%s' % report_date
-        canvas.setFont("Helvetica", 9)
-        canvas.drawRightString(20.5 * cm, 28 * cm, report_date_text)
+        if os.path.exists(self.LOGO_IMAGE):
+            canvas.drawImage(self.LOGO_IMAGE, x=1.2 * cm, y=height - 1.9 * cm, height=1.6 * cm, width=1.6 * cm,
+                             preserveAspectRatio=True, mask="auto")
+        canvas.setFont("Helvetica-Bold", 13)
+        canvas.setFillColor(colors.HexColor(INK))
+        canvas.drawString(3.2 * cm, height - 1.2 * cm, "%s · Ground-based observation plan" % self.name.replace("_", " "))
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor(MUTED))
+        canvas.drawString(3.2 * cm, height - 1.65 * cm, "Sherlock observation plan: %s" % self.object_id)
+        canvas.drawRightString(width - 1.2 * cm, height - 1.2 * cm,
+                               datetime.datetime.now().strftime("%a, %d %B %Y, %H:%M:%S"))
+        canvas.setStrokeColor(colors.HexColor(GRID))
+        canvas.line(1.2 * cm, height - 2.1 * cm, width - 1.2 * cm, height - 2.1 * cm)
         canvas.restoreState()
 
     def create_footer(self, canvas, doc):
@@ -265,212 +237,146 @@ class ObservationReport:
         :param doc: the report document
         """
         canvas.saveState()
-        # if doc.page == 1:
-        #     # Footer con superíndice:
-        #     textobject = canvas.beginText()
-        #     textobject.setTextOrigin(1.8 * cm, 2.1 * cm)
-        #     textobject.setFont("Helvetica", 5)
-        #     textobject.setRise(5)
-        #     textobject.textOut('1 ')
-        #     textobject.setRise(0)
-        #     textobject.setFont("Helvetica", 7)
-        #     pie_pagina = 'Three possible observability values are defined: 1 - Entire transit is required, ' \
-        #                  '0.5 - Transit midtime and either ingress or egress at least are required,\n' \
-        #                  '0.25 - Only ingress or egress are required, with moon constraints of % sº as minimum ' \
-        #                  'distance for new moon and % sº as minimum distance for full moon\n' \
-        #                  'and for the observatories listed in the Table 2.' % (self.min_dist, self.max_dist)
-        #
-        #     for line in pie_pagina.splitlines():
-        #         textobject.textLine(line)
-        #
-        #     canvas.drawText(textobject)
-        page = "Powered by Astropy, Astroplan and ReportLab"
-        canvas.setFont("Helvetica", 9)
-        canvas.drawRightString(7 * cm, 0.5 * cm, page)
-        page = "Page %s" % doc.page
-        canvas.setFont("Helvetica", 9)
-        canvas.drawRightString(20.5 * cm, 0.5 * cm, page)
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor(MUTED))
+        canvas.drawString(1.2 * cm, 0.6 * cm, "Powered by Astropy, Astroplan and ReportLab")
+        canvas.drawRightString(width - 1.2 * cm, 0.6 * cm, "Page %s" % doc.page)
         canvas.restoreState()
 
+    def _facts(self):
+        coordinates = "RA %s   Dec %s" % (Angle(self.ra, u.deg).to_string(unit=u.hourangle, sep=':', precision=2),
+                                          Angle(self.dec, u.deg).to_string(unit=u.deg, sep=':', precision=2))
+        magnitudes = "V %.2f   J %.2f   H %.2f   K %.2f" % (self.v, self.j, self.h, self.k)
+        candidate = "P = %s d   ·   T0 = %s   ·   duration %s h   ·   depth %s ppt" % (
+            format_with_errors(self.period, self.period_low_err, self.period_up_err),
+            format_with_errors(self.t0, self.t0_low_err, self.t0_up_err),
+            format_with_errors(self.duration, self.duration_low_err, self.duration_up_err),
+            format_with_errors(self.depth, self.depth_low_err, self.depth_up_err))
+        if len(self.enriched):
+            low, high = self.enriched["err_h"].min(), self.enriched["err_h"].max()
+            timing = ("±%s to ±%s over the plan: the uncertainty of T0 and of the period grows with the transits "
+                      "since T0" % (minutes_text(low), minutes_text(high)))
+        else:
+            timing = "no event to report"
+        first, last = self._period_of_the_plan()
+        constraints = ("plan from %s for %d days   ·   target at least %g° above the horizon   ·   moon at least %g° away at "
+                       "new moon and %g° at full moon   ·   at least %.0f%% of the transit observable   ·   nautical "
+                       "twilight" % (first.strftime("%d %b %Y"), int(self.max_days), self.min_altitude, self.min_dist,
+                                     self.max_dist, self.observable * 100))
+        rows = [[Paragraph("Target", self.styles["small"]), Paragraph(coordinates + "   ·   " + magnitudes, self.styles["base"])],
+                [Paragraph("Candidate", self.styles["small"]), Paragraph(candidate, self.styles["base"])],
+                [Paragraph("Timing", self.styles["small"]), Paragraph(timing, self.styles["base"])],
+                [Paragraph("Constraints", self.styles["small"]), Paragraph(constraints, self.styles["base"])]]
+        table = Table(rows, colWidths=[2.3 * cm, width - 2.4 * cm - 2.3 * cm])
+        table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("TOPPADDING", (0, 0), (-1, -1), 1),
+                                   ("BOTTOMPADDING", (0, 0), (-1, -1), 1), ("LEFTPADDING", (0, 0), (-1, -1), 0)]))
+        return table
+
+    def _shortlist(self):
+        header = ["#", "Transit (UTC)", "Local T0", "Observatory", "Observable", "Window UTC", "Alt @T0", "Airmass",
+                  "Moon", "T0 ±"]
+        rows = [header] + [self._event_row(event) for _, event in self.enriched.head(SHORTLIST_SIZE).iterrows()]
+        extra = []
+        for index, (_, event) in enumerate(self.enriched.head(SHORTLIST_SIZE).iterrows(), start=1):
+            if event["observable"] >= 0.9:
+                extra.append(("BACKGROUND", (4, index), (4, index), colors.HexColor(GOOD)))
+            elif event["observable"] >= 0.7:
+                extra.append(("BACKGROUND", (4, index), (4, index), colors.HexColor(FAIR)))
+        frame = width - 2.4 * cm
+        widths = [0.06, 0.17, 0.12, 0.13, 0.08, 0.12, 0.07, 0.07, 0.11, 0.07]
+        return self._table(rows, [frame * w for w in widths], extra=extra)
+
+    def _alert(self):
+        if self.alert_date is None:
+            return []
+        date = self.alert_date.isot[:16] if hasattr(self.alert_date, "isot") else str(self.alert_date)
+        return [Spacer(1, 4),
+                Paragraph("The plan stops at %s: from then on the error propagation of T0 and of the period makes the "
+                          "transit time too imprecise for an observation to be planned." % date, self.styles["alert"])]
+
+    def _summary_page(self, directory):
+        first, last = self._period_of_the_plan()
+        story = [self._facts(), Spacer(1, 4)]
+        story += self._alert()
+        figure = plan_figures.figure_calendar(self.enriched, self.summary, self.midtransit_times, first, last)
+        story += [Paragraph("Observation opportunities", self.styles["h2"]), self._image(figure, directory, "calendar.png"),
+                  Paragraph("Dot size and colour show the observable fraction of the transit window; the numbers are the "
+                            "best opportunities of the shortlist. Faint lines are all the transits of the plan.",
+                            self.styles["small"])]
+        if len(self.enriched):
+            story += [Paragraph("Shortlist: the best opportunities", self.styles["h2"]), self._shortlist(),
+                      Paragraph("Ranked by %s." % plan_data.SCORE_DESCRIPTION, self.styles["small"])]
+        else:
+            story += [Spacer(1, 6), Paragraph("No transit is observable with these constraints. The observatories "
+                                              "section of the appendix tells what limits each one.", self.styles["base"])]
+        return story
+
+    def _cards(self, directory):
+        transits = plan_data.top_transits(self.enriched, self.max_cards)
+        if not transits:
+            return []
+        all_transits = self.enriched["event"].nunique()
+        story = [PageBreak(), Paragraph("Event cards: compare the observatories for each transit", self.styles["h2"]),
+                 Paragraph("One card per transit that at least one observatory can observe, the best first. %s" % (
+                     "All %d of them are shown." % all_transits if len(transits) == all_transits else
+                     "The %d best of %d are shown; every window is in the appendix." % (len(transits), all_transits)),
+                           self.styles["small"]),
+                 self._image(plan_figures.figure_legend(), directory, "legend.png", dpi=150), Spacer(1, 2)]
+        for index, transit in enumerate(transits, start=1):
+            rows = self.enriched[self.enriched["event"] == transit].sort_values("rank")
+            best = rows.iloc[0]
+            title = "#%d · Transit %s · T0 %s UTC ± %s · %d observator%s" % (
+                int(best["rank"]), transit.strftime("%a %d %b %Y"), transit.strftime("%H:%M"),
+                minutes_text(rows["err_h"].max()), len(rows), "y" if len(rows) == 1 else "ies")
+            figure = plan_figures.figure_event_card(transit, rows, self.observers, self.target, self.min_altitude,
+                                                    self.min_dist, self.max_dist)
+            story.append(KeepTogether([Paragraph(title, self.styles["card"]),
+                                       self._image(figure, directory, "card_%d.png" % index)]))
+        return story
+
+    def _appendix(self):
+        if len(self.enriched) == 0 and len(self.df_observatories) == 0:
+            return []
+        story = [PageBreak(), Paragraph("Appendix", self.styles["h2"]),
+                 Paragraph("Observatories", self.styles["card"])]
+        rows = [["Name", "Latitude (º)", "Longitude (º)", "Altitude (m)", "Observable transits", "Events / limit"]]
+        for (_, observatory), entry in zip(self.df_observatories.iterrows(), self.summary):
+            def number(key, spec):
+                try:
+                    value = float(observatory[key])
+                except (TypeError, ValueError):
+                    return "–"
+                return format(value, spec) if np.isfinite(value) else "–"
+            rows.append([observatory["name"].replace("-", " "), number("lat", ".4f"), number("lon", ".4f"),
+                         number("alt", ".0f"), str(entry["transits"]), entry["reason"] or "%d event%s" % (entry["events"], "" if entry["events"] == 1 else "s")])
+        frame = width - 2.4 * cm
+        story.append(self._table(rows, [frame * w for w in (0.14, 0.09, 0.09, 0.09, 0.12, 0.47)]))
+        if len(self.enriched):
+            story += [Spacer(1, 8), Paragraph("Every observation window, by date", self.styles["card"])]
+            header = ["#", "Transit (UTC)", "Local T0", "Observatory", "Observable", "Window UTC", "Alt @T0", "Airmass",
+                      "Moon", "T0 ±"]
+            ordered = self.enriched.sort_values(["event", "observatory"])
+            data = [header] + [self._event_row(event) for _, event in ordered.iterrows()]
+            widths = [0.06, 0.17, 0.12, 0.13, 0.08, 0.12, 0.07, 0.07, 0.11, 0.07]
+            story.append(self._table(data, [frame * w for w in widths], font_size=7.5))
+        return story
+
+    # ------------------------------------------------------------------ document
     def create_report(self):
         """
-        Creates the final report with all the star parameters, the candidate information and the observation nights
-        data, storing it in a pdf.
+        Creates the final report with the target and candidate, the calendar and shortlist of the observation
+        opportunities, the event cards and the appendix, storing it in a pdf.
+
+        :return: the path of the pdf
         """
-        df_manipulated = self.df_manipulations()
-        # Styles to be used
-        styles = getSampleStyleSheet()
-        styles.add(ParagraphStyle(name="ParagraphAlignCenter", alignment=TA_CENTER))
-        styles.add(ParagraphStyle(name="ParagraphAlignJustify", alignment=TA_JUSTIFY))
-        styles.wordWrap = 'LTR'
-        table_style = TableStyle([('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                                  ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                                  ('INNERGRID', (0, 0), (-1, -1), 0.25, colors.black),
-                                  ('BOX', (0, 0), (-1, -1), 0.25, colors.black),
-                                  ('FONTSIZE', (0, 0), (-1, -1), 10),
-                                  ])
-
-        # Content:
-        story = [Spacer(1, 75)]
-        introduction = '<font name="HELVETICA" size="9">This document is generated by the SHERLOCK PIPEline \
-        transiting candidates observation planner. The target star this document focuses on is the %s. The star \
-        parameters are shown in Table 1. The proposed candidate parameters are those exposed in Table 1. The  \
-        observables included in the Table 5 are obtained based on the constraints of Table 3 and the list of \
-        observatories from Table 4.</font>' % self.object_id
-        story.append(Paragraph(introduction, styles["ParagraphAlignJustify"]))
-
-        story.append(Spacer(1, 30))
-
-        # Generamos la tabla 1 con los parámetros:
-        tabla1_data = [['RA (deg)', 'Dec (deg)', 'V (mag)', 'J (mag)', 'H (mag)', 'K (mag)'],
-                       [Angle(self.ra, u.deg).to_string(unit=u.hourangle, sep=':', precision=2),
-                        Angle(self.dec, u.deg).to_string(unit=u.deg, sep=':', precision=2),
-                        round(self.v, 2), round(self.j, 2), round(self.h, 2), round(self.k, 2)]]
-        table1_colwidth = [3.5 * cm, 3.5 * cm, 2 * cm, 2 * cm, 2 * cm, 2 * cm]
-        table1_number_rows = len(tabla1_data)
-        tabla1 = Table(tabla1_data, table1_colwidth, table1_number_rows * [0.75 * cm])
-        tabla1.setStyle(table_style)
-        # Le damos el estilo alternando colores de filas:
-        ObservationReport.row_colors(tabla1_data, tabla1)
-        story.append(tabla1)
-
-        table1_descripcion = '<font name="HELVETICA" size="9"><strong>Table 1: </strong>\
-                        The proposed target parameters.</font>'
-        story.append(Spacer(1, 5))
-        story.append(Paragraph(table1_descripcion, styles["ParagraphAlignCenter"]))
-
-        story.append(Spacer(1, 30))
-
-        # Generamos la tabla 2 con los parámetros:
-        tabla2_data = [['T0 (TBJD)', 'Period (d)', 'Duration (h)', 'Depth (ppt)'],
-                        [ufloat(self.t0, self.t0_low_err, self.t0_up_err),
-                        ufloat(self.period, self.period_low_err, self.period_up_err),
-                        ufloat(self.duration, self.duration_low_err, self.duration_up_err),
-                        ufloat(self.depth, self.depth_low_err, self.depth_up_err)]]
-        table2_colwidth = [4 * cm, 4 * cm, 3.5 * cm, 3.5 * cm]
-        table2_number_rows = len(tabla2_data)
-        tabla2 = Table(tabla2_data, table2_colwidth, table2_number_rows * [0.75 * cm])
-        tabla2.setStyle(table_style)
-        # Le damos el estilo alternando colores de filas:
-        ObservationReport.row_colors(tabla2_data, tabla2)
-        story.append(tabla2)
-
-        table1_descripcion = '<font name="HELVETICA" size="9"><strong>Table 2: </strong>\
-                The proposed candidate parameters.</font>'
-        story.append(Spacer(1, 5))
-        story.append(Paragraph(table1_descripcion, styles["ParagraphAlignCenter"]))
-
-        story.append(Spacer(1, 30))
-
-        # Generamos la tabla 3 con los parámetros:
-        tabla3_data = [['Observability', 'Days interval', 'Min altitude (º)', 'Min Moon Dist (º)', 'Max Moon Dist (º)'],
-                       [self.observable, self.max_days, self.min_altitude, self.min_dist, self.max_dist]]
-        table3_colwidth = [2.5 * cm, 2.5 * cm, 2.5 * cm, 3 * cm, 3 * cm]
-        table3_number_rows = len(tabla3_data)
-        tabla3 = Table(tabla3_data, table3_colwidth, table3_number_rows * [0.75 * cm])
-        tabla3.setStyle(table_style)
-        # Le damos el estilo alternando colores de filas:
-        ObservationReport.row_colors(tabla3_data, tabla3)
-        story.append(tabla3)
-
-        table3_descripcion = '<font name="HELVETICA" size="9"><strong>Table 3: </strong>\
-                        The constraints used to calculate the observables. Observability can have the next values: ' \
-                             '1 - Entire transit is required, ' \
-                             '0.5 - Transit midtime and either ingress or egress at least are required,\n' \
-                             '0.25 - Only ingress or egress are required. ' \
-                             'Days interval is the maximum number of days to search for observable transits.' \
-                             'Min altitude is the minimum altitude above the horizon to consider an observable ' \
-                             'transit. Min Moon Dist is the minimum distance to be kept from the target to the new ' \
-                             'moon. Max Moon Dist is the minimum distance to be kept from the target to the full ' \
-                             'moon. </font>'
-        story.append(Spacer(1, 5))
-        story.append(Paragraph(table3_descripcion, styles["ParagraphAlignCenter"]))
-
-        story.append(Spacer(1, 30))
-
-        # Generamos la tabla 4 con los observatorios:
-        table4_colwidth = [3.5 * cm, 2.5 * cm, 2.5 * cm, 2.5 * cm]
-        table4_number_rows = len(self.df_observatories) + 1  # Sumamos 1 para tener en cuenta el header
-        table4_header_row = [['Name', 'Latitude (º)', 'Longitude (º)', 'Altitude (m)']]
-        table4_data = self.df_observatories.values.tolist()
-        tabla4 = Table(table4_header_row + table4_data, table4_colwidth, table4_number_rows * [0.75 * cm])
-        tabla4.setStyle(table_style)
-        # Le damos el estilo alternando colores de filas:
-        ObservationReport.row_colors(self.df_observatories, tabla4)
-        story.append(tabla4)
-
-        table4_descripcion = '<font name="HELVETICA" size="9"><strong>Table 3: </strong>\
-                List of observatories.</font>'
-        story.append(Spacer(1, 5))
-        story.append(Paragraph(table4_descripcion, styles["ParagraphAlignCenter"]))
-
-        if self.alert_date is not None and df_manipulated is not None:
-            story.append(Spacer(1, 30))
-            story.append(Image(self.ALERT_IMAGE, width=15, height=15))
-            alert = '<font name="HELVETICA" size="9" color="red">The table 5 with the observations will only contain \
-                    scheduled observation nights up to the %s. Since then, the error propagation gets too wide to be \
-                    acceptable for the plan to be precise enough.</font>' % self.alert_date
-            story.append(Paragraph(alert, styles["ParagraphAlignJustify"]))
-
-        # Pasamos a la siguiente página:
-        story.append(Spacer(1, 30))
-
-        # Generamos la tabla 5 con los observables:
-        table5_header_row = [df_manipulated.columns[:, ].values.astype(str).tolist()]
-        table5_data = df_manipulated.values.tolist()
-        table5_data2 = []
-        for row in table5_data:
-            row_counter = 1
-            manipulated_data = []
-            for cell in row:
-                # La última de las columnas se corresponde con imágenes, la mantenemos:
-                if row_counter == len(row):
-                    manipulated_data.append(cell)
-                else:
-                    manipulated_data.append(Paragraph(cell, styles["ParagraphAlignCenter"]))
-                row_counter = row_counter + 1
-            table5_data2.append(manipulated_data)
-
-        final_data = table5_header_row + table5_data2
-
-        # Creates a table with variable number of row and width:
-        table5_number_rows = len(final_data)
-        table5_rowwidths = []
-        for x in range(table5_number_rows):
-            if x == 0:  # Table headers
-                table5_rowwidths.append(0.2 * inch)
-            else:
-                table5_rowwidths.append(1.2 * inch)
-
-        # Creates a table with 5 columns, variable width:
-        table5_colwidths = [1.1 * inch, 0.3 * inch, 2.5 * inch, 0.6 * inch, 0.5 * inch, 2.2 * inch]
-        tabla5 = Table(final_data, table5_colwidths, table5_rowwidths, repeatRows=1)
-        tabla5.setStyle(table_style)
-        # Le damos el estilo alternando colores de filas:
-        ObservationReport.row_colors(final_data, tabla5)
-
-        story.append(tabla5)
-
-        table5_descripcion = '<font name="HELVETICA" size="9"><strong>Table 5</strong>: Observables for the \
-                computed candidate. <strong>TZ column</strong> represents the observatory time zone offset from \
-                UTC for each transit event. <strong>TT errors column</strong> represents the uncertainty of the \
-                ingress, midtime and egress times for each observable calculated from the T0 and Period uncertainties. \
-                <strong>Moon column</strong> represents the moon phase and distance to the target star at the \
-                time of the transit midtime. <strong>Image column</strong> represents a plot where the altitude \
-                and air mass are plotted with a blue line. The transit midtime is plotted as a vertical black bar \
-                together with the ingress and egress in orange lines. The red vertical bars represent the uncertainty \
-                of the ingress (left) and the egress (right). The green floor of the graph represents \
-                the limit of altitude / air mass for the event to be observable. The white background and the \
-                gray background represent the daylight and night based on the nautical twilights.</font>'
-        story.append(Spacer(1, 5))
-        story.append(Paragraph(table5_descripcion, styles["ParagraphAlignJustify"]))
-        # Definimos el frame y el template sabiendo que un A4: 21 cm de ancho por 29,7 cm de altura
-        global_frame = Frame(1.5 * cm, 1.1 * cm, 18 * cm, 25.4 * cm, id='normal', showBoundary=0)
-        global_template = PageTemplate(id='UnaColumna', frames=global_frame,
-                                       onPage=self.create_header, onPageEnd=self.create_footer)
-        # Construimos el documento:
-        doc = BaseDocTemplate(self.working_path + "/" + self.name + "_observation_plan.pdf", pagesize=A4,
-                              rightMargin=40, leftMargin=40,
-                              topMargin=95, bottomMargin=15,
-                              pageTemplates=global_template)
-        doc.build(story)
+        self._prepare()
+        frame = Frame(1.2 * cm, 1.1 * cm, width - 2.4 * cm, height - 3.4 * cm, id='normal', leftPadding=0, rightPadding=0,
+                      topPadding=0, bottomPadding=0)
+        template = PageTemplate(id='UnaColumna', frames=frame, onPage=self.create_header, onPageEnd=self.create_footer)
+        file_path = self.working_path + "/" + self.name + "_observation_plan.pdf"
+        with tempfile.TemporaryDirectory() as directory:
+            story = self._summary_page(directory) + self._cards(directory) + self._appendix()
+            document = BaseDocTemplate(file_path, pagesize=landscape(A4), rightMargin=1.2 * cm, leftMargin=1.2 * cm,
+                                       topMargin=2.3 * cm, bottomMargin=1.1 * cm, pageTemplates=template)
+            document.build(story)
+        return file_path

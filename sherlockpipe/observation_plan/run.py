@@ -7,7 +7,7 @@ import alexfitter
 import numpy as np
 import pandas as pd
 from lcbuilder.lcbuilder_class import LcBuilder
-from sherlockpipe.observation_plan.observation_report import ObservationReport
+from sherlockpipe.observation_plan.observation_report import DEFAULT_MAX_CARDS, ObservationReport
 from sherlockpipe.observation_plan.planner import Planner
 from astropy.time import Time
 from sherlockpipe.bayesian_fit.allesfitter_data_extractor import AllesfitterDataExtractor
@@ -85,5 +85,6 @@ def run_plan(args):
                                    duration_low_err, duration_up_err, depth, depth_low_err, depth_up_err,
                                    args.transit_fraction, args.moon_min_dist, args.moon_max_dist, args.min_altitude,
                                    args.max_days, star_df.iloc[0]["v"], star_df.iloc[0]["j"], star_df.iloc[0]["h"],
-                                   star_df.iloc[0]["k"])
+                                   star_df.iloc[0]["k"], midtransit_times=midtransit_times, since=since,
+                                   max_cards=getattr(args, "max_cards", DEFAULT_MAX_CARDS))
         report.create_report()

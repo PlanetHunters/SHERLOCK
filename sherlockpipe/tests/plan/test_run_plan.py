@@ -67,7 +67,7 @@ def alles_for(candidates=("SOI_1",), epoch=1713.45):
 def arguments(directory, observatories, **overrides):
     values = dict(object_dir=directory, candidate=1, observatories=observatories, lat=None, lon=None, alt=None, tz=None,
                   min_altitude=30, moon_min_dist=30, moon_max_dist=70, max_days=12, transit_fraction=0.5, baseline=0.5,
-                  since="2024-03-01", error_sigma=2, no_error_alert=False, time_unit=None)
+                  since="2024-03-01", error_sigma=2, no_error_alert=False, time_unit=None, max_cards=20)
     values.update(overrides)
     return Namespace(**values)
 
@@ -182,6 +182,17 @@ class TestOrchestration(unittest.TestCase):
         self.assertEqual(["TIC 224298134_SOI_1", "TIC 224298134_SOI_2"], [called_with(c)["name"] for c in planner.call_args_list])
         self.assertEqual(2, report.return_value.create_report.call_count)
 
+    def test_the_report_gets_the_transits_of_the_plan_the_start_and_the_number_of_cards(self):
+        _, report = self._run()
+        kwargs = report.call_args.kwargs
+        self.assertEqual(20, kwargs["max_cards"])
+        self.assertEqual("2024-03-01 00:00:00.000", kwargs["since"].iso)
+        self.assertEqual(1, len(kwargs["midtransit_times"]))
+        _, report = self._run(max_cards=5)
+        self.assertEqual(5, report.call_args.kwargs["max_cards"])
+        _, report = self._run(max_cards=0)
+        self.assertEqual(0, report.call_args.kwargs["max_cards"])  # all the cards
+
     def test_the_plan_starts_today_unless_a_date_is_given(self):
         planner, _ = self._run(since=None)
         self.assertLess(abs((called_with(planner.call_args)["since"] - Time.now()).to_value("s")), 120)
@@ -241,8 +252,10 @@ class TestEndToEnd(unittest.TestCase):
         plan_dir = self._run()
         document = pypdfium2.PdfDocument(plan_dir + "/TIC 224298134_SOI_1_observation_plan.pdf")
         text = "\n".join(document[i].get_textpage().get_text_range() for i in range(len(document)))
-        self.assertIn("TIC 224298134 OBSERVATION PLAN", text)
+        self.assertIn("TIC 224298134 SOI 1 · Ground-based observation plan", text)
+        self.assertIn("Shortlist: the best opportunities", text)
         self.assertIn("Calar Alto", text)
+        self.assertIn("the target never rises above 30°", text)   # Trappist South has no events and says why
 
     @unittest.expectedFailure
     def test_the_depth_of_the_fit_is_written_in_ppt(self):

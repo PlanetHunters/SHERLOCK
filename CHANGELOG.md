@@ -4,6 +4,19 @@
 
 ### Changed
 
+- The ground-based observation plan report (`python -m sherlockpipe.plan`) is a landscape document instead of a
+  portrait one with a table of miniature airmass plots (1.25 x 0.75 inches, without tick labels). It has the target,
+  the candidate and the constraints; a calendar of opportunities with one row per observatory, every transit of
+  the plan as a faint line, every observable event as a dot sized and coloured by its observable fraction, and the
+  moon illumination underneath; a shortlist of the 10 best opportunities with the observable fraction, the window
+  in UTC, the local time, the altitude and airmass at the mid-transit, the moon and the timing uncertainty; one
+  event card per transit that compares the observatories that can observe it on a common UTC axis (the night
+  shaded, the altitude, the observable part, the transit and the window of its timing uncertainty); and an
+  appendix with every window and what limits each observatory. An observatory without events is explained
+  (for example that the target never rises above the minimum altitude from there) instead of silently missing.
+  `--max_cards` sets how many transits get a card, the best ones (20 by default, 0 for all). The ranking is
+  observable fraction x min(altitude, 60 deg) / 60 deg x (1 - moon illumination / 2). The planner no longer writes the
+  per-event images and returns all the mid-transit times of the plan instead of the images directory.
 - The Run plots are replaced by the Run sheet, with the same file names and new content. The function that drew
   them, `plot.plotting.save_transit_plot`, is removed.
 - EMLS figures are paper ready: one style for every figure (`plots.PAPER_RC`, `plots.paper_figure`) with
@@ -218,6 +231,14 @@
 
 ### Fixed
 
+- Observation plan: the observation window could start after it ended (Calar Alto, 4 December 2026: 17:53 to 06:06)
+  because the evening twilight nearest to the mid-time can be the next evening; the night is now the one that
+  holds the first observable sample. `plan_event` returned None when it failed, which stopped the whole plan with
+  "'NoneType' object is not subscriptable"; it now returns (None, None), the error is logged and the event is
+  dropped. The documented `--lat --lon --alt` path did not work (`DataFrame.append` is gone in pandas 2 and the
+  column was called "long" where the code reads "lon"); the coordinates are now read as numbers. A K2 target
+  ignored the time unit given with `--time_unit`. The moon illumination of the report was truncated (0.29 was
+  shown as 28%). The table captions of the old report repeated "Table 3" and skipped "Table 4".
 - EMLS catalog driver: a planet without a catalog mass gets the same mass as in the
   `sherlockpipe.emls` command (Chen & Kipping forecast, one Jupiter mass for giants)
   instead of R^1.5, which made giants about 8 times too light and their Hill sphere,

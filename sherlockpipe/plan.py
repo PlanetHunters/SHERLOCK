@@ -31,6 +31,8 @@ if __name__ == '__main__':
                     required=False)
     ap.add_argument('--no_error_alert', help="Will not block imprecise observations to be plotted.",
                     action='store_true', required=False)
+    ap.add_argument('--max_cards', help="Number of transits that get an event card in the report, the best ones "
+                                        "(0 for all of them).", type=int, default=20, required=False)
     ap.add_argument('--time_unit', help="Time unit to be used for the light curve measurements.", default=None,
                     required=False)
     args = ap.parse_args()
