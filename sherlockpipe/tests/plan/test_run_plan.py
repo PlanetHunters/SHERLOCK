@@ -98,7 +98,7 @@ class TestArguments(unittest.TestCase):
                 mock.patch.object(plan_run.Planner, "create_observation_observables") as planner, \
                 mock.patch.object(plan_run, "ObservationReport"):
             plan = self.directory + "/fit_[1]/main/plan"
-            planner.return_value = (pd.DataFrame(), pd.DataFrame(columns=EVENT_COLUMNS), None, plan, plan + "/images")
+            planner.return_value = (pd.DataFrame(), pd.DataFrame(columns=EVENT_COLUMNS), None, plan, Time(["2024-03-01T12:00:00"]))
             run_plan(arguments(None, path))
         self.assertEqual(self.directory + "/fit_[1]/main", called_with(planner.call_args)["object_dir"])
 
@@ -117,7 +117,7 @@ class TestOrchestration(unittest.TestCase):
     def _run(self, candidates=("SOI_1",), object_id="TIC 224298134", epoch=1713.45, **overrides):
         write_fit(self.directory, candidates, object_id, epoch)
         planner_result = (pd.DataFrame({"name": ["Calar-Alto"], "tz": [1], "lat": [37.2], "lon": [-2.5], "alt": [2168]}),
-                          pd.DataFrame(columns=EVENT_COLUMNS), None, self.fit + "/plan", self.fit + "/plan/images")
+                          pd.DataFrame(columns=EVENT_COLUMNS), None, self.fit + "/plan", Time(["2024-03-01T12:00:00"]))
         with mock.patch.object(plan_run, "load_alexfitter_results", return_value=alles_for(candidates, epoch)), \
                 mock.patch.object(plan_run.Planner, "create_observation_observables", return_value=planner_result) as planner, \
                 mock.patch.object(plan_run, "ObservationReport") as report:
@@ -130,13 +130,18 @@ class TestOrchestration(unittest.TestCase):
         planner, _ = self._run(time_unit="jd")
         self.assertEqual("jd", called_with(planner.call_args)["time_unit"])
 
-    def test_a_target_from_kepler_uses_bkjd(self):
-        planner, _ = self._run(object_id="KIC 8462852")
-        self.assertEqual("bkjd", called_with(planner.call_args)["time_unit"])
+    def test_a_target_from_kepler_or_k2_uses_bkjd(self):
+        for object_id in ("KIC 8462852", "EPIC 211945201"):
+            planner, _ = self._run(object_id=object_id)
+            self.assertEqual("bkjd", called_with(planner.call_args)["time_unit"])
 
-    @unittest.expectedFailure
+    def test_the_time_unit_decision_on_its_own(self):
+        decide = plan_run.PlanRun.time_unit
+        self.assertEqual("jd", decide("jd", "TESS"))
+        self.assertEqual(["btjd", "bkjd", "bkjd", "jd"], [decide(None, m) for m in ("TESS", "Kepler", "K2", "Other")])
+
     def test_the_time_unit_given_by_the_user_wins_for_k2_too(self):
-        """Known bug: `args.time_unit is None and mission == "Kepler" or mission == "K2"` lets K2 override the user."""
+        """It used to be `args.time_unit is None and mission == "Kepler" or mission == "K2"`, which let K2 override it."""
         planner, _ = self._run(object_id="EPIC 211945201", time_unit="jd")
         self.assertEqual("jd", called_with(planner.call_args)["time_unit"])
 
@@ -189,20 +194,21 @@ class TestOrchestration(unittest.TestCase):
         self._run()
         self.assertFalse(os.path.exists(self.fit + "/plan/old.txt"))
 
-    def test_the_images_are_removed_after_the_report_is_made(self):
-        os.makedirs(self.fit + "/plan/images")
-        self._run()
-        self.assertFalse(os.path.exists(self.fit + "/plan/images"))
 
-    @unittest.expectedFailure
+@unittest.skipIf(pypdfium2 is None, "pypdfium2 is needed to read the PDF")
+class TestCoordinates(unittest.TestCase):
+
     def test_a_single_observatory_can_be_given_by_its_coordinates(self):
-        """Known bug: the documented --lat --lon --alt path builds the observatory with DataFrame.append("Obs-1", ...),
-        which no longer exists in pandas 2 and has the wrong signature, and uses a column named "long" that the rest
-        of the code reads as "lon"."""
-        write_fit(self.directory)
-        with offline_astropy(), mock.patch.object(plan_run, "load_alexfitter_results", return_value=alles_for()):
-            run_plan(arguments(self.directory, None, lat="37.2236", lon="-2.5463", alt="2168", tz="1"))
-        self.assertTrue(os.path.exists(self.fit + "/plan/TIC 224298134_SOI_1_observation_plan.pdf"))
+        directory = tempfile.mkdtemp()
+        try:
+            fit = write_fit(directory)
+            with offline_astropy(), mock.patch.object(plan_run, "load_alexfitter_results", return_value=alles_for()):
+                run_plan(arguments(directory, None, lat=37.2236, lon=-2.5463, alt=2168, tz=1.0))
+            self.assertTrue(os.path.exists(fit + "/plan/TIC 224298134_SOI_1_observation_plan.pdf"))
+            events = pd.read_csv(fit + "/plan/observation_plan.csv")
+            self.assertEqual({"Obs-1"}, set(events["observatory"]))
+        finally:
+            shutil.rmtree(directory)
 
 
 @unittest.skipIf(pypdfium2 is None, "pypdfium2 is needed to read the PDF")
@@ -225,11 +231,11 @@ class TestEndToEnd(unittest.TestCase):
             run_plan(arguments(self.directory, self.observatories))
         return self.fit + "/plan"
 
-    def test_a_pdf_and_a_csv_are_written_and_the_images_are_cleaned(self):
+    def test_a_pdf_and_a_csv_are_written(self):
         plan_dir = self._run()
         self.assertTrue(os.path.exists(plan_dir + "/TIC 224298134_SOI_1_observation_plan.pdf"))
         self.assertTrue(os.path.exists(plan_dir + "/observation_plan.csv"))
-        self.assertFalse(os.path.exists(plan_dir + "/images"))
+        self.assertFalse(os.path.exists(plan_dir + "/images"))  # the plan does not write images any more
 
     def test_the_pdf_describes_the_target_and_lists_the_observatories_with_events(self):
         plan_dir = self._run()

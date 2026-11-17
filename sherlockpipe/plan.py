@@ -9,10 +9,10 @@ if __name__ == '__main__':
     ap.add_argument('--candidate', help="The candidate signal to be used", type=int, default=None,
                     required=True)
     ap.add_argument("--observatories", help="Csv file containing the observatories coordinates", required=False)
-    ap.add_argument('--lat', help="Observer latitude", required=False)
-    ap.add_argument('--lon', help="Observer longitude", required=False)
-    ap.add_argument('--alt', help="Observer altitude", required=False)
-    ap.add_argument('--tz', help="Time zone (in hours offset from UTC)", required=False)
+    ap.add_argument('--lat', type=float, help="Observer latitude", required=False)
+    ap.add_argument('--lon', type=float, help="Observer longitude", required=False)
+    ap.add_argument('--alt', type=float, help="Observer altitude", required=False)
+    ap.add_argument('--tz', type=float, help="Time zone (in hours offset from UTC)", required=False)
     ap.add_argument('--min_altitude', help="Minimum altitude of the target to be observable", type=float, default=23,
                     required=False)
     ap.add_argument('--moon_min_dist', help="Minimum required moon distance for moon minimum illumination.", type=float, default=30,

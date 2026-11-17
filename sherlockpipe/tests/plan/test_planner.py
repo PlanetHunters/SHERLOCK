@@ -3,14 +3,14 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 import astropy.units as u
 import numpy as np
 import pandas as pd
-from astroplan import moon_illumination
+from astroplan import Observer, moon_illumination
 from astropy.coordinates import SkyCoord, get_body
 from astropy.time import Time
-from matplotlib.figure import Figure
 
 from sherlockpipe.observation_plan.planner import MoonIlluminationSeparationConstraint, Planner
 from sherlockpipe.tests.plan.fixtures import (DEC, EPOCH_JD, EVENT_COLUMNS, PERIOD, RA, offline_astropy, plan,
@@ -54,15 +54,25 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(1.0, Planner.get_offset(28.3, -16.5, summer))
         self.assertEqual(-10.0, Planner.get_offset(19.82, -155.47, winter))    # Hawaii, no daylight saving time
 
-    def test_twin_axis_is_found_by_its_bounds(self):
-        figure = Figure()
-        ax = figure.add_subplot()
-        twin = ax.twinx()
-        self.assertIs(twin, Planner.get_twin(ax))
 
-    def test_twin_axis_is_none_when_there_is_only_one_axis(self):
-        figure = Figure()
-        self.assertIsNone(Planner.get_twin(figure.add_subplot()))
+    def test_an_observatory_has_coordinates_only_when_latitude_longitude_and_altitude_are_numbers(self):
+        has = Planner.has_coordinates
+        self.assertTrue(has(pd.Series({"lat": 28.3, "lon": -16.5, "alt": 2390})))
+        self.assertTrue(has(pd.Series({"lat": "28.3", "lon": "-16.5", "alt": "2390"})))
+        self.assertFalse(has(pd.Series({"lat": np.nan, "lon": -16.5, "alt": 2390})))
+        self.assertFalse(has(pd.Series({"lat": 28.3, "lon": None, "alt": 2390})))
+        self.assertFalse(has(pd.Series({"lat": 28.3, "lon": -16.5, "alt": ""})))
+        self.assertFalse(has(pd.Series({"lat": 28.3, "lon": -16.5})))
+
+    def test_the_night_of_a_time_holds_it_between_the_twilights(self):
+        with offline_astropy():
+            site = Observer(latitude=37.2236 * u.deg, longitude=-2.5463 * u.deg, elevation=2168 * u.m)
+            for stamp in ("2026-12-04T06:00:50", "2026-12-04T23:00:00", "2026-12-04T03:00:00"):
+                time = Time(stamp)
+                evening, morning = Planner.night_of(site, time)
+                self.assertLessEqual(evening, time)
+                self.assertGreaterEqual(morning, time)
+                self.assertLess((morning - evening).to_value(u.hour), 16)
 
 
 class TestObservables(unittest.TestCase):
@@ -75,18 +85,22 @@ class TestObservables(unittest.TestCase):
         cls.directory = tempfile.mkdtemp()
         cls.observatories_file = write_observatories(cls.directory)
         cls.result = plan(cls.directory, cls.observatories_file)
-        cls.observatories, cls.events, cls.alert_date, cls.plan_dir, cls.images_dir = cls.result
+        cls.observatories, cls.events, cls.alert_date, cls.plan_dir, cls.midtransit_times = cls.result
 
     @classmethod
     def tearDownClass(cls):
         cls._offline.__exit__(None, None, None)
         shutil.rmtree(cls.directory)
 
-    def test_directories_and_the_csv_are_created_inside_the_object_directory(self):
+    def test_the_plan_directory_holds_the_csv_and_nothing_else(self):
         self.assertEqual(self.directory + "/plan", self.plan_dir)
-        self.assertEqual(self.directory + "/plan/images", self.images_dir)
-        self.assertTrue(os.path.isdir(self.images_dir))
-        self.assertTrue(os.path.exists(self.plan_dir + "/observation_plan.csv"))
+        self.assertEqual(["observation_plan.csv"], os.listdir(self.plan_dir))
+
+    def test_all_the_mid_transit_times_of_the_plan_are_returned_also_those_nobody_can_observe(self):
+        self.assertEqual(int(12 // PERIOD), len(self.midtransit_times))
+        self.assertGreater(len(self.midtransit_times), len({e for e in self.events["midtime"]}))
+        observed = set(Time(list(self.events["midtime"]), scale="utc").isot)
+        self.assertTrue(observed <= set(self.midtransit_times.isot))
 
     def test_the_observatories_are_returned_as_read(self):
         self.assertEqual(["Calar-Alto", "Trappist-North", "Trappist-South"], list(self.observatories["name"]))
@@ -142,18 +156,6 @@ class TestObservables(unittest.TestCase):
             self.assertLessEqual(start, end)
             self.assertLess(end - start, pd.Timedelta(hours=14))
 
-    def test_one_image_is_written_per_event_with_the_observatory_and_the_mid_time_in_its_name(self):
-        images = sorted(os.listdir(self.images_dir))
-        expected = sorted(f"{e['observatory']}_{str(e['midtime'])[:-4]}.png" for _, e in self.events.iterrows())
-        self.assertEqual(expected, images)
-        with open(os.path.join(self.images_dir, images[0]), "rb") as f:
-            self.assertEqual(b"\x89PNG", f.read(4))
-
-    def test_running_again_replaces_the_images_but_keeps_one_csv(self):
-        with offline_astropy():
-            plan(self.directory, self.observatories_file)
-        self.assertEqual(len(self.events), len(os.listdir(self.images_dir)))
-
 
 class TestObservableVariants(unittest.TestCase):
 
@@ -207,21 +209,34 @@ class TestObservableVariants(unittest.TestCase):
 
     def test_a_site_without_coordinates_only_applies_the_moon_constraint(self):
         path = write_observatories(self.directory, "name,tz,lat,lon,alt\nRemote,2,,,\n")
-        _, events, _, _, images_dir = plan(self.directory, path)
+        _, events, _, _, _ = plan(self.directory, path)
         self.assertGreater(len(events), 0)
         self.assertTrue((events["observable"] == 1.0).all())
         self.assertTrue(events["twilight_evening"].isna().all())
         self.assertTrue((events["timezone"] == 2).all())
-        self.assertEqual([], os.listdir(images_dir))  # no airmass plot without a location
 
-    @unittest.expectedFailure
     def test_an_event_that_cannot_be_planned_is_dropped_without_stopping_the_plan(self):
-        """Known bug: plan_event logs the exception and returns None instead of the (alert_date, observable) tuple it
-        documents, so the whole plan stops with "'NoneType' object is not subscriptable". A site without coordinates
-        and without time zone triggers it."""
-        path = write_observatories(self.directory, "name,tz,lat,lon,alt\nRemote,,,,\n")
-        _, events, _, _, _ = plan(self.directory, path)
-        self.assertEqual(0, len(events))
+        """A site without coordinates and without time zone cannot give a local time: its events are dropped, the
+        error is logged (by the worker) and the plan goes on."""
+        path = write_observatories(self.directory, "name,tz,lat,lon,alt\nRemote,,,,\nCalar-Alto,,37.2236,-2.5463,2168\n")
+        _, events, _, _, _ = plan(self.directory, path)  # the error is logged by a worker process of the pool
+        self.assertEqual({"Calar-Alto"}, set(events["observatory"]))
+
+    def test_plan_event_always_returns_an_alert_and_an_observable(self):
+        broken = SimpleNamespace(i=0, ingress_egress_times=None)
+        self.assertEqual((None, None), Planner.plan_event(broken))
+
+    def test_a_single_observatory_can_be_given_by_its_coordinates_as_text(self):
+        observatories, events, _, _, _ = plan(self.directory, None, tz="1", lat="37.2236", lon="-2.5463", alt="2168")
+        self.assertEqual(["Obs-1"], list(observatories["name"]))
+        self.assertEqual(["name", "tz", "lat", "lon", "alt"], list(observatories.columns))
+        self.assertGreater(len(events), 0)
+        self.assertEqual({"Obs-1"}, set(events["observatory"]))
+        self.assertEqual({1.0}, set(events["timezone"]))
+
+    def test_the_time_zone_of_a_single_observatory_is_computed_when_it_is_not_given(self):
+        _, events, _, _, _ = plan(self.directory, None, lat=37.2236, lon=-2.5463, alt=2168)
+        self.assertEqual({1.0}, set(events["timezone"]))
 
     def test_the_time_zone_of_a_listed_site_is_computed_from_its_position(self):
         _, events, _, _, _ = plan(self.directory, self.observatories_file)
@@ -229,14 +244,22 @@ class TestObservableVariants(unittest.TestCase):
         self.assertEqual({1.0}, by_site["Calar-Alto"])                 # Spain in March
         self.assertLessEqual(by_site["Trappist-North"], {0.0, 1.0})   # Morocco: UTC+1, UTC+0 during Ramadan
 
-    @unittest.expectedFailure
     def test_the_observation_window_never_ends_before_it_starts(self):
-        """Known bug: the evening twilight nearest to the mid-time can be the next evening, so a window starts after it
-        ends (Calar Alto, 4 December 2026: starts 17:53, ends 06:06)."""
+        """Calar Alto, 4 December 2026: the nearest evening twilight was the next one (17:53) and the window started
+        after it ended (06:06)."""
         path = write_observatories(self.directory, "name,tz,lat,lon,alt\nCalar-Alto,,37.2236,-2.5463,2168\n")
         _, events, _, _, _ = plan(self.directory, path, since="2026-12-01T12:00:00", max_days=6)
         windows = events[["start_obs", "end_obs"]].apply(pd.to_datetime)
         self.assertTrue((windows["start_obs"] <= windows["end_obs"]).all())
+        morning_event = events[events["midtime"].str.startswith("2026-12-04T06:00")].iloc[0]
+        self.assertTrue(pd.Timestamp(morning_event["twilight_evening"]) < pd.Timestamp(morning_event["midtime"]))
+        self.assertTrue(pd.Timestamp(morning_event["twilight_morning"]) > pd.Timestamp(morning_event["start_obs"]))
+
+    def test_the_twilights_of_every_event_surround_its_window(self):
+        _, events, _, _, _ = plan(self.directory, self.observatories_file)
+        for _, e in events.iterrows():
+            self.assertLessEqual(pd.Timestamp(e["twilight_evening"]), pd.Timestamp(e["start_obs"]))
+            self.assertGreaterEqual(pd.Timestamp(e["twilight_morning"]), pd.Timestamp(e["end_obs"]))
 
 
 if __name__ == '__main__':

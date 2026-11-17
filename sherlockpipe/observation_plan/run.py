@@ -14,6 +14,21 @@ from sherlockpipe.bayesian_fit.allesfitter_data_extractor import AllesfitterData
 from sherlockpipe.bayesian_fit.alexfitter_compat import load_alexfitter_results
 
 
+class PlanRun:
+    """Small decisions of the plan run that are worth testing on their own."""
+
+    @staticmethod
+    def time_unit(requested, mission):
+        """The time unit of the epoch: the one the user asked for, otherwise the one of the mission of the target."""
+        if requested is not None:
+            return requested
+        if mission == "TESS":
+            return 'btjd'
+        if mission in ("Kepler", "K2"):
+            return 'bkjd'
+        return 'jd'
+
+
 def run_plan(args):
     """Run the observation planning workflow for a fitted candidate.
 
@@ -57,15 +72,8 @@ def run_plan(args):
         period_row = fit_results[fit_results["#name"].str.contains("_period")].iloc[i]
         name = object_id + "_" + period_row["#name"].replace("_period", "")
         mission, mission_prefix, id_int = LcBuilder().parse_object_info(object_id)
-        if args.time_unit is None and mission == "TESS":
-            time_unit = 'btjd'
-        elif args.time_unit is None and mission == "Kepler" or mission == "K2":
-            time_unit = 'bkjd'
-        elif args.time_unit is not None:
-            time_unit = args.time_unit
-        else:
-            time_unit = 'jd'
-        observatories_df, observables_df, alert_date, plan_dir, images_dir = \
+        time_unit = PlanRun.time_unit(args.time_unit, mission)
+        observatories_df, observables_df, alert_date, plan_dir, midtransit_times = \
             Planner.create_observation_observables(object_id, object_dir, ra, dec, since, name, epoch,
                                                    epoch_low_err, epoch_up_err, period, period_low_err,
                                                    period_up_err, duration, args.observatories, args.tz, args.lat,
@@ -79,4 +87,3 @@ def run_plan(args):
                                    args.max_days, star_df.iloc[0]["v"], star_df.iloc[0]["j"], star_df.iloc[0]["h"],
                                    star_df.iloc[0]["k"])
         report.create_report()
-        shutil.rmtree(images_dir, ignore_errors=True)
