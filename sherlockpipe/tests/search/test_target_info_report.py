@@ -7,6 +7,7 @@ from unittest import mock
 
 import numpy as np
 import pandas as pd
+from matplotlib.figure import Figure
 
 from lcbuilder.objectinfo.MissionObjectInfo import MissionObjectInfo
 
@@ -366,9 +367,32 @@ class TestFailuresNeverStopTheSearch(unittest.TestCase):
     def test_missing_optional_dependency_only_leaves_out_the_field_of_view(self):
         os.makedirs(os.path.join(self.directory, "fov"))
         open(os.path.join(self.directory, "fov", "fov_sector_1.pdf"), "wb").close()
-        with mock.patch.dict(sys.modules, {"pymupdf": None}):
+        with mock.patch.dict(sys.modules, {"pypdfium2": None}):
+            self.assertFalse(tir.rasterize_pdf(os.path.join(self.directory, "fov", "fov_sector_1.pdf"),
+                                               os.path.join(self.directory, "x.png")))
             path = TargetInfoReport(self.directory, "TIC1_all").create()
         self.assertIsNotNone(path)
+
+    def test_a_pdf_that_cannot_be_rendered_is_left_out_and_the_rest_stays(self):
+        os.makedirs(os.path.join(self.directory, "fov"))
+        with open(os.path.join(self.directory, "fov", "fov_sector_1.pdf"), "wb") as f:
+            f.write(b"this is not a pdf")
+        path = TargetInfoReport(self.directory, "TIC1_all").create()
+        self.assertIsNotNone(path)
+        self.assertTrue(os.path.exists(path))
+
+    def test_a_field_of_view_pdf_is_rendered_into_the_report(self):
+        pdf = os.path.join(self.directory, "fov", "fov_sector_1.pdf")
+        os.makedirs(os.path.dirname(pdf))
+        figure = Figure(figsize=(6, 2.5))
+        figure.subplots().plot([0, 1], [0, 1])
+        figure.savefig(pdf)
+        png = os.path.join(self.directory, "fov_1.png")
+        self.assertTrue(tir.rasterize_pdf(pdf, png, dpi=100))
+        from PIL import Image
+        with Image.open(png) as image:
+            self.assertEqual((600, 250), image.size)
+        self.assertIsNotNone(TargetInfoReport(self.directory, "TIC1_all").create())
 
     def test_sherlock_hook_survives_an_error_an_exit_and_an_import_failure(self):
         sherlock = Sherlock(None)

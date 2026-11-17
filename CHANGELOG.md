@@ -66,8 +66,9 @@
   TRICERATOPS and pixel field of view, and, when those steps ran, the stellar oscillations removed
   (`sa/signals.csv`), the auto-detrend and the high RMS mask. Nothing that was written before is removed. The
   report never stops a search if it fails, and can be made afterwards for an existing execution with
-  `python -m sherlockpipe.search.target_info_report <execution_dir>`. Rasterising the TRICERATOPS PDFs needs
-  PyMuPDF (new dependency); without it those pages are left out with a warning.
+  `python -m sherlockpipe.search.target_info_report <execution_dir>`. Rendering the TRICERATOPS PDFs uses
+  pypdfium2 (new dependency, ships its own PDFium, no system library); without it those pages are left out
+  with a warning.
 
 - EMLS grid search: every hypothesis stacks the same points (the widest moon-orbit window
   around each epoch), so `search_stack` builds them once with their weights, planet columns

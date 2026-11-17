@@ -451,14 +451,21 @@ def figure_detrends(pre, detrends, window_lengths, path):
 
 
 def rasterize_pdf(pdf_path, png_path, dpi=130):
-    """Renders the first page of a PDF to PNG. Needs the optional dependency PyMuPDF; returns False without it."""
+    """
+    Renders the first page of a PDF to PNG with pypdfium2, which ships its own PDFium and needs no system library.
+
+    :return: False, after a warning, if pypdfium2 is not installed
+    """
     try:
-        import pymupdf
+        import pypdfium2
     except ImportError:
-        logging.warning("PyMuPDF is not installed: the TRICERATOPS field of view PDFs are left out of the info report")
+        logging.warning("pypdfium2 is not installed: the TRICERATOPS field of view PDFs are left out of the info report")
         return False
-    with pymupdf.open(pdf_path) as document:
-        document[0].get_pixmap(dpi=dpi).save(png_path)
+    document = pypdfium2.PdfDocument(pdf_path)
+    try:
+        document[0].render(scale=dpi / 72).to_pil().save(png_path)
+    finally:
+        document.close()
     return True
 
 
@@ -704,8 +711,11 @@ class TargetInfoReport:
         for pdf in pdfs:
             sector = re.search(r"fov_sector_(\d+)", pdf).group(1)
             png = os.path.join(self.tmp_dir, f"fov_sector_{sector}.png")
-            if rasterize_pdf(pdf, png):
-                images.append((sector, png))
+            try:
+                if rasterize_pdf(pdf, png):
+                    images.append((sector, png))
+            except Exception:
+                logging.exception("Target info report: %s could not be rendered and was left out", pdf)
         if images:
             cell = (width - 0.4 * cm) / 2
             cells = [Table([[Paragraph(f"Sector {s}", self.styles["small"])], [_image(p, cell - 2.6 * cm)]],

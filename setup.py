@@ -36,7 +36,7 @@ setuptools.setup(
                         "celerite==0.4.3", # Allesfitter dependency
                         "corner==2.2.3", # Allesfitter dependency
                         "dearwatson==2.0.0", # Vetting
-                        "PyMuPDF>=1.24", # Target info report: TRICERATOPS field of view PDFs
+                        "pypdfium2>=4.0", # Target info report: renders the TRICERATOPS field of view PDFs
                         "dynesty==2.1.5", # Allesfitter dependency
                         "emcee==3.1.6", # Allesfitter dependency
                         "mock==4.0.3",
