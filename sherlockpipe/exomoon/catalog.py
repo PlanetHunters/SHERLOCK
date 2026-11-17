@@ -2,12 +2,16 @@
 filters (Hill-Roche, Barnes & O'Brien tidal survival, companions) and the light-curve cadences.
 """
 import functools
+import io
 import logging
 import os
+import urllib.parse
+import urllib.request
 import astropy.units as u
 from lcbuilder.helper import LcbuilderHelper
 import numpy as np
 import astropy.constants as ac
+import pandas as pd
 from sherlockpipe.exomoon.constants import AU_TO_M, AU_TO_RSUN, G, M_earth_to_M_sun, Mearth_to_kg, Msolar_to_kg
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
 from sherlockpipe.exomoon.tides import (TIDAL_K2_Q_MAX_RADIUS, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR,  # noqa: F401
@@ -77,6 +81,134 @@ def catalog_csv_path(catalog):
         Path inside the SHERLOCK directory of the user.
     """
     return os.path.join(os.path.expanduser('~'), '.sherlockpipe', f"{catalog}.csv")
+
+
+ARCHIVE_TAP_URL = "https://exoplanetarchive.ipac.caltech.edu/TAP/sync"
+
+
+# Mass provenances of the NASA Exoplanet Archive that are measurements; "M-R relationship" values are
+# the archive's own guess from the radius and are not used.
+MEASURED_MASS_PROVENANCES = ("Mass", "Msini")
+
+
+# Deuterium-burning limit in Jupiter masses: a companion with a measured mass above it is a brown
+# dwarf, not a planet, even when the archive lists it (it takes objects up to 30 M_Jup; Kepler-39 b
+# has about 20 M_Jup).
+MAX_PLANET_MASS_MJUP = 13.0
+
+
+JUPITER_MASS_EARTH = 317.83
+
+
+def confirmed_kepler_planets_path():
+    """Return the path of the local table of confirmed Kepler planets (see `load_confirmed_kepler_planets`)."""
+    return os.path.join(os.path.expanduser('~'), '.sherlockpipe', "kepler_confirmed.csv")
+
+
+def _archive_query(query):
+    """Return the CSV result of an ADQL query to the NASA Exoplanet Archive as a DataFrame."""
+    url = ARCHIVE_TAP_URL + "?" + urllib.parse.urlencode({"query": query, "format": "csv"})
+    with urllib.request.urlopen(url, timeout=300) as response:
+        text = response.read().decode("utf-8")
+    if text.lstrip().startswith("<"):  # an error page or a VOTable error instead of CSV
+        raise ValueError(f"The NASA Exoplanet Archive did not return a table for: {query}")
+    return pd.read_csv(io.StringIO(text))
+
+
+def download_confirmed_kepler_planets():
+    """Return the KOIs that are confirmed planets today, with any measured mass and orbit.
+
+    The KOI table keeps "CONFIRMED" for objects refuted later: KOI-189.01, KOI-631.01 and KOI-855.01
+    have masses of 78-93 M_Jup (Diaz et al. 2014; Canas et al. 2023) and are no longer planets in the
+    archive. The archive's keplernames table links each KOI to a planet that is confirmed now, and
+    pscomppars gives that planet's composite mass and orbit.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per confirmed KOI: koi_name, pl_name, pl_bmasse (Earth masses), pl_bmasselim,
+        pl_bmassprov, pl_orbeccen, pl_orbeccenlim and pl_orblper (degrees). A limit flag of 1 marks
+        an upper limit (Kepler-80 f has 12651 M_earth as one), -1 a lower limit.
+    """
+    names = _archive_query("select koi_name, pl_name from keplernames")
+    planets = _archive_query("select pl_name, pl_bmasse, pl_bmasselim, pl_bmassprov, pl_orbeccen, pl_orbeccenlim, "
+                             "pl_orblper from pscomppars")
+    return names.merge(planets, on="pl_name", how="left")
+
+
+def load_confirmed_kepler_planets(path=None, refresh=False):
+    """Return the confirmed Kepler planets (see `download_confirmed_kepler_planets`), cached in path.
+
+    Parameters
+    ----------
+    path : str, optional
+        Local CSV, default `confirmed_kepler_planets_path`.
+    refresh : bool, optional
+        Download again even when the local table exists, default False.
+    """
+    path = path or confirmed_kepler_planets_path()
+    if refresh or not os.path.exists(path):
+        table = download_confirmed_kepler_planets()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        table.to_csv(path, index=False)
+        logging.info("Confirmed Kepler planets: %d KOIs downloaded from the NASA Exoplanet Archive to %s",
+                     len(table), path)
+        return table
+    return pd.read_csv(path)
+
+
+def apply_confirmed_planets(tois_df, confirmed):
+    """Mark the KOIs that are confirmed planets and take their measured masses and orbits.
+
+    A KOI is a confirmed planet (column confirmed_planet) when the archive links it to a planet
+    confirmed today (`download_confirmed_kepler_planets`) and the Kepler data do not call it a false
+    positive (koi_pdisposition): KOI-125.01, statistically validated (Morton et al. 2016) but
+    flagged as a stellar eclipse, is left out, and so is a measured mass above MAX_PLANET_MASS_MJUP
+    (a brown dwarf). A measured mass (MEASURED_MASS_PROVENANCES) replaces
+    the predicted one, and a measured eccentricity above zero replaces koi_eccen, with its argument
+    of periastron; the archive gives zero for orbits it assumes circular. Limits (pl_bmasselim,
+    pl_orbeccenlim not zero) are not used.
+
+    Parameters
+    ----------
+    tois_df : pandas.DataFrame
+        KOI table after `prepare_koi_table`.
+    confirmed : pandas.DataFrame
+        Table of `load_confirmed_kepler_planets`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The table with confirmed_planet and archive_planet_name, and the measured values filled in.
+    """
+    table = tois_df.copy()
+    archive = confirmed.drop_duplicates("koi_name").set_index("koi_name")
+    in_archive = table["OI"].isin(archive.index)
+    false_positive = table.get("koi_pdisposition", pd.Series(index=table.index, dtype=object)) == "FALSE POSITIVE"
+    table["confirmed_planet"] = in_archive & ~false_positive
+    rows = archive.reindex(table["OI"])
+    table["archive_planet_name"] = rows["pl_name"].to_numpy()
+    def measured(column):
+        # A value, not a limit; a table without the flag counts as values.
+        flag = rows[column].to_numpy(dtype=float) if column in rows else np.zeros(len(rows))
+        return np.nan_to_num(flag, nan=0.0) == 0
+
+    measured_mass = rows["pl_bmassprov"].isin(MEASURED_MASS_PROVENANCES).to_numpy() \
+        & np.isfinite(rows["pl_bmasse"].to_numpy(dtype=float)) & measured("pl_bmasselim")
+    table.loc[measured_mass, "Predicted Mass (M_Earth)"] = rows["pl_bmasse"].to_numpy(dtype=float)[measured_mass]
+    too_massive = measured_mass & (rows["pl_bmasse"].to_numpy(dtype=float) > MAX_PLANET_MASS_MJUP * JUPITER_MASS_EARTH)
+    table["confirmed_planet"] = table["confirmed_planet"] & ~too_massive
+    eccentric = (np.nan_to_num(rows["pl_orbeccen"].to_numpy(dtype=float)) > 0) & measured("pl_orbeccenlim")
+    table.loc[eccentric, "koi_eccen"] = rows["pl_orbeccen"].to_numpy(dtype=float)[eccentric]
+    longp = rows["pl_orblper"].to_numpy(dtype=float)
+    table.loc[eccentric, "koi_longp"] = np.where(np.isfinite(longp), longp, np.nan)[eccentric]
+    logging.info("Confirmed planets: %d of %d KOIs (%d linked to a planet confirmed now, %d of those false "
+                 "positives in the Kepler data, %d above %.0f M_Jup); %d with a measured mass, %d with a measured "
+                 "eccentricity", int(table["confirmed_planet"].sum()), len(table), int(in_archive.sum()),
+                 int((in_archive & false_positive).sum()), int((in_archive & too_massive).sum()),
+                 MAX_PLANET_MASS_MJUP, int((measured_mass & table["confirmed_planet"]).sum()),
+                 int((eccentric & table["confirmed_planet"]).sum()))
+    return table
 
 
 def emls_output_dir(target_name, object_of_interest):

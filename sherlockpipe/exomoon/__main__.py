@@ -1,6 +1,7 @@
 """Catalog driver: search moons around the KOI or TOI catalog targets that pass the dynamical filters.
 
-Example: ``python -m sherlockpipe.exomoon --catalog kois``
+Example: ``python -m sherlockpipe.exomoon --catalog kois``. KOIs are searched only when they are planets
+confirmed today (see `apply_confirmed_planets`); ``--refresh_confirmed`` downloads that table again.
 """
 import logging
 import os
@@ -9,7 +10,7 @@ from lcbuilder.helper import LcbuilderHelper
 import numpy as np
 from lcbuilder.lcbuilder_class import LcBuilder
 import pandas as pd
-from sherlockpipe.exomoon.catalog import CATALOG_MIN_MOON_RADIUS_FRACTION, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, catalog_csv_path, catalog_planet_orbit, catalog_planet_params, combine_cadence_curves, emls_output_dir, max_surviving_moon_radius, mean_planet_mass, prepare_koi_table
+from sherlockpipe.exomoon.catalog import CATALOG_MIN_MOON_RADIUS_FRACTION, apply_confirmed_planets, load_confirmed_kepler_planets, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, catalog_csv_path, catalog_planet_orbit, catalog_planet_params, combine_cadence_curves, emls_output_dir, max_surviving_moon_radius, mean_planet_mass, prepare_koi_table
 from sherlockpipe.exomoon.constants import AU_TO_RSUN, M_earth_to_M_sun, R_earth_to_R_sun
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
 
@@ -53,8 +54,13 @@ if __name__ == '__main__':
         # with its own exposure and weight.
         cadence = [60, 1800]
         tois_df = prepare_koi_table(tois_df)
-    confirmed_tois_df = tois_df.loc[(tois_df['Disposition'] == 'CP') | (tois_df['Disposition'] == 'KP') | (tois_df['Disposition'] == 'CONFIRMED') | (tois_df['Disposition'] == 'CANDIDATE')]
-    companion_tois_df = confirmed_tois_df
+        # Planets confirmed today, not the KOI table's disposition, which keeps "CONFIRMED" for
+        # objects refuted later (see apply_confirmed_planets); measured masses and orbits come along.
+        tois_df = apply_confirmed_planets(tois_df, load_confirmed_kepler_planets(refresh="--refresh_confirmed" in sys.argv))
+    known_tois_df = tois_df.loc[(tois_df['Disposition'] == 'CP') | (tois_df['Disposition'] == 'KP') | (tois_df['Disposition'] == 'CONFIRMED') | (tois_df['Disposition'] == 'CANDIDATE')]
+    # Every candidate or planet of a system is a companion (masked, and checked for Hill spacing).
+    companion_tois_df = known_tois_df
+    confirmed_tois_df = known_tois_df.loc[known_tois_df['confirmed_planet']] if catalog == "kois" else known_tois_df
     confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Planet SNR'] > 15]
     confirmed_tois_df = confirmed_tois_df.sort_values(by='Planet SNR', ascending=False)
     # Moon dynamical stability filter

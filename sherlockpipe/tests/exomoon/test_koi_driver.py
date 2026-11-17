@@ -30,6 +30,13 @@ def koi_table(**overrides):
     return pd.DataFrame({key: [value] for key, value in values.items()})
 
 
+def confirmed_table(**overrides):
+    values = {'koi_name': 'K00001.01', 'pl_name': 'Kepler-1 b', 'pl_bmasse': np.nan, 'pl_bmassprov': 'M-R relationship',
+              'pl_orbeccen': 0.0, 'pl_orblper': np.nan}
+    values.update(overrides)
+    return pd.DataFrame({key: [value] for key, value in values.items()})
+
+
 def koi_row(**overrides):
     return exomoon.prepare_koi_table(koi_table(**overrides)).iloc[0]
 
@@ -146,6 +153,8 @@ def test_koi_driver_reaches_the_search(tmp_path, monkeypatch):
     (home / '.sherlockpipe').mkdir(parents=True)
     time, flux, flux_err, duration = long_period_curve()
     koi_table(**{'Period (days)': DRIVER_PERIOD, 'Duration (hours)': duration * 24, 'koi_impact': 0.0}).to_csv(home / '.sherlockpipe' / 'kois.csv', index=False)
+    # The archive table of planets confirmed today, so the driver does not download it.
+    confirmed_table().to_csv(home / '.sherlockpipe' / 'kepler_confirmed.csv', index=False)
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, 'argv', ['exomoon.py', '--catalog', 'kois'])
@@ -290,3 +299,80 @@ def test_driver_hill_roche_check_uses_the_domingos_limit_with_eccentricity(tmp_p
     assert 'Hill-Roche=0,' in capsys.readouterr().out
     assert run_driver_on_table(tmp_path / 'eccentric', monkeypatch, eccentric) == 0
     assert 'Hill-Roche=1,' in capsys.readouterr().out
+
+
+# --- Confirmed planets: the archive, not the KOI table's disposition ---------------------------------------------
+
+def three_kois():
+    """A planet confirmed today, a refuted "CONFIRMED" KOI (KOI-189.01-like) and a validated planet that the
+    Kepler data call a stellar eclipse (KOI-125.01-like)."""
+    table = pd.concat([koi_table(OI='K00001.01'), koi_table(OI='K00189.01'),
+                       koi_table(OI='K00125.01', koi_pdisposition='FALSE POSITIVE')], ignore_index=True)
+    return exomoon.prepare_koi_table(table)
+
+
+def archive(**overrides):
+    rows = [confirmed_table(**overrides), confirmed_table(koi_name='K00125.01', pl_name='Kepler-468 b')]
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_only_planets_confirmed_today_are_kept():
+    table = exomoon.apply_confirmed_planets(three_kois(), archive())
+
+    assert table.set_index('OI')['confirmed_planet'].to_dict() == {
+        'K00001.01': True, 'K00189.01': False, 'K00125.01': False}
+    assert table.set_index('OI').loc['K00001.01', 'archive_planet_name'] == 'Kepler-1 b'
+
+
+def test_a_measured_mass_and_eccentricity_replace_the_guesses():
+    table = exomoon.apply_confirmed_planets(three_kois(), archive(pl_bmasse=1678.0, pl_bmassprov='Mass',
+                                                                 pl_orbeccen=0.401, pl_orblper=-75.3))
+    row = table.set_index('OI').loc['K00001.01']
+
+    assert row['Predicted Mass (M_Earth)'] == pytest.approx(1678.0)
+    assert exomoon.catalog_planet_orbit(row, 'kois') == pytest.approx((0.401, -75.3))
+    assert exomoon.catalog_planet_params(row, 'kois', 1.0, 1.0, 0.0, KEPLER_OFFSET)['planet_mass'] == \
+        pytest.approx(1678.0)
+
+
+def test_a_measured_brown_dwarf_mass_is_not_a_planet():
+    brown_dwarf = exomoon.apply_confirmed_planets(three_kois(), archive(pl_bmasse=6388.1, pl_bmassprov='Mass'))
+    giant = exomoon.apply_confirmed_planets(three_kois(), archive(pl_bmasse=12 * 317.83, pl_bmassprov='Mass'))
+    upper_limit = exomoon.apply_confirmed_planets(three_kois(), archive(pl_bmasse=6388.1, pl_bmassprov='Mass',
+                                                                       pl_bmasselim=1))
+
+    assert not brown_dwarf.set_index('OI').loc['K00001.01', 'confirmed_planet']
+    assert giant.set_index('OI').loc['K00001.01', 'confirmed_planet']
+    assert upper_limit.set_index('OI').loc['K00001.01', 'confirmed_planet']  # a limit says nothing
+
+
+def test_relation_masses_and_assumed_circular_orbits_are_not_used():
+    table = exomoon.apply_confirmed_planets(three_kois(), archive(pl_bmasse=318.0, pl_bmassprov='M-R relationship',
+                                                                 pl_orbeccen=0.0))
+    row = table.set_index('OI').loc['K00001.01']
+
+    assert np.isnan(row['Predicted Mass (M_Earth)'])
+    assert exomoon.catalog_planet_orbit(row, 'kois') == (0.0, 0.0)
+
+
+def test_mass_and_eccentricity_limits_are_not_used():
+    table = exomoon.apply_confirmed_planets(three_kois(), archive(pl_bmasse=12651.5, pl_bmasselim=1, pl_bmassprov='Mass',
+                                                                 pl_orbeccen=0.3, pl_orbeccenlim=1))
+    row = table.set_index('OI').loc['K00001.01']
+
+    assert np.isnan(row['Predicted Mass (M_Earth)'])
+    assert exomoon.catalog_planet_orbit(row, 'kois') == (0.0, 0.0)
+
+
+def test_the_confirmed_table_is_downloaded_once(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(exomoon.catalog, 'download_confirmed_kepler_planets',
+                        lambda: calls.append(1) or archive())
+    path = str(tmp_path / 'kepler_confirmed.csv')
+
+    first = exomoon.load_confirmed_kepler_planets(path)
+    second = exomoon.load_confirmed_kepler_planets(path)
+    exomoon.load_confirmed_kepler_planets(path, refresh=True)
+
+    assert len(calls) == 2
+    assert list(second['koi_name']) == list(first['koi_name'])
