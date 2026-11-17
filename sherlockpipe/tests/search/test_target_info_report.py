@@ -269,6 +269,37 @@ class TestReportDocument(unittest.TestCase):
         self.assertIsNone(write_target_info_report(self.directory, "TIC1_all"))
 
 
+class TestSectorIdsWithBrackets(unittest.TestCase):
+    """Ids of a single sector look like TIC1_[2]: brackets must not be read as glob character classes."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.directory = os.path.join(self.root, "TIC1_[2]")
+        os.makedirs(self.directory)
+        _synthetic_execution(self.directory)
+        open(os.path.join(self.directory, "Phase_detrend_period_TIC1_[2]_3.00_days.png"), "w").close()
+        os.makedirs(os.path.join(self.directory, "1"))
+        for window in (0.5, 1.0):
+            open(os.path.join(self.directory, "1", f"Run_1_ws={window:.4f}_TIC1_[2].png"), "w").close()
+        os.makedirs(os.path.join(self.directory, "fov"))
+        open(os.path.join(self.directory, "fov", "fov_Flux_pixels[2].png"), "w").close()
+
+    def tearDown(self):
+        shutil.rmtree(self.root)
+
+    def test_files_are_found_in_a_directory_with_brackets(self):
+        pre = pd.read_csv(os.path.join(self.directory, "lc_predetrends.csv"))
+        self.assertEqual(1, len(tir.read_detrends(self.directory, pre)))
+        self.assertEqual(3.0, read_autodetrend(self.directory)[0])
+        self.assertEqual([0.5, 1.0], tir.window_lengths_from_runs(self.directory, "TIC1_[2]"))
+
+    def test_the_whole_report_sees_the_detrends(self):
+        report = TargetInfoReport(self.directory, "TIC1_[2]")
+        self.assertIsNotNone(report.create())
+        self.assertEqual([0.5, 1.0], report.config.window_lengths)
+        self.assertEqual(1, len(tir.read_detrends(self.directory, report.pre)))
+
+
 class TestFailuresNeverStopTheSearch(unittest.TestCase):
     """The report is a convenience: nothing that goes wrong with it may break a SHERLOCK execution."""
 

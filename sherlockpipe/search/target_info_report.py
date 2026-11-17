@@ -69,6 +69,11 @@ class ReportConfig:
     detrend_method: str = None
 
 
+def _glob(directory, pattern):
+    """``glob`` inside a directory whose own name may hold glob characters: ids such as ``TIC1_[2]`` are common."""
+    return glob.glob(os.path.join(glob.escape(directory), pattern))
+
+
 def parse_report_log(text):
     """
     Reads the SHERLOCK report log of an execution. Only the last execution found in the file is considered.
@@ -291,7 +296,7 @@ def read_pulsations(object_dir):
 
 def read_autodetrend(object_dir):
     """Returns ``(period_days, png_path)`` of the auto-detrend phase plot, or None if it was not produced."""
-    for path in sorted(glob.glob(os.path.join(object_dir, "Phase_detrend_period_*.png"))):
+    for path in sorted(_glob(object_dir, "Phase_detrend_period_*.png")):
         match = re.search(r"_(\d+\.\d+)_days", os.path.basename(path))
         return (float(match.group(1)) if match else None), path
     return None
@@ -299,7 +304,7 @@ def read_autodetrend(object_dir):
 
 def read_rms_mask_plot(object_dir):
     """Path of the overall high RMS mask plot (the per time-window ones are not used), or None."""
-    paths = [p for p in glob.glob(os.path.join(object_dir, "rms_mask", "High_RMS_Mask_*.png"))
+    paths = [p for p in _glob(object_dir, os.path.join("rms_mask", "High_RMS_Mask_*.png"))
              if "_time_" not in os.path.basename(p)]
     return sorted(paths)[0] if paths else None
 
@@ -350,7 +355,7 @@ def config_from_log(parsed_log, window_lengths=None):
 def window_lengths_from_runs(object_dir, object_id):
     """Window lengths of the detrends, recovered from the ``Run_1_<ws|ks>=<value>_<id>.png`` file names."""
     values = []
-    for path in glob.glob(os.path.join(object_dir, "1", f"Run_1_*=*_{object_id}.png")):
+    for path in _glob(object_dir, os.path.join("1", f"Run_1_*=*_{glob.escape(object_id)}.png")):
         match = re.search(r"_(?:ws|ks)=([\d.]+)_", os.path.basename(path))
         if match:
             values.append(float(match.group(1)))
@@ -409,7 +414,7 @@ def read_detrends(object_dir, pre):
     :return: list of ``(index, DataFrame)`` with ``time, flux`` (detrended), ``trend``
     """
     detrends = []
-    for path in sorted(glob.glob(os.path.join(object_dir, "lc_[0-9]*.csv")),
+    for path in sorted(_glob(object_dir, "lc_[0-9]*.csv"),
                        key=lambda p: int(re.search(r"lc_(\d+)\.csv", p).group(1))):
         index = int(re.search(r"lc_(\d+)\.csv", path).group(1))
         if index == 0:
@@ -693,7 +698,7 @@ class TargetInfoReport:
 
     def _field_of_view_pages(self, width):
         story = []
-        pdfs = sorted(glob.glob(os.path.join(self.object_dir, "fov", "fov_sector_*.pdf")),
+        pdfs = sorted(_glob(self.object_dir, os.path.join("fov", "fov_sector_*.pdf")),
                       key=lambda p: int(re.search(r"fov_sector_(\d+)", p).group(1)))
         images = []
         for pdf in pdfs:
@@ -711,7 +716,7 @@ class TargetInfoReport:
                       Table(rows, colWidths=[cell + 0.2 * cm] * 2,
                             style=[("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]),
                       PageBreak()]
-        pixels = sorted(glob.glob(os.path.join(self.object_dir, "fov", "fov_Flux_pixels*.png")))
+        pixels = sorted(_glob(self.object_dir, os.path.join("fov", "fov_Flux_pixels*.png")))
         if pixels:
             cell = 8.3 * cm
             cells = [_image(p, cell) for p in pixels]
