@@ -240,7 +240,8 @@ def test_epochs_at_the_t0_bound_are_dropped(tmp_path):
     duration = t14(truth)
     shifts = np.linspace(0, duration, 12)  # drifts by one T14
     data = curve(truth, shifts=shifts)
-    emls = emls_for(tmp_path, data, duration, skip_fold_fit=True)
+    # The prior on the linear ephemeris: the data-driven one follows the drift (test_timing_prior.py).
+    emls = emls_for(tmp_path, data, duration, skip_fold_fit=True, ttv_prior_from_data=False)
 
     emls.subtract_planet_transit(*data[1:])
 

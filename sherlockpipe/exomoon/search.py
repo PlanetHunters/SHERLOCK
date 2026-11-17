@@ -58,7 +58,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
                  detrend_mask='auto', fix_impact_param=False, retrograde=True, null_stop_fap=0.1,
-                 scramble_runs=0, scramble_trigger_fap=0.1):
+                 scramble_runs=0, scramble_trigger_fap=0.1, ttv_prior_from_data=True):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -147,6 +147,13 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             ephemeris uncertainty at each epoch, in the Gaussian prior on the per-epoch t0.
             Default "auto": the largest planet TTV that a searched moon can cause (see
             `max_moon_ttv`). None fits t0 without a prior.
+        ttv_prior_from_data : bool, optional
+            Default True: the t0 prior is centred on a timing model (none, linear or linear plus
+            a sinusoid) of the mid-times measured without a prior, and widened by their scatter
+            beyond the timing precision, so timing variations that no searched moon causes are
+            followed (see `observed_timing_prior`); ttv_prior_width is then a floor of the
+            width. False centres it on the linear ephemeris with ttv_prior_width and the
+            ephemeris uncertainty only.
         planet_t0_err, planet_period_err : float, optional
             1-sigma uncertainties in days of planet_t0 and planet_period, such as those of a
             transit fit. They set the ephemeris uncertainty in the t0 prior. When either is
@@ -248,6 +255,9 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                              f"{ttv_prior_width}")
         self.ttv_prior_width = ttv_prior_width
         self.ttv_prior_width_used = None
+        self.ttv_prior_from_data = bool(ttv_prior_from_data)
+        self.ttv_measured = self.ttv_precisions = self.ttv_model = self.ttv_excess_used = None
+        self.ttv_prior_centres = self.ttv_prior_sigmas = None
         for name, value in (("planet_t0_err", planet_t0_err), ("planet_period_err", planet_period_err)):
             if value is not None and not (np.isfinite(value) and value >= 0):
                 raise ValueError(f"{name} must be a non-negative number of days or None, got {value}")

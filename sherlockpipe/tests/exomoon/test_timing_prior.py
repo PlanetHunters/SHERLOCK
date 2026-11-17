@@ -1,0 +1,171 @@
+"""The t0 prior measured from the planet mid-times (timing_prior.py, 2026-11-17).
+
+The prior used to be only the TTV of the largest searched moon, a fraction of a minute for small
+moon radii, so a 30-min TTV from another planet was pulled back to the linear ephemeris and left a
+residual at ingress and egress. It is now centred on a timing model of the mid-times measured
+without a prior and widened by their scatter beyond the timing precision.
+"""
+import numpy as np
+import pytest
+
+from sherlockpipe.exomoon import ExoMoonLeastSquares
+from sherlockpipe.tests.exomoon.test_audit_fixes import PERIOD
+from sherlockpipe.tests.exomoon.test_planet_fit import CADENCE, curve, emls_for, planet_params, stacked_residual_peak, t14
+
+MINUTE = 1 / 1440
+TINY_MOON_TTV = 0.1 * MINUTE  # the moon floor of a search with small moon radii
+
+
+def sinusoid(epochs, amplitude, period):
+    return amplitude * np.sin(2 * np.pi * np.arange(epochs) * PERIOD / period)
+
+
+# --- the statistics ------------------------------------------------------------------------------------------------
+
+def test_no_excess_scatter_when_the_times_match_their_precision():
+    rng = np.random.default_rng(1)
+    precisions = np.full(400, 0.5 * MINUTE)
+    assert ExoMoonLeastSquares.excess_scatter(rng.normal(0, 1, 400) * precisions * 0.9, precisions, 400) == 0.0
+
+
+def test_excess_scatter_recovers_the_extra_variation():
+    rng = np.random.default_rng(2)
+    precisions = np.full(2000, 0.5 * MINUTE)
+    oc = rng.normal(0, 1, 2000) * np.hypot(precisions, 2 * MINUTE)
+    assert ExoMoonLeastSquares.excess_scatter(oc, precisions, 2000) == pytest.approx(2 * MINUTE, rel=0.05)
+
+
+@pytest.mark.parametrize('kind', ['none', 'linear', 'sinusoid'])
+def test_the_timing_model_is_chosen_by_bic(kind):
+    epochs = 30
+    rng = np.random.default_rng(3)
+    numbers = np.arange(epochs, dtype=float)
+    times = numbers * PERIOD
+    precisions = np.full(epochs, 0.5 * MINUTE)
+    signal = {"none": np.zeros(epochs), "linear": (5 + 0.8 * numbers) * MINUTE,
+              "sinusoid": sinusoid(epochs, 20 * MINUTE, 7.3 * PERIOD)}[kind]
+    oc = signal + rng.normal(0, 1, epochs) * precisions
+
+    model = ExoMoonLeastSquares.fit_timing_model(times, numbers, oc, precisions, times, numbers)
+
+    assert model["name"] == kind
+    assert np.max(np.abs(model["centres"] - signal)) < 1.5 * MINUTE
+    if kind == "sinusoid":
+        assert model["period"] == pytest.approx(7.3 * PERIOD, rel=0.03)
+
+
+def test_an_epoch_far_from_the_others_is_refitted_out():
+    epochs = 20
+    rng = np.random.default_rng(4)
+    numbers = np.arange(epochs, dtype=float)
+    precisions = np.full(epochs, 0.5 * MINUTE)
+    oc = rng.normal(0, 1, epochs) * precisions
+    oc[7] = 60 * MINUTE  # an epoch whose fit ran away, such as one with partial coverage
+
+    model = ExoMoonLeastSquares.fit_timing_model(numbers * PERIOD, numbers, oc, precisions, numbers * PERIOD, numbers)
+
+    assert not model["used"][7] and np.sum(model["used"]) == epochs - 1
+    assert model["name"] == "none" and model["excess"] < 0.5 * MINUTE
+
+
+# --- the planet stage ----------------------------------------------------------------------------------------------
+
+def strong_ttv_fixture(noise_snr=30, epochs=20, seed=5):
+    truth = planet_params()
+    noise = np.sqrt(t14(truth) / CADENCE) * truth.rp ** 2 / noise_snr
+    shifts = sinusoid(epochs, 30 * MINUTE, 7.3 * PERIOD)
+    return truth, shifts, curve(truth, epochs=epochs, noise=noise, shifts=shifts, seed=seed)
+
+
+def test_a_30_minute_ttv_is_followed_with_a_tiny_moon_floor(tmp_path):
+    truth, shifts, data = strong_ttv_fixture()
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    result = emls.subtract_planet_transit(*data[1:])
+
+    precision = np.median(emls.ttv_precisions)
+    # The fitted times are as good as one epoch's own precision (about 2 min here), not 30 min off.
+    assert np.sqrt(np.mean(np.square(np.array(emls.ttvs) - shifts))) < 1.5 * precision
+    assert emls.ttv_model["name"] == "sinusoid"
+    assert emls.ttv_model["period"] == pytest.approx(7.3 * PERIOD, rel=0.05)
+    moon_only = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV,
+                         ttv_prior_from_data=False)
+    moon_only_result = moon_only.subtract_planet_transit(*data[1:])
+    assert stacked_residual_peak(emls, result, data[0]) < 0.5 * stacked_residual_peak(moon_only, moon_only_result,
+                                                                                      data[0])
+    assert len(emls.ttv_precisions) == len(emls.ttv_measured) == len(emls.ttv_prior_sigmas) == len(emls.bary_t0s)
+
+
+def test_the_moon_only_prior_pulls_the_same_ttv_back(tmp_path):
+    """The old behaviour, kept with ttv_prior_from_data=False: the fit stays near the ephemeris."""
+    truth, shifts, data = strong_ttv_fixture()
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV,
+                    ttv_prior_from_data=False)
+
+    result = emls.subtract_planet_transit(*data[1:])
+
+    assert np.median(np.abs(np.array(emls.ttvs) - shifts)) > 5 * MINUTE
+    assert stacked_residual_peak(emls, result, data[0]) > 0.05 * truth.rp ** 2
+
+
+def test_low_snr_epochs_follow_the_timing_model(tmp_path):
+    """At SNR 8 per epoch the prior still matters: centred on the measured trend, it gives better times
+    than no prior (the epochs follow the noise) and than the moon-only prior (they stay on the ephemeris)."""
+    truth, shifts, data = strong_ttv_fixture(noise_snr=8, epochs=30, seed=6)
+
+    def timing_error(**kwargs):
+        emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, min_transit_completeness=0, **kwargs)
+        emls.subtract_planet_transit(*data[1:])
+        assert len(emls.ttvs) == len(shifts)
+        return np.sqrt(np.mean(np.square(np.array(emls.ttvs) - shifts))), emls
+
+    measured, emls = timing_error(ttv_prior_width=TINY_MOON_TTV)
+    free, _ = timing_error(ttv_prior_width=None)
+    moon_only, _ = timing_error(ttv_prior_width=TINY_MOON_TTV, ttv_prior_from_data=False)
+
+    assert emls.ttv_model["name"] == "sinusoid"
+    assert measured < 0.7 * free
+    assert measured < 0.7 * moon_only
+
+
+def test_no_timing_variation_keeps_the_prior_on_the_ephemeris(tmp_path):
+    truth = planet_params()
+    noise = np.sqrt(t14(truth) / CADENCE) * truth.rp ** 2 / 10
+    data = curve(truth, epochs=20, noise=noise, seed=7)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    emls.subtract_planet_transit(*data[1:])
+
+    precision = np.median([p for p in emls.ttv_precisions if p is not None])
+    assert emls.ttv_model["name"] == "none"
+    # The free fits scatter somewhat more than the Carter et al. precision; the excess absorbs it.
+    assert emls.ttv_excess_used < 2 * precision
+    assert np.max(np.abs(emls.ttv_prior_centres)) == 0.0
+
+
+def test_unmeasurable_epochs_keep_the_ephemeris_prior(tmp_path):
+    """At SNR 3 per epoch the timing precision is about the ingress, so no timing model is fitted and
+    the prior stays on the linear ephemeris with the moon floor (test_low_snr_epochs_stay_near_the_ephemeris)."""
+    truth, shifts, data = strong_ttv_fixture(noise_snr=3, epochs=20, seed=8)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, min_transit_completeness=0,
+                    ttv_prior_width=TINY_MOON_TTV)
+
+    emls.subtract_planet_transit(*data[1:])
+
+    assert emls.ttv_model is None and emls.ttv_excess_used == 0.0
+    assert np.all(np.array(emls.ttv_prior_centres) == 0.0)
+
+
+def test_a_drifting_ephemeris_is_followed(tmp_path):
+    """A catalog ephemeris off by 1.5 min per epoch: the linear timing model recentres the prior."""
+    truth = planet_params()
+    noise = np.sqrt(t14(truth) / CADENCE) * truth.rp ** 2 / 30
+    shifts = 1.5 * MINUTE * np.arange(20)
+    data = curve(truth, epochs=20, noise=noise, shifts=shifts, seed=9)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    emls.subtract_planet_transit(*data[1:])
+
+    assert emls.ttv_model["name"] == "linear"
+    assert emls.ttv_model["coefficients_min"][1] == pytest.approx(1.5, abs=0.15)
+    assert np.sqrt(np.mean(np.square(np.array(emls.ttvs) - shifts))) < 1.5 * np.median(emls.ttv_precisions)

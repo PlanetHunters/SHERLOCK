@@ -14,13 +14,14 @@ from sherlockpipe.exomoon.constants import AU_TO_RSUN, MIN_RP_OVER_RSTAR, M_eart
 from sherlockpipe.exomoon.orbits import forecast_moon_mass
 from sherlockpipe.exomoon.planet_derivatives import PlanetDerivatives
 from sherlockpipe.exomoon.planet_figures import PlanetFigures
+from sherlockpipe.exomoon.timing_prior import TimingPrior
 from sherlockpipe.exomoon.transit_fits import TransitFits
 
 Fold = namedtuple('Fold', ['time', 'flux', 'flux_err', 'exposure'])
 """The epochs of the planet folded on t0: times from t0, fluxes, errors (or None) and exposures."""
 
 
-class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
+class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
     """The planet stage: fold fit of the transit shape, per-epoch mid-times, the planet
     subtraction and the derivatives of the subtracted model that the joint fit corrects.
     """
@@ -206,7 +207,7 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
                          label, chi2, dof, p_value, noise_factor)
         return result
 
-    def realign_fold(self, time, flux, flux_err, params, duration_window, prior_sigmas, fold_bounds):
+    def realign_fold(self, time, flux, flux_err, params, duration_window, priors, fold_bounds):
         """Refit the planet shape on a fold aligned on the fitted epoch times (audit item B6).
 
         The first fold uses the linear ephemeris, so TTVs or a drifting ephemeris smear it. Each
@@ -231,17 +232,17 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
             return float(np.sum(((fold_flux - model.light_curve(theta_params)) / fold_err) ** 2))
 
         shifts = []
-        for t0, sigma in zip(self.bary_t0s, prior_sigmas):
+        for t0, centre, sigma in zip(self.bary_t0s, *priors):
             mask = np.abs(time - t0) < duration_window
             if np.sum(mask) < self.min_cadences_per_t0:
                 continue
             epoch_params = copy.copy(params)
-            epoch_params.t0, epoch_params.u = t0, self.ab
-            theta, _, status = self.fit_single_t0(time[mask], flux[mask], flux_err[mask], t0,
+            epoch_params.t0, epoch_params.u = t0 + centre, self.ab
+            theta, _, status = self.fit_single_t0(time[mask], flux[mask], flux_err[mask], t0 + centre,
                                                                  duration_window, epoch_params,
                                                                  self.exposure_at(time[mask]), sigma)
             usable = status is None or (status["converged"] and "t0" not in status["at_bound"])
-            shifts.append((t0, float(theta[0] - t0) if usable else 0.0))
+            shifts.append((t0, float(theta[0] - t0) if usable else centre))
         if len(shifts) < 2:
             return
         current = copy.copy(params)
@@ -389,19 +390,20 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
         self.epochs_flagged_rms = []
         self.epochs_flagged_rp = []
         self.epochs_dropped_coverage = []
-        prior_sigmas = self.epoch_t0_priors(time, flux, params, duration_window)
+        priors = self.epoch_t0_priors(time, flux, flux_err, params, duration_window)
         self.fold_realigned = False
         if not self.skip_fold_fit and flux_err is not None:
-            self.realign_fold(time, flux, flux_err, params, duration_window, prior_sigmas, fold_bounds)
+            self.realign_fold(time, flux, flux_err, params, duration_window, priors, fold_bounds)
         result_time = time.copy()
         result_flux = flux.copy()
         result_flux_err = flux_err.copy() if flux_err is not None else None
         rejected_t0s = []
-        for t0, t0_prior_sigma in zip(self.bary_t0s, prior_sigmas):
+        for t0, centre, t0_prior_sigma in zip(self.bary_t0s, *priors):
             window = np.abs(time - t0) < duration_window
             indexes = np.flatnonzero(window)
-            best_theta, best_model, status = self.fit_epoch(time[window], flux[window], flux_err[window], t0,
-                                                            t0_prior_sigma, params, rp_err, duration_window)
+            best_theta, best_model, status = self.fit_epoch(time[window], flux[window], flux_err[window],
+                                                            t0 + centre, t0_prior_sigma, params, rp_err,
+                                                            duration_window)
             best_t0 = best_theta[0]
             self.ttvs.append(best_t0 - t0)
             # C4: a fit that did not converge, or whose t0 stopped at its bound, subtracts the planet
@@ -430,7 +432,7 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
                     self.plot_subtracted_epoch(time[indexes], flux[indexes], best_model, result_flux[indexes],
                                                best_t0, rejected=t0 in rejected_t0s)
             else:
-                centre = self.masked_epoch_centre(t0, best_t0, status, time[window])
+                centre = self.masked_epoch_centre(t0 + centre, best_t0, status, time[window])
                 half_mask = self.mask_half_width(time[window])
                 if plot:
                     self.plot_masked_epoch(time[window], flux[window], best_model, centre, half_mask)
@@ -571,24 +573,36 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
         if plot:
             self.plot_fold_fit(fold, start_params, params_best, guess, theta)
 
-    def epoch_t0_priors(self, time, flux, params, duration_window):
-        """Return the width of the t0 prior of each epoch, or None for no prior (audit item C1).
+    def epoch_t0_priors(self, time, flux, flux_err, params, duration_window):
+        """Return the centre shift and width of the t0 prior of each epoch (audit item C1).
 
-        The prior combines the TTV the largest searched moon can cause (`ttv_prior_width`, 'auto'
-        for `max_moon_ttv`), which is stored in ttv_prior_width_used, with the ephemeris
-        uncertainty at each epoch.
+        The moon term is the TTV the largest searched moon can cause (`ttv_prior_width`, 'auto'
+        for `max_moon_ttv`), stored in ttv_prior_width_used. With ttv_prior_from_data (default),
+        the prior is centred on a timing model of the mid-times measured without a prior and
+        widened by their excess scatter (`observed_timing_prior`), so timing variations that no
+        searched moon causes, such as those from other planets, are followed rather than pulled
+        back to the linear ephemeris; otherwise it is centred on the linear ephemeris with the moon
+        term and the ephemeris uncertainty only. With ttv_prior_width None there is no prior.
+
+        Returns
+        -------
+        tuple
+            (centre shifts in days from the linear ephemeris, prior widths in days or None).
         """
+        zeros = [0.0] * len(self.bary_t0s)
+        self.ttv_measured, self.ttv_precisions, self.ttv_model, self.ttv_excess_used = None, None, None, None
+        self.ttv_prior_centres, self.ttv_prior_sigmas = zeros, [None] * len(self.bary_t0s)
         if self.ttv_prior_width == "auto":
             self.ttv_prior_width_used = self.max_moon_ttv()
-            logging.info("TTV allowed by the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth, "
+            logging.info("Moon TTV in the t0 prior: %.1f min, the largest a searched moon can cause (%.2f R_earth, "
                          "%.1f M_earth forecast, on the widest searched orbit)", self.ttv_prior_width_used * 1440,
                          self.max_radius, forecast_moon_mass(self.max_radius, self.max_moon_density))
         else:
             self.ttv_prior_width_used = self.ttv_prior_width
             if self.ttv_prior_width is not None:
-                logging.info("TTV allowed by the t0 prior: %.1f min (given)", self.ttv_prior_width * 1440)
+                logging.info("Moon TTV in the t0 prior: %.1f min (given)", self.ttv_prior_width * 1440)
         if self.ttv_prior_width_used is None:
-            return [None] * len(self.bary_t0s)
+            return zeros, [None] * len(self.bary_t0s)
         ingress = self.ingress_duration(params, self.planet_duration)
         precisions = []
         for t0 in self.bary_t0s:
@@ -599,7 +613,12 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
         if known:
             logging.info("Ephemeris uncertainty in the t0 prior (from %s): median %.1f min, largest %.1f min",
                          self.ephemeris_source, np.median(known) * 1440, np.max(known) * 1440)
-        return [None if sigma is None else float(np.hypot(sigma, self.ttv_prior_width_used)) for sigma in ephemeris]
+        if self.ttv_prior_from_data:
+            return self.observed_timing_prior(time, flux, flux_err, params, duration_window, precisions, ephemeris)
+        self.ttv_precisions = precisions
+        sigmas = [None if sigma is None else float(np.hypot(sigma, self.ttv_prior_width_used)) for sigma in ephemeris]
+        self.ttv_prior_sigmas = sigmas
+        return zeros, sigmas
 
     def fit_epoch(self, epoch_time, epoch_flux, epoch_err, t0, t0_prior_sigma, params, rp_err, duration_window):
         """Fit one epoch's mid-time (and radius, with `fit_rp_per_transit`) with the fold shape.
@@ -672,6 +691,10 @@ class PlanetModel(TransitFits, PlanetDerivatives, PlanetFigures):
                          len(self.epochs_dropped_coverage), len(self.epochs_flagged_rms), len(self.epochs_flagged_rp))
         if len(rejected_t0s) > 0:
             self.ttvs = [ttv for t0, ttv in zip(self.bary_t0s, self.ttvs) if t0 not in rejected_t0s]
+            for name in ("ttv_measured", "ttv_precisions", "ttv_prior_centres", "ttv_prior_sigmas"):
+                values = getattr(self, name, None)
+                if values is not None and len(values) == len(self.bary_t0s):
+                    setattr(self, name, [v for t0, v in zip(self.bary_t0s, values) if t0 not in rejected_t0s])
             self.bary_t0s = [t0 for t0 in self.bary_t0s if t0 not in rejected_t0s]
             self.require_usable_epochs()
 

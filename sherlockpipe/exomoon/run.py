@@ -682,6 +682,18 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "ttv_prior_source": "auto: largest TTV of a searched moon" if ttv_prior_minutes is None
         else ("none" if not ttv_prior_minutes else "user"),
         "ephemeris_uncertainty_source": emls.ephemeris_source,
+        "ttv_prior_from_data": emls.ttv_prior_from_data,
+        "ttv_timing_model": emls.ttv_model,
+        "ttv_excess_minutes": None if emls.ttv_excess_used is None else emls.ttv_excess_used * 1440,
+        "epoch_timing": None if emls.ttv_precisions is None else [
+            {"t0": float(t0),
+             "measured_minutes": None if emls.ttv_measured is None or emls.ttv_measured[i] is None
+             else emls.ttv_measured[i] * 1440,
+             "precision_minutes": None if emls.ttv_precisions[i] is None else emls.ttv_precisions[i] * 1440,
+             "prior_centre_minutes": emls.ttv_prior_centres[i] * 1440,
+             "prior_width_minutes": None if emls.ttv_prior_sigmas[i] is None else emls.ttv_prior_sigmas[i] * 1440,
+             "fitted_minutes": float(emls.ttvs[i]) * 1440}
+            for i, t0 in enumerate(emls.bary_t0s)],
         "detrending": {"by": "emls" if emls.detrend_window is not None else "input",
                        "window": emls.detrend_window,
                        "mask": emls.resolved_detrend_mask() if emls.detrend_window is not None else None,
