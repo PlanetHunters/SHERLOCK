@@ -27,7 +27,6 @@ from lcbuilder.objectinfo.preparer.mission_data_preparer import MissionDataPrepa
 from sherlockpipe.ois.OisManager import OisManager
 from lcbuilder.star.HabitabilityCalculator import HabitabilityCalculator
 
-from sherlockpipe.plot.plotting import save_transit_plot
 from sherlockpipe.search.phase_coverage.phase_coverage import PhaseCoverage
 from sherlockpipe.search.sherlock_target import SherlockTarget
 from sherlockpipe.search.transitresult import TransitResult
@@ -658,17 +657,6 @@ class Sherlock:
         run_dir = self.__init_object_dir(star_info.object_id) + '/' + str(id_run) + '/'
         signal_selection = sherlock_target.signal_score_selectors[sherlock_target.best_signal_algorithm]\
             .select(id_run, sherlock_target, star_info, transits_min_count, time, lcs, transit_results, wl, cadence)
-        title = 'Run ' + str(id_run) + '# curve: SELECTED' + \
-                ' # P=' + format(signal_selection.transit_result.period, '.2f') + 'd # T0=' + \
-                format(signal_selection.transit_result.t0, '.2f') + ' # Depth=' + \
-                format(signal_selection.transit_result.depth, '.4f') + "ppt # Dur=" + \
-                format(signal_selection.transit_result.duration * 24 * 60, '.0f') + 'm # SNR:' + \
-                str(format(signal_selection.transit_result.snr, '.2f')) + ' # SDE:' + \
-                str(format(signal_selection.transit_result.sde, '.2f')) + ' # BS:' + \
-                str(format(signal_selection.transit_result.border_score, '.2f'))
-        file = 'Run_' + str(id_run) + '_SELECTED_' + str(signal_selection.curve_index) + '_' + str(star_info.object_id) + '.png'
-        save_transit_plot(star_info.object_id, title, run_dir, file, time, lcs[signal_selection.curve_index],
-                          signal_selection.transit_result, cadence, id_run, sherlock_target.use_harmonics_spectra)
         self.__save_run_sheet(star_info.object_id, run_dir, id_run, signal_selection.curve_index, time,
                               lcs[signal_selection.curve_index], flux_err, signal_selection.transit_result, cadence,
                               sherlock_target)
@@ -797,7 +785,7 @@ class Sherlock:
                      'Depth_sig', "T. dur (min)", "T0", "SNR", "SDE", "Border_score", "Matching OI", "Harmonic",
                      "Planet radius (R_Earth)", "Rp/Rs", "Semi-major axis", "Habitability Zone")
         transit_results = {}
-        plot_dir = self.__init_object_run_dir(star_info.object_id, id_run)
+        self.__init_object_run_dir(star_info.object_id, id_run)  # creates the directory of the Run
         if not sherlock_target.ignore_original:
             transit_result = self.__adjust_transit(sherlock_target, time, lcs[0], star_info, transits_min_count,
                                                    transit_results, report, cadence, period_grid, detrend_source_period)
@@ -813,15 +801,6 @@ class Sherlock:
                          transit_result.duration * 24 * 60, transit_result.t0, transit_result.snr, transit_result.sde,
                          transit_result.border_score, oi, transit_result.harmonic, r_planet, rp_rs, a,
                          habitability_zone)
-            plot_title = 'Run ' + str(id_run) + 'PDCSAP_FLUX # P=' + \
-                         format(transit_result.period, '.2f') + 'd # T0=' + format(transit_result.t0, '.2f') + \
-                         ' # Depth=' + format(transit_result.depth, '.4f') + 'ppt # Dur=' + \
-                         format(transit_result.duration * 24 * 60, '.0f') + 'm # SNR:' + \
-                         str(format(transit_result.snr, '.2f')) + ' # SDE:' + str(format(transit_result.sde, '.2f')) + \
-                         ' # BS:' + str(format(transit_result.border_score, '.2f'))
-            plot_file = 'Run_' + str(id_run) + '_PDCSAP-FLUX_' + str(star_info.object_id) + '.png'
-            save_transit_plot(star_info.object_id, plot_title, plot_dir, plot_file, time, lcs[0], transit_result,
-                              cadence, id_run, sherlock_target.use_harmonics_spectra)
         else:
             transit_result = TransitResult(None, None, 0, 0, 0, 0, [], [], 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, [])
         transit_results[0] = transit_result
@@ -841,18 +820,6 @@ class Sherlock:
                      transit_result.duration * 24 * 60, transit_result.t0, transit_result.snr, transit_result.sde,
                          transit_result.border_score, oi, transit_result.harmonic, r_planet, rp_rs, a,
                      habitability_zone)
-            detrend_file_title_customs = 'ker_size' if sherlock_target.detrend_method == 'gp' else 'win_size'
-            detrend_file_name_customs = 'ks' if sherlock_target.detrend_method == 'gp' else 'ws'
-            title = 'Run ' + str(id_run) + '# ' + detrend_file_title_customs + ':' + str(format(wl[i], '.4f')) + \
-                    ' # P=' + format(transit_result.period, '.2f') + 'd # T0=' + \
-                    format(transit_result.t0, '.2f') + ' # Depth=' + format(transit_result.depth, '.4f') + "ppt # Dur=" + \
-                    format(transit_result.duration * 24 * 60, '.0f') + 'm # SNR:' + \
-                    str(format(transit_result.snr, '.2f')) + ' # SDE:' + str(format(transit_result.sde, '.2f')) + \
-                    ' # BS:' + str(format(transit_result.border_score, '.2f'))
-            file = 'Run_' + str(id_run) + '_' + detrend_file_name_customs + '=' + str(format(wl[i], '.4f')) + '_' + \
-                   str(star_info.object_id) + '.png'
-            save_transit_plot(star_info.object_id, title, plot_dir, file, time, lcs[i], transit_result, cadence,
-                              id_run, sherlock_target.use_harmonics_spectra)
         return transit_results
 
     def __find_matching_oi(self, object_info, period, epoch):

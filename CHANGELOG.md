@@ -56,7 +56,7 @@
 
 ### Added
 
-- Run sheet: every Run also writes `Run_<n>_SHEET_<curve>_<id>.png`, one landscape page with the folded transit
+- Run sheet: every Run writes `Run_<n>_SHEET_<curve>_<id>.png`, one landscape page with the folded transit
   (odd and even curves, binned mean with standard errors, model from the TLS fit, residuals), the TLS SDE
   spectrum (as large as the page allows, with the selected period and its harmonics, and the harmonics
   spectrum when `use_harmonics_spectra` is on), the transit parameters with checks that flag what looks
@@ -69,9 +69,8 @@
   carries a short description of how to read it (the stacked map has a full one). Epochs are found with a
   binary search on the sorted time array, so a million points and thousands of epochs take about three
   seconds. TLS lists every epoch between the first and the last observation, also the empty ones; the sheet
-  only counts epochs with data and says how many TLS listed. The previous Run plots are not touched. Like
-  the target info report, the sheet can never stop a search: it is written through a guarded, lazily imported
-  method.
+  only counts epochs with data and says how many TLS listed. Like the target info report, the sheet can never
+  stop a search: it is written through a guarded, lazily imported method.
 
 - Target info report: every search writes `<object_id>_info.pdf` (A4 landscape) in the execution directory,
   after the preprocessing and the detrends and before the first Run. It gathers the star parameters, the search
@@ -514,6 +513,14 @@
 - EMLS catalog driver: KOI targets load and reach the search.
 
 ### Removed
+
+- The old Run plots: `Run_<n>_SELECTED_<curve>_<id>.png`, `Run_<n>_PDCSAP-FLUX_<id>.png` and one
+  `Run_<n>_<ws|ks>=<value>_<id>.png` per detrend are no longer written; the Run sheet replaces them and a
+  Run directory goes from 7 or 8 images to one. `plot.plotting.save_transit_plot`, which only drew them, is
+  removed. What those plots showed for each window (period, depth, SNR, SDE, border score) is still in the
+  search log, which has one line per window, and the target info report shows the trend of every window. The
+  info report no longer finds the detrend window lengths in file names of new executions when it is made
+  afterwards; made during the search it receives them, and for old executions it still reads the old names.
 
 - `sherlockpipe/resources/emls_ir/` (audit item I7): the EMLS injection-recovery
   calibration built with the search before the audit fixes, with no provenance,
