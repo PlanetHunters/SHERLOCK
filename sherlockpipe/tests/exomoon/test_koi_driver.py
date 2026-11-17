@@ -25,7 +25,7 @@ def koi_table(**overrides):
     values = {'Object Id': 'KIC 1', 'OI': 'K00001.01', 'Disposition': 'CONFIRMED', 'Period (days)': PERIOD,
               'Epoch (BJD)': KEPLER_OFFSET + 0.0, 'Duration (hours)': 6.0, 'Planet Radius (R_Earth)': PLANET_RADIUS,
               'koi_srad': 1.0, 'Stellar log(g) (cm/s^2)': 4.438, 'koi_model_snr': 300.0, 'koi_prad_err1': 0.5,
-              'koi_impact': 0.2}
+              'koi_impact': 0.2, 'Stellar Eff Temp (K)': 5800.0}
     values.update(overrides)
     return pd.DataFrame({key: [value] for key, value in values.items()})
 
@@ -266,19 +266,25 @@ def test_mean_planet_mass_is_close_to_the_forecast_median():
     assert np.isnan(exomoon.mean_planet_mass(np.nan))
 
 
-def run_driver_on_table(tmp_path, monkeypatch, table):
+def run_driver_on_table(tmp_path, monkeypatch, table, extra_args=(), order=None):
     """Run the KOI driver on a catalog table and return the number of targets whose light curve it started."""
     home = tmp_path / 'home'
     (home / '.sherlockpipe').mkdir(parents=True)
     table.to_csv(home / '.sherlockpipe' / 'kois.csv', index=False)
+    # Every KOI of the table is a planet confirmed today, so the driver does not download the archive table.
+    pd.concat([confirmed_table(koi_name=oi, pl_name=f'Planet {oi}') for oi in table['OI']], ignore_index=True) \
+        .to_csv(home / '.sherlockpipe' / 'kepler_confirmed.csv', index=False)
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(sys, 'argv', ['exomoon.py', '--catalog', 'kois'])
+    monkeypatch.setattr(sys, 'argv', ['exomoon.py', '--catalog', 'kois', *extra_args])
     builder = mock.MagicMock()
     builder.return_value.build.side_effect = StopAtSearch()
     with mock.patch('lcbuilder.lcbuilder_class.LcBuilder', builder), mock.patch('logging.exception'):
         runpy.run_module('sherlockpipe.exomoon', run_name='__main__')
-    return len({call.kwargs['target_name'] for call in builder.return_value.build_object_info.call_args_list})
+    names = [call.kwargs['target_name'] for call in builder.return_value.build_object_info.call_args_list]
+    if order is not None:
+        order.extend(dict.fromkeys(names))
+    return len(set(names))
 
 
 def test_driver_drops_a_target_with_a_close_faint_companion(tmp_path, monkeypatch):
@@ -376,3 +382,55 @@ def test_the_confirmed_table_is_downloaded_once(tmp_path, monkeypatch):
 
     assert len(calls) == 2
     assert list(second['koi_name']) == list(first['koi_name'])
+
+
+# --- Target selection and ranking (2026-11-17) -----------------------------------------------------------------------
+
+def test_targets_are_sun_like_stars_with_wide_planets():
+    wide = {'Period (days)': DRIVER_PERIOD}
+    table = exomoon.prepare_koi_table(pd.concat([
+        koi_table(OI='K00001.01', **wide), koi_table(OI='K00002.01', **wide, **{'Stellar Eff Temp (K)': 4800.0}),
+        koi_table(OI='K00003.01', **wide, **{'Stellar Eff Temp (K)': 6600.0}),
+        koi_table(OI='K00004.01', **{'Period (days)': 60.0}),
+        koi_table(OI='K00005.01', **wide, **{'Stellar Eff Temp (K)': np.nan})], ignore_index=True))
+
+    assert list(exomoon.select_catalog_targets(table)['OI']) == ['K00001.01']
+    assert set(exomoon.select_catalog_targets(table, (4000, 7000), 50)['OI']) == \
+        {'K00001.01', 'K00002.01', 'K00003.01', 'K00004.01'}
+
+
+def test_reference_moon_is_one_earth_radius_or_the_largest_the_target_holds():
+    # A giant at 100 d holds an Earth: the reference is 1 R_earth.
+    assert exomoon.reference_moon_radius(1.0, 300.0, 10.0, 100.0) == 1.0
+    # A 1.6 R_earth planet: half its radius, the top of the searched range.
+    assert exomoon.reference_moon_radius(1.0, 3.0, 1.6, 100.0) == pytest.approx(0.8)
+    # A planet whose moons tides remove: the generous survival radius.
+    surviving = exomoon.max_surviving_moon_radius(1.0, 10.0, 3.0, 15.0)
+    assert surviving < 1.0
+    assert exomoon.reference_moon_radius(1.0, 10.0, 3.0, 15.0) == pytest.approx(surviving)
+
+
+def test_reference_moon_snr_scales_the_planet_snr_by_the_depth_ratio():
+    assert exomoon.reference_moon_snr(400.0, 10.0, 1.0) == pytest.approx(4.0)
+    assert exomoon.reference_moon_snr(90.0, 3.0, 1.0) == pytest.approx(10.0)
+    assert np.isnan(exomoon.reference_moon_snr(np.nan, 3.0, 1.0))
+
+
+def test_driver_searches_the_best_moon_snr_first(tmp_path, monkeypatch):
+    """A Neptune with SNR 100 (a 1 R_earth moon at SNR 100 / 3^2 = 11) goes before a giant with SNR 300
+    (300 / 10^2 = 3), which the planet SNR used to put first."""
+    giant = koi_table(**{'Period (days)': DRIVER_PERIOD})
+    neptune = koi_table(**{'Object Id': 'KIC 2', 'OI': 'K00002.01', 'Period (days)': DRIVER_PERIOD,
+                           'Planet Radius (R_Earth)': 3.0, 'koi_prad_err1': 0.3, 'koi_model_snr': 100.0})
+    order = []
+    assert run_driver_on_table(tmp_path, monkeypatch, pd.concat([giant, neptune]), order=order) == 2
+    assert order == ['KIC 2', 'KIC 1']
+
+
+def test_driver_selection_and_count_come_from_the_command_line(tmp_path, monkeypatch):
+    cool = koi_table(**{'Period (days)': DRIVER_PERIOD, 'Stellar Eff Temp (K)': 4500.0})
+    other = koi_table(**{'Object Id': 'KIC 2', 'OI': 'K00002.01', 'Period (days)': DRIVER_PERIOD})
+    table = pd.concat([cool, other])
+    assert run_driver_on_table(tmp_path / 'default', monkeypatch, table) == 1
+    assert run_driver_on_table(tmp_path / 'wide', monkeypatch, table, ['--min_teff', '4000']) == 2
+    assert run_driver_on_table(tmp_path / 'one', monkeypatch, table, ['--min_teff', '4000', '--max_targets', '1']) == 1

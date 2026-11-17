@@ -301,6 +301,54 @@ CATALOG_MIN_MOON_RADIUS_FRACTION = 1 / 20
 CATALOG_MAX_MOON_RADIUS_FRACTION = 1 / 2
 
 
+# Target selection of the catalog search (2026-11-17): Sun-like stars, quieter than M dwarfs and
+# without the pulsations of hot F stars, and planets wide enough for large Hill spheres.
+TARGET_TEFF_RANGE = (5000.0, 6500.0)
+
+
+TARGET_MIN_PERIOD = 70.0
+
+
+# Radius in Earth radii of the moon that ranks the targets (see `reference_moon_snr`).
+REFERENCE_MOON_RADIUS = 1.0
+
+
+def select_catalog_targets(tois_df, teff_range=TARGET_TEFF_RANGE, min_period=TARGET_MIN_PERIOD):
+    """Keep the targets whose star has an effective temperature within teff_range (K, inclusive) and
+    whose planet period is longer than min_period (days). A missing temperature drops the target.
+    """
+    teff = pd.to_numeric(tois_df.get("Stellar Eff Temp (K)", pd.Series(np.nan, index=tois_df.index)),
+                         errors="coerce")
+    keep = teff.between(*teff_range) & (pd.to_numeric(tois_df["Period (days)"], errors="coerce") > min_period)
+    logging.info("Target selection: %d of %d with Teff %.0f-%.0f K and P > %.0f d", int(keep.sum()), len(tois_df),
+                 teff_range[0], teff_range[1], min_period)
+    return tois_df.loc[keep]
+
+
+def reference_moon_radius(star_mass, planet_mass, planet_radius, planet_period, planet_ecc=0.0):
+    """Return the radius in Earth radii of the moon that ranks a target.
+
+    REFERENCE_MOON_RADIUS, or the largest moon the target can hold when that is smaller: half the
+    planet radius (the top of the searched range) or the generous tidal survival radius.
+    """
+    radius = min(REFERENCE_MOON_RADIUS, planet_radius * CATALOG_MAX_MOON_RADIUS_FRACTION)
+    surviving = max_surviving_moon_radius(star_mass, planet_mass, planet_radius, planet_period, planet_ecc)
+    return float(min(radius, surviving)) if np.isfinite(surviving) else float(radius)
+
+
+def reference_moon_snr(planet_snr, planet_radius, moon_radius):
+    """Return the expected SNR of a moon of moon_radius, the ranking of the catalog targets.
+
+    A moon transit lasts about as long as the planet's and falls in the same epochs, so its SNR is the
+    planet's scaled by the depth ratio, SNR_p (R_m / R_p)^2: the planet SNR carries the photometric noise,
+    the number of transits and the duration. It ranks targets; it is optimistic as an SNR, since red
+    noise, the planet fit and incomplete epochs lower the moon's (a factor 1.4-7.6 in the injections).
+    """
+    if not (np.isfinite(planet_snr) and np.isfinite(planet_radius) and planet_radius > 0):
+        return np.nan
+    return float(planet_snr * (moon_radius / planet_radius) ** 2)
+
+
 def catalog_planet_orbit(row, catalog):
     """Return the eccentricity and argument of periastron in degrees of a catalog row.
 
