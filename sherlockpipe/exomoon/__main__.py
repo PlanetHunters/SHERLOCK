@@ -2,6 +2,9 @@
 
 Example: ``python -m sherlockpipe.exomoon --catalog kois``. KOIs are searched only when they are planets
 confirmed today (see `apply_confirmed_planets`); ``--refresh_confirmed`` downloads that table again.
+Targets are kept with a stellar Teff within ``--min_teff``/``--max_teff`` (default 5000-6500 K) and a
+period above ``--min_period`` (default 70 d), and searched in order of the expected SNR of a 1 R_earth
+moon (`reference_moon_snr`); ``--max_targets`` stops after that many.
 """
 import logging
 import os
@@ -10,6 +13,8 @@ from lcbuilder.helper import LcbuilderHelper
 import numpy as np
 from lcbuilder.lcbuilder_class import LcBuilder
 import pandas as pd
+from sherlockpipe.exomoon.catalog import (REFERENCE_MOON_RADIUS, TARGET_MIN_PERIOD, TARGET_TEFF_RANGE, reference_moon_radius,
+                                          reference_moon_snr, select_catalog_targets)
 from sherlockpipe.exomoon.catalog import CATALOG_MIN_MOON_RADIUS_FRACTION, apply_confirmed_planets, load_confirmed_kepler_planets, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, catalog_csv_path, catalog_planet_orbit, catalog_planet_params, combine_cadence_curves, emls_output_dir, max_surviving_moon_radius, mean_planet_mass, prepare_koi_table
 from sherlockpipe.exomoon.constants import AU_TO_RSUN, M_earth_to_M_sun, R_earth_to_R_sun
 from sherlockpipe.exomoon.search import ExoMoonLeastSquares
@@ -36,6 +41,13 @@ if __name__ == '__main__':
     logger.addHandler(handler)
 
     
+    def option(name, default, cast=float):
+        """Value of a ``--name value`` command-line option, or default."""
+        flag = "--" + name
+        if flag in sys.argv and sys.argv.index(flag) + 1 < len(sys.argv):
+            return cast(sys.argv[sys.argv.index(flag) + 1])
+        return default
+
     lc_builder = LcBuilder()
     max_moon_density = 5.5
     catalog = "tois"
@@ -62,7 +74,9 @@ if __name__ == '__main__':
     companion_tois_df = known_tois_df
     confirmed_tois_df = known_tois_df.loc[known_tois_df['confirmed_planet']] if catalog == "kois" else known_tois_df
     confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Planet SNR'] > 15]
-    confirmed_tois_df = confirmed_tois_df.sort_values(by='Planet SNR', ascending=False)
+    confirmed_tois_df = select_catalog_targets(
+        confirmed_tois_df, (option("min_teff", TARGET_TEFF_RANGE[0]), option("max_teff", TARGET_TEFF_RANGE[1])),
+        option("min_period", TARGET_MIN_PERIOD))
     # Moon dynamical stability filter
     def hill_roche_stable(row, period, p_radius, p_mass, star_mass):
         """Check that the stable prograde moon region extends beyond the Roche limit.
@@ -154,12 +168,30 @@ if __name__ == '__main__':
             n_companion += 1
         keep_mask.append(companion_ok)
     confirmed_tois_df = confirmed_tois_df[keep_mask]
+
+    def target_reference_snr(r):
+        """Expected SNR of the reference moon of a target, with the mass the filters used."""
+        p_mass = r['Predicted Mass (M_Earth)']
+        if np.isnan(p_mass) or p_mass <= 0:
+            p_mass = mean_planet_mass(r['Planet Radius (R_Earth)'])
+        moon_radius = reference_moon_radius(r['Stellar Mass (M_Sun)'], p_mass, r['Planet Radius (R_Earth)'],
+                                            r['Period (days)'], catalog_planet_orbit(r, catalog)[0])
+        return reference_moon_snr(r['Planet SNR'], r['Planet Radius (R_Earth)'], moon_radius)
+
+    # Most promising first: the expected SNR of a 1 R_earth moon, or of the largest moon the target holds.
+    confirmed_tois_df = confirmed_tois_df.assign(
+        reference_moon_snr=[target_reference_snr(r) for _, r in confirmed_tois_df.iterrows()])
+    confirmed_tois_df = confirmed_tois_df.sort_values(by='reference_moon_snr', ascending=False, na_position='last')
     logging.info("Dynamical filter: Hill-Roche=%d, Tidal (Barnes & O'Brien 2002, %.0f Gyr, k2/Q x %.1f)=%d, "
                  "Companion=%d removed, %d remain",
                  n_hillroche, TIDAL_SURVIVAL_AGE_GYR, TIDAL_SURVIVAL_K2_Q_FACTOR, n_tidal, n_companion,
                  len(confirmed_tois_df))
-    #confirmed_tois_df = confirmed_tois_df.loc[confirmed_tois_df['Object Id'] == 'TIC 309792357']
-    confirmed_tois_df = confirmed_tois_df.iloc[0:100]
+    max_targets = option("max_targets", None, int)
+    if max_targets is not None:
+        confirmed_tois_df = confirmed_tois_df.iloc[:max_targets]
+    logging.info("Targets in order of the expected SNR of a %.1f R_earth moon: %s", REFERENCE_MOON_RADIUS,
+                 ", ".join(f"{oi} ({snr:.1f})" for oi, snr in zip(confirmed_tois_df['OI'].head(10),
+                                                                   confirmed_tois_df['reference_moon_snr'].head(10))))
     for index, row in confirmed_tois_df.iterrows():
         target_name = row['Object Id']
         logging.info("Processing target: %s", target_name)
