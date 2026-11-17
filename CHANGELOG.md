@@ -56,6 +56,23 @@
 
 ### Added
 
+- Run sheet: every Run also writes `Run_<n>_SHEET_<curve>_<id>.png`, one landscape page with the folded transit
+  (odd and even curves, binned mean with standard errors, model from the TLS fit, residuals), the TLS SDE
+  spectrum (as large as the page allows, with the selected period and its harmonics, and the harmonics
+  spectrum when `use_harmonics_spectra` is on), the transit parameters with checks that flag what looks
+  problematic (SDE and SNR against the search thresholds, FAP, border score, harmonic of another signal, odd/even
+  mismatch, χ² between epochs and epochs whose depth disagrees with the mean), and the epochs. Epochs are
+  drawn according to how many have data, because one panel per epoch does not scale: up to 24 one panel per
+  epoch; up to 150 compact thumbnails, framed only when the epoch disagrees with the mean depth; above that a
+  stacked epoch map where consecutive epochs of the same observing segment are stacked until each row reaches
+  S/N 4, next to the depth of each row and the three most deviating and three highest S/N stacks. Every layout
+  carries a short description of how to read it (the stacked map has a full one). Epochs are found with a
+  binary search on the sorted time array, so a million points and thousands of epochs take about three
+  seconds. TLS lists every epoch between the first and the last observation, also the empty ones; the sheet
+  only counts epochs with data and says how many TLS listed. The previous Run plots are not touched. Like
+  the target info report, the sheet can never stop a search: it is written through a guarded, lazily imported
+  method.
+
 - Target info report: every search writes `<object_id>_info.pdf` (A4 landscape) in the execution directory,
   after the preprocessing and the detrends and before the first Run. It gathers the star parameters, the search
   setup, the data used per sector, the alternative data that was available (sector by product, with the used

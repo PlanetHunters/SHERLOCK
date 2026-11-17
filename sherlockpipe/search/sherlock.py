@@ -669,6 +669,9 @@ class Sherlock:
         file = 'Run_' + str(id_run) + '_SELECTED_' + str(signal_selection.curve_index) + '_' + str(star_info.object_id) + '.png'
         save_transit_plot(star_info.object_id, title, run_dir, file, time, lcs[signal_selection.curve_index],
                           signal_selection.transit_result, cadence, id_run, sherlock_target.use_harmonics_spectra)
+        self.__save_run_sheet(star_info.object_id, run_dir, id_run, signal_selection.curve_index, time,
+                              lcs[signal_selection.curve_index], flux_err, signal_selection.transit_result, cadence,
+                              sherlock_target)
         if sherlock_target.pickle_mode == 'all':
             with open(run_dir + 'search_results.pickle', 'wb') as search_results_file:
                 pickle.dump(transit_results, search_results_file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -678,6 +681,21 @@ class Sherlock:
                             protocol=pickle.HIGHEST_PROTOCOL)
         logging.info(signal_selection.get_message())
         return transit_results, signal_selection
+
+    def __save_run_sheet(self, object_id, run_dir, id_run, curve_index, time, flux, flux_err, transit_result, cadence,
+                         sherlock_target):
+        """
+        Writes the run sheet of the selected signal. It is a convenience for the user, so whatever goes wrong with it,
+        even importing it, is logged and never stops the search.
+        """
+        try:
+            from sherlockpipe.plot.run_sheet import save_run_sheet
+            file = 'Run_' + str(id_run) + '_SHEET_' + str(curve_index) + '_' + str(object_id) + '.png'
+            save_run_sheet(object_id, run_dir, file, time, flux, flux_err, transit_result, cadence, id_run,
+                           'SELECTED (' + str(curve_index) + ')', sherlock_target.use_harmonics_spectra,
+                           sherlock_target.snr_min, sherlock_target.sde_min)
+        except (Exception, SystemExit):
+            logging.exception("The run sheet could not be written")
 
     def __detrend(self, sherlock_target, time, lc, flux_err, star_info):
         wl_min = self.wl_min[star_info.object_id]
