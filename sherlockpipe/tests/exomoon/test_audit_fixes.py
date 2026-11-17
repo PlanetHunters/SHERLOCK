@@ -266,7 +266,9 @@ def test_injection_does_not_fit_the_planet(tmp_path):
     calls = []
 
     def spy(self, *args, **kwargs):
-        calls.append(1)
+        # The timing pre-pass runs the planet stage on a copy, to measure the epoch times only.
+        if self is emls:
+            calls.append(1)
         return original(self, *args, **kwargs)
 
     with mock.patch.object(ExoMoonLeastSquares, 'subtract_planet_transit', spy), \

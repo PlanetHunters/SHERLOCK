@@ -683,6 +683,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         else ("none" if not ttv_prior_minutes else "user"),
         "ephemeris_uncertainty_source": emls.ephemeris_source,
         "ttv_prior_from_data": emls.ttv_prior_from_data,
+        "moon_windows_follow_ttv": emls.moon_windows_follow_ttv,
         "ttv_timing_model": emls.ttv_model,
         "ttv_excess_minutes": None if emls.ttv_excess_used is None else emls.ttv_excess_used * 1440,
         "epoch_timing": None if emls.ttv_precisions is None else [
@@ -692,7 +693,9 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
              "precision_minutes": None if emls.ttv_precisions[i] is None else emls.ttv_precisions[i] * 1440,
              "prior_centre_minutes": emls.ttv_prior_centres[i] * 1440,
              "prior_width_minutes": None if emls.ttv_prior_sigmas[i] is None else emls.ttv_prior_sigmas[i] * 1440,
-             "fitted_minutes": float(emls.ttvs[i]) * 1440}
+             "fitted_minutes": float(emls.ttvs[i]) * 1440,
+             "barycentre_shift_minutes": None if emls.barycentre_shifts is None
+             or len(emls.barycentre_shifts) != len(emls.bary_t0s) else emls.barycentre_shifts[i] * 1440}
             for i, t0 in enumerate(emls.bary_t0s)],
         "detrending": {"by": "emls" if emls.detrend_window is not None else "input",
                        "window": emls.detrend_window,

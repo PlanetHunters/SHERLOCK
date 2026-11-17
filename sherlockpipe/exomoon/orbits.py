@@ -750,9 +750,21 @@ class MoonOrbits:
                                  self.planet_impact_param).half_moon_max_orbit_transit_duration
 
     def epoch_distance(self, time):
-        """Return the distance in days from each time to the nearest planet epoch of the linear ephemeris."""
+        """Return the distance in days from each time to the nearest planet epoch: the linear ephemeris
+        plus the epoch's offset when the timing pre-pass measured one (`epoch_offset`)."""
         time = np.asarray(time, dtype=float)
         if len(time) == 0:
             return time
         phase = (time - self.planet_t0) / self.planet_period
-        return np.abs(phase - np.round(phase)) * self.planet_period
+        numbers = np.round(phase)
+        offsets = np.array([self.epoch_offset(n) for n in numbers]) if getattr(self, "epoch_offsets", None) else 0.0
+        return np.abs(time - self.planet_t0 - numbers * self.planet_period - offsets)
+
+    def epoch_offset(self, number_or_t0, is_time=False):
+        """Return the measured offset in days of the barycentre transit of an epoch (by epoch number, or by
+        its linear-ephemeris time with is_time), 0 when none was measured (see `measure_epoch_offsets`)."""
+        offsets = getattr(self, "epoch_offsets", None)
+        if not offsets:
+            return 0.0
+        number = round((number_or_t0 - self.planet_t0) / self.planet_period) if is_time else int(number_or_t0)
+        return offsets.get(number, 0.0)
