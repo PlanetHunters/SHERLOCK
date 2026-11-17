@@ -87,3 +87,35 @@ def test_without_planet_ttv_the_curve_keeps_its_times(tmp_path):
     emls.inject_moon(time, np.ones_like(time), np.full(len(time), 1e-4), emls.bary_t0s, emls.planet_semimajor_axis,
                      0.0, 2.0, 3.7, 100.0, initial_alpha=1.0)
     assert emls.injected_time is None and emls.injected_planet_ttvs is None
+
+
+def test_a_barycentre_ttv_moves_planet_and_moon_together(tmp_path):
+    """A companion's TTV moves the whole planet-moon system: the real transit and the injected moon dip
+    are both shifted by the barycentre offset of their epoch."""
+    emls = system(tmp_path, JUPITER, 11.2, 30.0)
+    params = batman.TransitParams()
+    params.per, params.rp, params.a = 30.0, 11.2 * R_earth_to_R_sun, emls.planet_semimajor_axis * AU_TO_RSUN
+    params.inc, params.ecc, params.w, params.u, params.limb_dark = 90.0, 0.0, 90.0, [0.4, 0.2], "quadratic"
+    time = np.concatenate([t0 + np.arange(-1.0, 1.0, 1 / 1440) for t0 in emls.bary_t0s])
+    flux = np.ones_like(time)
+    for t0 in emls.bary_t0s:
+        params.t0 = t0
+        near = np.abs(time - t0) < 1
+        flux[near] = batman.TransitModel(params, time[near]).light_curve(params)
+    kwargs = dict(initial_alpha=1.0)
+
+    emls.inject_moon(time, flux.copy(), np.full(len(time), 1e-4), emls.bary_t0s, emls.planet_semimajor_axis, 0.0,
+                     2.0, 3.7, 1e-6, **kwargs)
+    still = np.asarray(emls.injected_flux_moon_pandora)
+    bary = dict(amplitude=40 * MINUTE, period=100.0, phase=0.3)
+    emls.inject_moon(time, flux.copy(), np.full(len(time), 1e-4), emls.bary_t0s, emls.planet_semimajor_axis, 0.0,
+                     2.0, 3.7, 1e-6, barycentre_ttv=bary, **kwargs)
+    moved_time, moved_moon = emls.injected_time, np.asarray(emls.injected_flux_moon_pandora)
+
+    for t0, shift in zip(emls.bary_t0s, emls.injected_barycentre_ttvs):
+        assert shift == pytest.approx(40 * MINUTE * np.sin(2 * np.pi * t0 / 100.0 + 0.3))
+        near = np.abs(time - t0) < 1
+        near_moved = np.abs(moved_time - t0) < 1
+        centre = lambda t, f: np.sum(t * (1 - f)) / np.sum(1 - f)
+        assert centre(moved_time[near_moved], moved_moon[near_moved]) - centre(time[near], still[near]) == \
+            pytest.approx(shift, abs=0.2 * MINUTE)

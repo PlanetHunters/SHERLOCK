@@ -55,20 +55,26 @@ class MoonInjection:
             (shifted times sorted, the order that sorts the original arrays the same way).
         """
         time = np.asarray(time, dtype=float)
+        moved = time + MoonInjection.nearest_epoch_values(time, t0s, shifts)
+        order = np.argsort(moved, kind="stable")
+        return moved[order], order
+
+    @staticmethod
+    def nearest_epoch_values(time, t0s, values):
+        """Return, for each time, the value of its nearest epoch."""
+        time = np.asarray(time, dtype=float)
         epoch_order = np.argsort(np.asarray(t0s, dtype=float))
         t0s = np.asarray(t0s, dtype=float)[epoch_order]
-        shifts = np.asarray(shifts, dtype=float)[epoch_order]
+        values = np.asarray(values, dtype=float)[epoch_order]
         index = np.clip(np.searchsorted(t0s, time), 1, len(t0s) - 1) if len(t0s) > 1 else np.zeros(len(time), int)
         if len(t0s) > 1:
             nearer_left = np.abs(time - t0s[index - 1]) <= np.abs(t0s[index] - time)
             index = np.where(nearer_left, index - 1, index)
-        moved = time + shifts[index]
-        order = np.argsort(moved, kind="stable")
-        return moved[order], order
+        return values[index]
 
     def inject_moon(self, time, flux, flux_err, t0s, planet_semimajor_axis, planet_ecc, moon_radius,
                     moon_period, moon_mass, initial_alpha=0, plot=False, inject_planet=False, inject_moon=True,
-                    retrograde=False, planet_ttv=False):
+                    retrograde=False, planet_ttv=False, barycentre_ttv=None):
         """Inject a moon transit signal into the light curve.
 
         Parameters
@@ -110,6 +116,12 @@ class MoonInjection:
             times. The shifted times are left in injected_time (sorted, as the flux returned) and
             the shifts in injected_planet_ttvs; the caller replaces its time with injected_time.
             Default False: the real planet stays on its own times, without the moon's TTV.
+        barycentre_ttv : dict, optional
+            A timing variation of the planet-moon barycentre, as another planet causes:
+            {'amplitude': days, 'period': days, 'phase': rad}, a shift A sin(2 pi t0 / P + phase)
+            of each epoch. The light curve epochs are shifted by it (with the moon's TTV on top
+            when planet_ttv) and the moon moves with the barycentre, so it is injected at the
+            time minus the shift. Default None.
 
         Returns
         -------
@@ -156,8 +168,14 @@ class MoonInjection:
         self.injected_planet_ttvs = None
         self.injected_time = None
         exposure = self.exposure_at(time)
-        if planet_ttv:
-            shifts = self.planet_wobble_shifts(params, t0s)
+        self.injected_barycentre_ttvs = None
+        bary_shifts = np.zeros(len(t0s))
+        if barycentre_ttv:
+            bary_shifts = barycentre_ttv['amplitude'] * np.sin(
+                2 * np.pi * np.asarray(t0s, dtype=float) / barycentre_ttv['period'] + barycentre_ttv.get('phase', 0.0))
+            self.injected_barycentre_ttvs = [float(shift) for shift in bary_shifts]
+        if planet_ttv or barycentre_ttv:
+            shifts = (self.planet_wobble_shifts(params, t0s) if planet_ttv else np.zeros(len(t0s))) + bary_shifts
             time, order = self.shift_epochs(time, t0s, shifts)
             flux, flux_err = np.asarray(flux)[order], np.asarray(flux_err)[order] if flux_err is not None else None
             exposure = exposure if exposure is None or np.ndim(exposure) == 0 else np.asarray(exposure)[order]
@@ -166,10 +184,14 @@ class MoonInjection:
             self.injected_planet_ttvs = [float(shift) for shift in shifts]
             self.injected_time = time
             self.injected_flux_err = flux_err
-            logging.info("Planet moved by the injected moon: TTV amplitude %.2f min (RMS %.2f min over %d epochs)",
-                         np.max(np.abs(shifts)) * 1440, np.std(shifts) * 1440, len(shifts))
+            logging.info("Planet moved by the injection: TTV amplitude %.2f min (RMS %.2f min over %d epochs), of which "
+                         "the barycentre %.2f min", np.max(np.abs(shifts)) * 1440, np.std(shifts) * 1440, len(shifts),
+                         np.max(np.abs(bary_shifts)) * 1440)
+        # The moon follows the barycentre: Pandora places it on the linear ephemeris, so it is evaluated
+        # at the time minus the barycentre shift of its epoch.
+        moon_time = time - self.nearest_epoch_values(time, t0s, bary_shifts) if barycentre_ttv else time
         injected_flux_total, injected_flux_planet, injected_flux_moon = \
-            self.pandora_light_curve(model, time, exposure)
+            self.pandora_light_curve(model, moon_time, exposure)
         self.injected_flux_moon_pandora = injected_flux_moon
         self.injected_flux_planet_pandora = injected_flux_planet
         self.injected_moon_period = moon_period

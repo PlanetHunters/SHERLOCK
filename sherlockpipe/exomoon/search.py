@@ -769,7 +769,8 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                                              inject_params['moon_period'], inject_params['moon_mass'],
                                              initial_alpha=inject_params['initial_alpha'], inject_planet=False,
                                              inject_moon=True, retrograde=inject_params.get('retrograde', False),
-                                             planet_ttv=inject_params.get('planet_ttv', False))
+                                             planet_ttv=inject_params.get('planet_ttv', False),
+                                             barycentre_ttv=inject_params.get('barycentre_ttv'))
                 self.take_injected_time()
                 logging.info("Injected moon before detrending: P=%.4f d, R=%.2f R_e, alpha=%.4f rad, %s",
                              inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'],
@@ -790,7 +791,8 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                                          inject_params['moon_mass'], initial_alpha=inject_params['initial_alpha'],
                                          inject_planet=False, inject_moon=True,
                                          retrograde=inject_params.get('retrograde', False),
-                                         planet_ttv=inject_params.get('planet_ttv', False))
+                                         planet_ttv=inject_params.get('planet_ttv', False),
+                                         barycentre_ttv=inject_params.get('barycentre_ttv'))
             self.take_injected_time()
             logging.info("Injected moon: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
                          inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
