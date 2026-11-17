@@ -245,6 +245,17 @@ class Sherlock:
                         setattr(sherlock_target, key, value)
             self.__run_object(sherlock_target)
 
+    def __write_target_info_report(self, object_dir, sherlock_id, sherlock_target, window_lengths):
+        """
+        Writes the target info report. It is a convenience for the user, so whatever goes wrong with it, even
+        importing it, is logged and never stops the search.
+        """
+        try:
+            from sherlockpipe.search.target_info_report import write_target_info_report
+            write_target_info_report(object_dir, sherlock_id, sherlock_target, window_lengths)
+        except (Exception, SystemExit):
+            logging.exception("The target info report could not be written")
+
     def __min_transits_count(self, lc_build, sherlock_target):
         return sherlock_target.min_transits_count \
                 if sherlock_target.min_transits_count > 0 else lc_build.transits_min_count
@@ -304,6 +315,7 @@ class Sherlock:
                 lc_df.to_csv(object_dir + "/lc_" + str(i) + ".csv", index=False)
                 i = i + 1
             wl = np.concatenate(([0], wl), axis=0)
+            self.__write_target_info_report(object_dir, sherlock_id, sherlock_target, wl)
             transits_stats_df = pandas.DataFrame(columns=['candidate', 't0', 'depth', 'depth_err'])
             if self.explore:
                 candidates_df = pandas.DataFrame(columns=['curve', 'period', 'per_err', 'duration', 't0', 'depth',

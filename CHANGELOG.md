@@ -56,6 +56,19 @@
 
 ### Added
 
+- Target info report: every search writes `<object_id>_info.pdf` (A4 landscape) in the execution directory,
+  after the preprocessing and the detrends and before the first Run. It gathers the star parameters, the search
+  setup, the data used per sector, the alternative data that was available (sector by product, with the used
+  exposure marked; long lists are split in blocks or collapsed into ranges), the preprocessing steps with the
+  number of points each one removed (outliers and masks are recomputed from `lc.csv` and checked against
+  `lc_predetrends.csv`; whatever they do not explain is reported as "Other steps"), the preprocessed curve per
+  sector, the trend removed by every detrend window and its residual RMS, the initial and final periodicity, the
+  TRICERATOPS and pixel field of view, and, when those steps ran, the stellar oscillations removed
+  (`sa/signals.csv`), the auto-detrend and the high RMS mask. Nothing that was written before is removed. The
+  report never stops a search if it fails, and can be made afterwards for an existing execution with
+  `python -m sherlockpipe.search.target_info_report <execution_dir>`. Rasterising the TRICERATOPS PDFs needs
+  PyMuPDF (new dependency); without it those pages are left out with a warning.
+
 - EMLS grid search: every hypothesis stacks the same points (the widest moon-orbit window
   around each epoch), so `search_stack` builds them once with their weights, planet columns
   and the planet normal equations without the moon window, and `split_stacked` only adds the
