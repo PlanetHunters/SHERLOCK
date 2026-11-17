@@ -353,11 +353,7 @@ def config_from_log(parsed_log, window_lengths=None):
 
 
 def window_lengths_from_runs(object_dir, object_id):
-    """
-    Window lengths of the detrends, recovered from the ``Run_1_<ws|ks>=<value>_<id>.png`` file names that executions
-    made before the run sheet have. Newer executions do not write those plots, so the lengths are only known when
-    the report is made during the search.
-    """
+    """Window lengths of the detrends, recovered from the ``Run_1_<ws|ks>=<value>_<id>.png`` file names."""
     values = []
     for path in _glob(object_dir, os.path.join("1", f"Run_1_*=*_{glob.escape(object_id)}.png")):
         match = re.search(r"_(?:ws|ks)=([\d.]+)_", os.path.basename(path))

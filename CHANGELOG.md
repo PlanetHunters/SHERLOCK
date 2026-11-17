@@ -4,6 +4,8 @@
 
 ### Changed
 
+- The Run plots are replaced by the Run sheet, with the same file names and new content. The function that drew
+  them, `plot.plotting.save_transit_plot`, is removed.
 - EMLS figures are paper ready: one style for every figure (`plots.PAPER_RC`, `plots.paper_figure`) with
   20-22 pt axis labels and tick labels, 19 pt titles, 16 pt legends, longer and thicker ticks, thicker lines
   and markers, and the Okabe & Ito colour-blind safe palette (EMLS model vermillion, injected moon blue,
@@ -56,7 +58,9 @@
 
 ### Added
 
-- Run sheet: every Run writes `Run_<n>_SHEET_<curve>_<id>.png`, one landscape page with the folded transit
+- Run sheet: a one-page landscape image for every curve a Run searches (the PDCSAP flux and each detrend,
+  `Run_<n>_PDCSAP-FLUX_<id>.png` and `Run_<n>_<ws|ks>=<value>_<id>.png`) and for the selected signal
+  (`Run_<n>_SELECTED_<curve>_<id>.png`), with the file names the old Run plots had. Each page has the folded transit
   (odd and even curves, binned mean with standard errors, model from the TLS fit, residuals), the TLS SDE
   spectrum (as large as the page allows, with the selected period and its harmonics, and the harmonics
   spectrum when `use_harmonics_spectra` is on), the transit parameters with checks that flag what looks
@@ -68,7 +72,7 @@
   S/N 4, next to the depth of each row and the three most deviating and three highest S/N stacks. Every layout
   carries a short description of how to read it (the stacked map has a full one). Epochs are found with a
   binary search on the sorted time array, so a million points and thousands of epochs take about three
-  seconds. TLS lists every epoch between the first and the last observation, also the empty ones; the sheet
+  seconds per image. TLS lists every epoch between the first and the last observation, also the empty ones; the sheet
   only counts epochs with data and says how many TLS listed. Like the target info report, the sheet can never
   stop a search: it is written through a guarded, lazily imported method.
 
@@ -511,64 +515,6 @@
   hides a period; and the planet duration comes from the fitted model rather
   than from the data sampling.
 - EMLS catalog driver: KOI targets load and reach the search.
-
-### Removed
-
-- The old Run plots: `Run_<n>_SELECTED_<curve>_<id>.png`, `Run_<n>_PDCSAP-FLUX_<id>.png` and one
-  `Run_<n>_<ws|ks>=<value>_<id>.png` per detrend are no longer written; the Run sheet replaces them and a
-  Run directory goes from 7 or 8 images to one. `plot.plotting.save_transit_plot`, which only drew them, is
-  removed. What those plots showed for each window (period, depth, SNR, SDE, border score) is still in the
-  search log, which has one line per window, and the target info report shows the trend of every window. The
-  info report no longer finds the detrend window lengths in file names of new executions when it is made
-  afterwards; made during the search it receives them, and for old executions it still reads the old names.
-
-- `sherlockpipe/resources/emls_ir/` (audit item I7): the EMLS injection-recovery
-  calibration built with the search before the audit fixes, with no provenance,
-  100 nulls per set behind 99.9 % thresholds, and no code reading it. EMLS now
-  computes a per-target false-alarm probability (`--null_runs`). The files,
-  including the injection grid `grid.json`, remain in the git history.
-
-### Known limitations
-
-- EMLS is a screening search with a coplanar, circular, prograde moon orbit
-  (audit item G12: the unused moon inclination, eccentricity and periastron
-  fields are removed). Its moon phase is frozen at the planet mid-transit and
-  every moon transit has one duration (audit items G3, G4), its moon orbit is
-  planet-only rather than barycentric (G14, negligible for q = M_m/M_p below
-  0.01), and planet-moon overlaps are not modelled (G16: up to 40 % of a
-  single epoch's moon deficit near P_m = 5-20 d for giants). Each run logs
-  tau v_m / (v_p T), the scale of the timing errors, and q for the largest
-  searched moons, with a warning above 0.1 and 0.01. Candidates should be
-  confirmed with a photodynamical fit such as Pandora.
-
-- EMLS `sde` and `max_sde` are diagnostics: neither separates moons from
-  noise (audit item H7). Use `max_snr` with `fap`.
-- The EMLS null runs reuse the same light curve, so they are not independent:
-  `null_independent_offsets` gives the number of independent pseudo-epoch
-  positions with data per epoch; below 3 no null runs are made and no
-  false-alarm probability is given. Curves cut around the
-  transits, such as the Kepler-706 regression fixture, have no pseudo-epochs
-  and get no false-alarm probability.
-
-### Testing
-
-- Add EMLS guards that run the complete search on synthetic curves, and
-  regression tests for each fix.
-
-## 1.6.1 — 2026-11-01
-
-### Changed
-
-- Replace the vendored GTLS submodule with the pinned `gputls==0.6.1` PyPI
-  dependency. Keep CuPy as an optional, CUDA-specific installation.
-
-### Testing
-
-- Pin pytest 9.1.1 for tox because pytest-forked 1.7.5 fails to serialize
-  reports for the plan/custom-class tests under pytest 9.2.0 in the release
-  environment; the affected tests pass with the pinned runner.
-
-## 1.6.0 — 2026-10-18
 
 ### Added
 

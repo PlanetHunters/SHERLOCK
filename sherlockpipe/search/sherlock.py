@@ -657,9 +657,12 @@ class Sherlock:
         run_dir = self.__init_object_dir(star_info.object_id) + '/' + str(id_run) + '/'
         signal_selection = sherlock_target.signal_score_selectors[sherlock_target.best_signal_algorithm]\
             .select(id_run, sherlock_target, star_info, transits_min_count, time, lcs, transit_results, wl, cadence)
-        self.__save_run_sheet(star_info.object_id, run_dir, id_run, signal_selection.curve_index, time,
+        _, selected_label = self.__run_sheet_name(id_run, signal_selection.curve_index, wl,
+                                                    sherlock_target.detrend_method, star_info.object_id)
+        self.__save_run_sheet(star_info.object_id, run_dir, 'Run_' + str(id_run) + '_SELECTED_' +
+                              str(signal_selection.curve_index) + '_' + str(star_info.object_id) + '.png', id_run, time,
                               lcs[signal_selection.curve_index], flux_err, signal_selection.transit_result, cadence,
-                              sherlock_target)
+                              'SELECTED (' + selected_label + ')', sherlock_target)
         if sherlock_target.pickle_mode == 'all':
             with open(run_dir + 'search_results.pickle', 'wb') as search_results_file:
                 pickle.dump(transit_results, search_results_file, protocol=pickle.HIGHEST_PROTOCOL)
@@ -670,18 +673,26 @@ class Sherlock:
         logging.info(signal_selection.get_message())
         return transit_results, signal_selection
 
-    def __save_run_sheet(self, object_id, run_dir, id_run, curve_index, time, flux, flux_err, transit_result, cadence,
-                         sherlock_target):
+    @staticmethod
+    def __run_sheet_name(id_run, curve_index, wl, detrend_method, object_id):
+        """File name and label of the run sheet of a curve: 0 is the PDCSAP flux, the rest are the detrends."""
+        if curve_index == 0:
+            return 'Run_' + str(id_run) + '_PDCSAP-FLUX_' + str(object_id) + '.png', 'PDCSAP flux'
+        short, long = ('ks', 'ker_size') if detrend_method == 'gp' else ('ws', 'win_size')
+        return ('Run_' + str(id_run) + '_' + short + '=' + str(format(wl[curve_index], '.4f')) + '_' + str(object_id)
+                + '.png', long + ' ' + str(format(wl[curve_index], '.4f')))
+
+    def __save_run_sheet(self, object_id, plot_dir, file, id_run, time, flux, flux_err, transit_result, cadence,
+                         curve_label, sherlock_target):
         """
-        Writes the run sheet of the selected signal. It is a convenience for the user, so whatever goes wrong with it,
-        even importing it, is logged and never stops the search.
+        Writes the run sheet of a curve. It is a convenience for the user, so whatever goes wrong with it, even
+        importing it, is logged and never stops the search.
         """
         try:
             from sherlockpipe.plot.run_sheet import save_run_sheet
-            file = 'Run_' + str(id_run) + '_SHEET_' + str(curve_index) + '_' + str(object_id) + '.png'
-            save_run_sheet(object_id, run_dir, file, time, flux, flux_err, transit_result, cadence, id_run,
-                           'SELECTED (' + str(curve_index) + ')', sherlock_target.use_harmonics_spectra,
-                           sherlock_target.snr_min, sherlock_target.sde_min)
+            save_run_sheet(object_id, plot_dir, file, time, flux, flux_err, transit_result, cadence, id_run,
+                           curve_label, sherlock_target.use_harmonics_spectra, sherlock_target.snr_min,
+                           sherlock_target.sde_min)
         except (Exception, SystemExit):
             logging.exception("The run sheet could not be written")
 
@@ -785,7 +796,7 @@ class Sherlock:
                      'Depth_sig', "T. dur (min)", "T0", "SNR", "SDE", "Border_score", "Matching OI", "Harmonic",
                      "Planet radius (R_Earth)", "Rp/Rs", "Semi-major axis", "Habitability Zone")
         transit_results = {}
-        self.__init_object_run_dir(star_info.object_id, id_run)  # creates the directory of the Run
+        plot_dir = self.__init_object_run_dir(star_info.object_id, id_run)
         if not sherlock_target.ignore_original:
             transit_result = self.__adjust_transit(sherlock_target, time, lcs[0], star_info, transits_min_count,
                                                    transit_results, report, cadence, period_grid, detrend_source_period)
@@ -801,6 +812,9 @@ class Sherlock:
                          transit_result.duration * 24 * 60, transit_result.t0, transit_result.snr, transit_result.sde,
                          transit_result.border_score, oi, transit_result.harmonic, r_planet, rp_rs, a,
                          habitability_zone)
+            file, label = self.__run_sheet_name(id_run, 0, wl, sherlock_target.detrend_method, star_info.object_id)
+            self.__save_run_sheet(star_info.object_id, plot_dir, file, id_run, time, lcs[0], flux_err, transit_result,
+                                  cadence, label, sherlock_target)
         else:
             transit_result = TransitResult(None, None, 0, 0, 0, 0, [], [], 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, [])
         transit_results[0] = transit_result
@@ -820,6 +834,9 @@ class Sherlock:
                      transit_result.duration * 24 * 60, transit_result.t0, transit_result.snr, transit_result.sde,
                          transit_result.border_score, oi, transit_result.harmonic, r_planet, rp_rs, a,
                      habitability_zone)
+            file, label = self.__run_sheet_name(id_run, i, wl, sherlock_target.detrend_method, star_info.object_id)
+            self.__save_run_sheet(star_info.object_id, plot_dir, file, id_run, time, lcs[i], flux_err, transit_result,
+                                  cadence, label, sherlock_target)
         return transit_results
 
     def __find_matching_oi(self, object_info, period, epoch):

@@ -241,13 +241,28 @@ class TestFailuresNeverStopTheSearch(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.directory)
 
-    def _hook(self):
-        return Sherlock(None)._Sherlock__save_run_sheet("TIC1_all", self.directory, 1, 1, self.time, self.flux, self.err,
-                                                      self.result, 120, self.target)
+    def _hook(self, file="Run_1_ws=0.5000_TIC1_all.png", label="win_size 0.5000"):
+        return Sherlock(None)._Sherlock__save_run_sheet("TIC1_all", self.directory, file, 1, self.time, self.flux,
+                                                      self.err, self.result, 120, label, self.target)
 
-    def test_the_hook_writes_the_sheet_next_to_the_other_run_plots(self):
+    def test_the_hook_writes_the_sheet_next_to_the_other_run_files(self):
         self._hook()
-        self.assertEqual(["Run_1_SHEET_1_TIC1_all.png"], os.listdir(self.directory))
+        self.assertEqual(["Run_1_ws=0.5000_TIC1_all.png"], os.listdir(self.directory))
+
+    def test_sheet_file_names_and_labels_follow_the_old_run_plots(self):
+        name = Sherlock._Sherlock__run_sheet_name
+        wl = [0, 0.1858, 0.5626]
+        self.assertEqual(("Run_1_PDCSAP-FLUX_TIC1_all.png", "PDCSAP flux"), name(1, 0, wl, "biweight", "TIC1_all"))
+        self.assertEqual(("Run_2_ws=0.5626_TIC1_all.png", "win_size 0.5626"), name(2, 2, wl, "biweight", "TIC1_all"))
+        self.assertEqual(("Run_1_ks=0.1858_TIC1_all.png", "ker_size 0.1858"), name(1, 1, wl, "gp", "TIC1_all"))
+
+    def test_the_names_can_be_read_back_by_the_target_info_report(self):
+        from sherlockpipe.search.target_info_report import window_lengths_from_runs
+        os.makedirs(self.directory + "1")
+        name = Sherlock._Sherlock__run_sheet_name
+        for i, w in enumerate([0, 0.2, 0.7]):
+            open(self.directory + "1/" + name(1, i, [0, 0.2, 0.7], "biweight", "TIC1_all")[0], "w").close()
+        self.assertEqual([0.2, 0.7], window_lengths_from_runs(self.directory[:-1], "TIC1_all"))
 
     def test_the_hook_survives_an_error_an_exit_and_an_import_failure(self):
         target = "sherlockpipe.plot.run_sheet.save_run_sheet"
