@@ -16,9 +16,59 @@ class MoonInjection:
     RECOVERY_PERIOD_TOLERANCE = 0.05
     MAX_ALIAS_ORDER = 30
 
+    WOBBLE_GRID_POINTS = 4001
+
+    def planet_wobble_shifts(self, params, t0s):
+        """Return the planet mid-transit offset in days that the injected moon causes at each epoch.
+
+        The planet orbits the planet-moon barycentre, so it crosses the star's centre line (sky x
+        = 0) early or late. The crossing is found on the Pandora planet coordinates around each
+        epoch, and the same crossing of a massless moon, whose planet sits on the barycentre, is
+        subtracted, so the offset is the moon's alone, whatever Pandora's time origin.
+        """
+        massless = copy.copy(params)
+        massless.M_moon = params.M_moon * 1e-9
+        half = max(self.planet_duration, 0.1) / 2  # the planet centre is on the star within +-T14 / 2
+        grid = np.linspace(-half, half, self.WOBBLE_GRID_POINTS)
+        shifts = []
+        for t0 in t0s:
+            time = t0 + grid
+            crossings = []
+            for model_params in (params, massless):
+                xp = np.asarray(pandora.moon_model(model_params).coordinates(time)[0], dtype=float)
+                sign = np.flatnonzero(np.sign(xp[:-1]) != np.sign(xp[1:]))
+                if len(sign) == 0:
+                    crossings.append(np.nan)
+                    continue
+                i = sign[np.argmin(np.abs(time[sign] - t0))]
+                crossings.append(time[i] - xp[i] * (time[i + 1] - time[i]) / (xp[i + 1] - xp[i]))
+            shifts.append(crossings[0] - crossings[1] if np.all(np.isfinite(crossings)) else 0.0)
+        return np.asarray(shifts, dtype=float)
+
+    @staticmethod
+    def shift_epochs(time, t0s, shifts):
+        """Shift each point by the offset of its nearest epoch and sort.
+
+        Returns
+        -------
+        tuple
+            (shifted times sorted, the order that sorts the original arrays the same way).
+        """
+        time = np.asarray(time, dtype=float)
+        epoch_order = np.argsort(np.asarray(t0s, dtype=float))
+        t0s = np.asarray(t0s, dtype=float)[epoch_order]
+        shifts = np.asarray(shifts, dtype=float)[epoch_order]
+        index = np.clip(np.searchsorted(t0s, time), 1, len(t0s) - 1) if len(t0s) > 1 else np.zeros(len(time), int)
+        if len(t0s) > 1:
+            nearer_left = np.abs(time - t0s[index - 1]) <= np.abs(t0s[index] - time)
+            index = np.where(nearer_left, index - 1, index)
+        moved = time + shifts[index]
+        order = np.argsort(moved, kind="stable")
+        return moved[order], order
+
     def inject_moon(self, time, flux, flux_err, t0s, planet_semimajor_axis, planet_ecc, moon_radius,
                     moon_period, moon_mass, initial_alpha=0, plot=False, inject_planet=False, inject_moon=True,
-                    retrograde=False):
+                    retrograde=False, planet_ttv=False):
         """Inject a moon transit signal into the light curve.
 
         Parameters
@@ -53,6 +103,13 @@ class MoonInjection:
             If True, inject planet transit as well, default False.
         inject_moon : bool, optional
             If True, inject moon transit signal, default True.
+        planet_ttv : bool, optional
+            If True, the real planet transits are moved as the moon would move them: each epoch of
+            the light curve is shifted in time by the planet's offset from the barycentre that the
+            Pandora model gives (`planet_wobble_shifts`), and the moon is injected at the shifted
+            times. The shifted times are left in injected_time (sorted, as the flux returned) and
+            the shifts in injected_planet_ttvs; the caller replaces its time with injected_time.
+            Default False: the real planet stays on its own times, without the moon's TTV.
 
         Returns
         -------
@@ -72,7 +129,9 @@ class MoonInjection:
         params.r_planet = self.planet_radius / star_radius_rearth  # [R_star]
         params.b_bary = self.planet_impact_param  # [0..1]
         params.t0_bary = self.planet_t0  # [days]
-        params.t0_bary_offset = 0.001  # [days]
+        # The barycentre transits on the planet's linear ephemeris: a non-zero offset moves the moon
+        # away from the real planet, which stays on that ephemeris.
+        params.t0_bary_offset = 0.0  # [days]
         params.M_planet = LcbuilderHelper.convert_from_to(self.planet_mass, u.M_earth, u.kg)  # [kg]
         params.w_bary = self.planet_arg_periastron  # [deg]
         params.ecc_bary = self.planet_ecc  # [0..1]
@@ -94,8 +153,23 @@ class MoonInjection:
         params.occult_small_threshold = 0.1  # [0..1]
         params.hill_sphere_threshold = 1
         model = pandora.moon_model(params)
+        self.injected_planet_ttvs = None
+        self.injected_time = None
+        exposure = self.exposure_at(time)
+        if planet_ttv:
+            shifts = self.planet_wobble_shifts(params, t0s)
+            time, order = self.shift_epochs(time, t0s, shifts)
+            flux, flux_err = np.asarray(flux)[order], np.asarray(flux_err)[order] if flux_err is not None else None
+            exposure = exposure if exposure is None or np.ndim(exposure) == 0 else np.asarray(exposure)[order]
+            if self.exposure_lookup is not None:
+                self.exposure_lookup = (time, np.asarray(exposure, dtype=float))
+            self.injected_planet_ttvs = [float(shift) for shift in shifts]
+            self.injected_time = time
+            self.injected_flux_err = flux_err
+            logging.info("Planet moved by the injected moon: TTV amplitude %.2f min (RMS %.2f min over %d epochs)",
+                         np.max(np.abs(shifts)) * 1440, np.std(shifts) * 1440, len(shifts))
         injected_flux_total, injected_flux_planet, injected_flux_moon = \
-            self.pandora_light_curve(model, time, self.exposure_at(time))
+            self.pandora_light_curve(model, time, exposure)
         self.injected_flux_moon_pandora = injected_flux_moon
         self.injected_flux_planet_pandora = injected_flux_planet
         self.injected_moon_period = moon_period

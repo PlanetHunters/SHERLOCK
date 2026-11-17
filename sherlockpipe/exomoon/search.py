@@ -734,6 +734,12 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             )
         return period_grid, alpha_grid, search_inputs, all_residuals
 
+    def take_injected_time(self):
+        """After an injection that moved the planet (planet_ttv), use the shifted, sorted times."""
+        if getattr(self, "injected_time", None) is not None:
+            self.time = self.injected_time
+            self.flux_err = self.injected_flux_err
+
     def run(self, plot=False, inject_params=None, null_snrs=None):
         """Run the full exomoon search over the parameter grid.
 
@@ -744,7 +750,9 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         inject_params : dict or None, optional
             If a dict with keys 'moon_radius', 'moon_period', 'initial_alpha',
             'moon_mass', injects a moon signal into the flux before the grid
-            search to test injection-recovery. Default None (no injection).
+            search to test injection-recovery; with 'planet_ttv': True the real planet
+            transits are also moved by the moon's TTV (see `inject_moon`). Default None (no
+            injection).
         null_snrs : array_like, optional
             Null SNR maxima to use instead of running null_runs searches, for example from an
             earlier run on the same light curve, as injection campaigns do.
@@ -760,7 +768,9 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                                              self.planet_semimajor_axis, self.planet_ecc, inject_params['moon_radius'],
                                              inject_params['moon_period'], inject_params['moon_mass'],
                                              initial_alpha=inject_params['initial_alpha'], inject_planet=False,
-                                             inject_moon=True, retrograde=inject_params.get('retrograde', False))
+                                             inject_moon=True, retrograde=inject_params.get('retrograde', False),
+                                             planet_ttv=inject_params.get('planet_ttv', False))
+                self.take_injected_time()
                 logging.info("Injected moon before detrending: P=%.4f d, R=%.2f R_e, alpha=%.4f rad, %s",
                              inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'],
                              "retrograde" if inject_params.get('retrograde', False) else "prograde")
@@ -779,7 +789,9 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                                          self.planet_ecc, inject_params['moon_radius'], inject_params['moon_period'],
                                          inject_params['moon_mass'], initial_alpha=inject_params['initial_alpha'],
                                          inject_planet=False, inject_moon=True,
-                                         retrograde=inject_params.get('retrograde', False))
+                                         retrograde=inject_params.get('retrograde', False),
+                                         planet_ttv=inject_params.get('planet_ttv', False))
+            self.take_injected_time()
             logging.info("Injected moon: P=%.4f d, R=%.2f R_e, alpha=%.4f rad",
                          inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'])
             self.inject_flux_time = self.time.copy()
