@@ -22,8 +22,7 @@ class PlanetDerivatives:
         if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
             return None
         params = self.null_planet_params()
-        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)] \
-            if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
+        mid_times = self.planet_mid_times()
         distance_factor = (1 - params.ecc ** 2) / (1 + params.ecc * np.sin(np.deg2rad(params.w)))
         impact = self.impact_parameter(params.a, params.inc, params.ecc, params.w)
         self.planet_shape_impact = float(impact)
@@ -70,9 +69,7 @@ class PlanetDerivatives:
         if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
             return None, None
         params = self.null_planet_params()
-        ttvs = getattr(self, "ttvs", [])
-        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, ttvs)] if len(ttvs) == len(self.bary_t0s) \
-            else list(self.bary_t0s)
+        mid_times = self.planet_mid_times()
         step = 1e-4
         column = np.zeros(len(time))
         epoch_index = np.full(len(time), -1, dtype=int)
@@ -102,8 +99,7 @@ class PlanetDerivatives:
         if self.subtract_mode != 'subtract' or time is None or len(time) == 0 or len(self.bary_t0s) == 0:
             return None
         params = self.null_planet_params()
-        mid_times = [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)] \
-            if len(getattr(self, "ttvs", [])) == len(self.bary_t0s) else list(self.bary_t0s)
+        mid_times = self.planet_mid_times()
         step = 1e-3
         column = np.zeros(len(time))
         for mid_time in mid_times:

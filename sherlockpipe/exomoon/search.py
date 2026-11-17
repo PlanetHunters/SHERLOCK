@@ -58,7 +58,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                   ttv_prior_width="auto", planet_t0_err=None, planet_period_err=None, null_runs=0,
                   fap_threshold=0.01, null_seed=0, detrend_window=None, duration_from_fit=True,
                  detrend_mask='auto', fix_impact_param=False, retrograde=True, null_stop_fap=0.1,
-                 scramble_runs=0, scramble_trigger_fap=0.1, ttv_prior_from_data=True):
+                 scramble_runs=0, scramble_trigger_fap=0.1, ttv_prior_from_data=True, moon_windows_follow_ttv=True):
         """Initialize the exomoon least-squares search.
 
         Parameters
@@ -154,6 +154,11 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
             followed (see `observed_timing_prior`); ttv_prior_width is then a floor of the
             width. False centres it on the linear ephemeris with ttv_prior_width and the
             ephemeris uncertainty only.
+        moon_windows_follow_ttv : bool, optional
+            Default True: with a fitted timing model (linear or sinusoid), the planet-subtracted
+            epochs are shifted by minus the model before the moon stage, so the moon windows follow
+            a barycentre that another planet moves (see `move_to_barycentre_frame`). False keeps the
+            moon windows on the linear ephemeris.
         planet_t0_err, planet_period_err : float, optional
             1-sigma uncertainties in days of planet_t0 and planet_period, such as those of a
             transit fit. They set the ephemeris uncertainty in the t0 prior. When either is
@@ -258,6 +263,9 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.ttv_prior_from_data = bool(ttv_prior_from_data)
         self.ttv_measured = self.ttv_precisions = self.ttv_model = self.ttv_excess_used = None
         self.ttv_prior_centres = self.ttv_prior_sigmas = None
+        self.moon_windows_follow_ttv = bool(moon_windows_follow_ttv)
+        self.epoch_offsets = None
+        self.barycentre_shifts = None
         for name, value in (("planet_t0_err", planet_t0_err), ("planet_period_err", planet_period_err)):
             if value is not None and not (np.isfinite(value) and value >= 0):
                 raise ValueError(f"{name} must be a non-negative number of days or None, got {value}")
@@ -776,6 +784,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                              inject_params['moon_period'], inject_params['moon_radius'], inject_params['initial_alpha'],
                              "retrograde" if inject_params.get('retrograde', False) else "prograde")
                 self.inject_flux_time = self.time.copy()
+            self.measure_epoch_offsets(self.time, self.flux, self.flux_err)
             self.time, self.flux, self.flux_err = self.detrend(self.time, self.flux, self.flux_err)
             if inject_params is not None:
                 order = np.argsort(self.inject_flux_time)
@@ -783,6 +792,8 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
                 self.injected_flux_moon_pandora = np.asarray(self.injected_flux_moon_pandora)[order]
             logging.info("Detrended with a %.2f d biweight, masking +-%.2f d around every epoch", self.detrend_window,
                          self.moon_window_half_width())
+        else:
+            self.measure_epoch_offsets(self.time, self.flux, self.flux_err)
         self.time, self.flux, self.flux_err = self.remove_non_transit_flux(self.time, self.flux, self.flux_err, self.bary_t0s, np.max(planet_mass_grid))
         rms = np.std(self.flux)
         if inject_params is not None and self.detrend_window is None:
@@ -968,20 +979,24 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         half_orbit_dur_max = best_input.half_moon_max_orbit_transit_duration
         half_orbit_dur_rec = best_input.half_moon_orbit_transit_duration
         half_moon_dur = best_input.half_moon_transit_duration
-        rec_t0s, inj_t0s = [], []
+        rec_t0s, inj_t0s, frame_t0s = [], [], []
         has_injected = hasattr(self, 'injected_flux_moon_pandora')
-        for t0_i in self.bary_t0s:
+        shifts = self.barycentre_shifts if self.barycentre_shifts is not None \
+            and len(self.barycentre_shifts) == len(self.bary_t0s) else [0.0] * len(self.bary_t0s)
+        for t0_i, shift_i in zip(self.bary_t0s, shifts):
             max_tau = ExoMoonLeastSquares.compute_moon_ts(t0_i, half_orbit_dur_rec, half_moon_dur)
             rec_t0, _ = ExoMoonLeastSquares.compute_moon_t0(
                 self.planet_t0, t0_i, best_snr_period, best_snr_alpha, max_tau)
-            rec_t0s.append(rec_t0)
+            # The search runs in the frame of the linear ephemeris; the reported times are the real ones.
+            frame_t0s.append(rec_t0)
+            rec_t0s.append(rec_t0 + shift_i)
             if has_injected:
                 mask_w = np.abs(self.inject_flux_time - t0_i) < half_orbit_dur_max
                 inj_flux = self.injected_flux_moon_pandora[mask_w]
                 # One entry per epoch, so injected and recovered times stay paired by epoch.
                 inj_t0s.append(self.inject_flux_time[mask_w][np.argmin(inj_flux)] if np.any(inj_flux < 1.0) else None)
         self.recovered_t0s = rec_t0s
-        self.assess_planet_overlap(rec_t0s, half_orbit_dur_rec, half_moon_dur)
+        self.assess_planet_overlap(frame_t0s, half_orbit_dur_rec, half_moon_dur)
         self.injected_t0s = inj_t0s if any(t0 is not None for t0 in inj_t0s) else None
         self.recovered_period = float(best_snr_period)
         self.recovered_alpha = float(best_snr_alpha)

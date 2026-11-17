@@ -2,6 +2,7 @@
 subtraction and the derivatives of the subtracted model that the joint fit corrects.
 """
 import copy
+import tempfile
 from collections import namedtuple
 import logging
 import astropy.units as u
@@ -442,10 +443,10 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
                 if result_flux_err is not None:
                     result_flux_err = result_flux_err[keep]
         self.drop_rejected_epochs(rejected_t0s)
+        result_time = self.move_to_barycentre_frame(result_time)
         if mode == 'subtract':
             # Checked in run() once the red-noise factor is measured.
-            self.planet_shape_check_inputs = (result_time, result_flux,
-                                              [t0 + ttv for t0, ttv in zip(self.bary_t0s, self.ttvs)])
+            self.planet_shape_check_inputs = (result_time, result_flux, self.planet_mid_times())
         else:
             self.warn_mask_mode_survival()
         self.plot_ttvs()
@@ -469,7 +470,11 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
         return params
 
     def fold_epochs(self, time, flux, flux_err, duration_window):
-        """Phase-fold the epochs with at least `min_cadences_per_t0` points on the linear ephemeris.
+        """Phase-fold the epochs with at least `min_cadences_per_t0` points on the linear ephemeris, plus
+        the epoch offsets of the timing pre-pass when it measured them (`measure_epoch_offsets`): a fold
+        smeared by tens of minutes of TTV fits a longer, more grazing transit (on KOI-94.01 a 60-min TTV
+        gave T14 +30 % and b 0.88 against 0.68, and the realigned fold stopped at b 0.52 against 0.40),
+        and the moon durations and offsets of the search come from that geometry.
 
         Returns
         -------
@@ -479,10 +484,11 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
         """
         parts = []
         for t0 in self.bary_t0s:
-            near = np.abs(time - t0) < duration_window
+            centre = t0 + self.epoch_offset(t0, is_time=True)
+            near = np.abs(time - centre) < duration_window
             if np.sum(near) < self.min_cadences_per_t0:
                 continue
-            parts.append((time[near] - t0, flux[near], None if flux_err is None else flux_err[near],
+            parts.append((time[near] - centre, flux[near], None if flux_err is None else flux_err[near],
                           self.exposure_at(time[near]) if self.exposure_lookup is not None else None))
         if not parts:
             return None
@@ -682,6 +688,103 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
                      "no in-transit data" if covered == 0 else "the epoch fit is not usable")
         return t0
 
+    def move_to_barycentre_frame(self, time):
+        """Shift each epoch by minus the timing model, so the barycentre transits on the linear ephemeris.
+
+        A moon travels with the planet-moon barycentre, so a timing variation that moves the whole
+        system, such as one from another planet, moves the moon transits with the planet's. The moon
+        stage places its windows on the linear ephemeris (bary_t0s), so with moon_windows_follow_ttv
+        each epoch of the planet-subtracted curve is shifted by minus the timing model of that epoch
+        (the t0 prior centre, `observed_timing_prior`) and the moon windows land where the moon is.
+        Only a fitted timing model (linear or sinusoid) moves the data; its shifts are kept in
+        barycentre_shifts (days), zero otherwise. The per-point exposures follow the shifted times.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Times of the planet-subtracted curve.
+
+        Returns
+        -------
+        numpy.ndarray
+            The times in the frame of the linear ephemeris.
+        """
+        centres = getattr(self, "ttv_prior_centres", None)
+        model = getattr(self, "ttv_model", None)
+        follow = getattr(self, "moon_windows_follow_ttv", False) and model is not None \
+            and model["name"] != "none" and centres is not None and len(centres) == len(self.bary_t0s)
+        # The fitted planet mid-time of each epoch, not the smooth model: the moon offsets of the search are
+        # measured from the planet (a_m), while from the barycentre they are a_m M_p / (M_p + M_m), 7 % less
+        # for an 8.5 M_earth moon of a 106 M_earth planet. The per-epoch fit keeps its prior, centred on the
+        # model, so a low-SNR epoch stays near the model.
+        ttvs = getattr(self, "ttvs", [])
+        follow = follow and len(ttvs) == len(self.bary_t0s)
+        self.barycentre_shifts = [float(t) for t in ttvs] if follow else [0.0] * len(self.bary_t0s)
+        if not follow or not np.any(self.barycentre_shifts) or len(time) == 0:
+            return time
+        moved = np.asarray(time, dtype=float) - self.nearest_epoch_values(time, self.bary_t0s, self.barycentre_shifts)
+        if self.exposure_lookup is not None:
+            reference_time, reference_exposure = self.exposure_lookup
+            shifted = reference_time - self.nearest_epoch_values(reference_time, self.bary_t0s, self.barycentre_shifts)
+            order = np.argsort(shifted, kind="stable")
+            self.exposure_lookup = (shifted[order], np.asarray(reference_exposure)[order])
+        logging.info("Moon windows follow the %s timing model: epochs shifted by up to %.1f min (RMS %.1f min) so the "
+                     "barycentre transits on the linear ephemeris", model["name"],
+                     np.max(np.abs(self.barycentre_shifts)) * 1440, np.std(self.barycentre_shifts) * 1440)
+        return moved
+
+    def measure_epoch_offsets(self, time, flux, flux_err):
+        """Timing pre-pass: measure the barycentre transit offset of each epoch before the detrending.
+
+        The detrending masks and the data kept around each epoch are centred on the epochs; when another
+        planet moves the system by tens of minutes, a moon then falls partly outside them and the
+        biweight takes part of it (the moon windows alone recover nothing: on KOI-94.01 a 60-min
+        sinusoidal TTV cost 27 % of the moon SNR either way). So the planet stage is run once on the
+        undetrended curve, each epoch normalised on its own (`normalise_epochs`), and its timing model
+        (`observed_timing_prior`), when it finds one, sets epoch_offsets {epoch number: days}, which
+        `epoch_distance` and `remove_non_transit_flux` add to the linear ephemeris. The offsets are
+        clipped at T14 / 4 like the prior centres.
+        """
+        self.epoch_offsets = None
+        if not self.moon_windows_follow_ttv or flux_err is None:
+            return
+        pre = copy.copy(self)
+        pre.epoch_offsets = None
+        pre.null_runs = 0
+        try:
+            with tempfile.TemporaryDirectory() as plots_dir:
+                pre.object_dir = plots_dir
+                trimmed = pre.remove_non_transit_flux(np.asarray(time), np.asarray(flux), np.asarray(flux_err),
+                                                      pre.bary_t0s, np.max(pre.planet_mass_grid))
+                pre.subtract_planet_transit(*trimmed, mode='subtract')
+        except Exception as error:  # the main planet stage reports its own failures
+            logging.info("Timing pre-pass failed (%s); the windows stay on the linear ephemeris", error)
+            return
+        model = pre.ttv_model
+        if model is None or model["name"] == "none":
+            logging.info("Timing pre-pass: no timing model, the windows stay on the linear ephemeris")
+            return
+        numbers = np.round((np.asarray(self.bary_t0s, dtype=float) - self.planet_t0) / self.planet_period)
+        fitted = {"name": model["name"], "period": model["period"],
+                  "coefficients": np.asarray(model["coefficients_min"], dtype=float) / 1440}
+        limit = self.planet_duration / 4
+        offsets = np.clip(self.evaluate_timing_model(fitted, np.asarray(self.bary_t0s, dtype=float), numbers),
+                          -limit, limit)
+        self.epoch_offsets = {int(n): float(o) for n, o in zip(numbers, offsets)}
+        logging.info("Timing pre-pass: %s timing model, detrending masks and data windows follow the epochs by up to "
+                     "%.1f min", model["name"], np.max(np.abs(offsets)) * 1440)
+
+    def planet_mid_times(self):
+        """Planet mid-transit times in the frame of the moon stage: the fitted times minus the
+        barycentre shift of each epoch, or the linear ephemeris without fitted times."""
+        ttvs = getattr(self, "ttvs", [])
+        if len(ttvs) != len(self.bary_t0s):
+            return list(self.bary_t0s)
+        shifts = getattr(self, "barycentre_shifts", None)
+        if shifts is None or len(shifts) != len(self.bary_t0s):
+            shifts = [0.0] * len(self.bary_t0s)
+        return [t0 + ttv - shift for t0, ttv, shift in zip(self.bary_t0s, ttvs, shifts)]
+
     def drop_rejected_epochs(self, rejected_t0s):
         """Log the epoch checks and drop the rejected epochs from bary_t0s and ttvs."""
         if len(rejected_t0s) > 0 or self.epochs_flagged_rms or self.epochs_flagged_rp:
@@ -753,8 +856,9 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
         moon_orbit_transit_duration = self.trim_half_window(max_planet_mass)
         mask_parts = []
         for t0 in t0s:
+            centre = t0 + self.epoch_offset(t0, is_time=True)
             mask_parts.append(np.argwhere(
-                (time > t0 - moon_orbit_transit_duration) & (time < t0 + moon_orbit_transit_duration)).flatten())
+                (time > centre - moon_orbit_transit_duration) & (time < centre + moon_orbit_transit_duration)).flatten())
         flux_mask = np.concatenate(mask_parts).astype(int)
         time = time[flux_mask]
         flux = flux[flux_mask]

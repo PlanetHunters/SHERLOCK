@@ -169,3 +169,68 @@ def test_a_drifting_ephemeris_is_followed(tmp_path):
     assert emls.ttv_model["name"] == "linear"
     assert emls.ttv_model["coefficients_min"][1] == pytest.approx(1.5, abs=0.15)
     assert np.sqrt(np.mean(np.square(np.array(emls.ttvs) - shifts))) < 1.5 * np.median(emls.ttv_precisions)
+
+
+# --- the moon windows follow the timing model (move_to_barycentre_frame) ------------------------------------------
+
+def test_the_subtracted_epochs_move_to_the_frame_of_the_linear_ephemeris(tmp_path):
+    """A 30-min sinusoidal TTV moves the whole system: after the planet stage each epoch is shifted back by its
+    fitted planet mid-time, so the planet of the moon stage sits on the linear ephemeris."""
+    truth, shifts, data = strong_ttv_fixture()
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    result = emls.subtract_planet_transit(*data[1:])
+
+    # The fitted planet times, which the search's moon offsets are measured from (close to the model here).
+    assert np.allclose(emls.barycentre_shifts, emls.ttvs)
+    assert np.allclose(emls.barycentre_shifts, emls.ttv_prior_centres, atol=1 * MINUTE)
+    mid_times = np.array(emls.planet_mid_times()) - np.array(emls.bary_t0s)
+    assert np.max(np.abs(mid_times)) < 1e-9  # was up to 30 min
+    assert len(result[0]) == len(data[1])  # subtract mode keeps every point, in order
+    for t0, shift in zip(emls.bary_t0s, emls.barycentre_shifts):
+        near = np.abs(data[1] - t0) < 1
+        assert np.allclose(result[0][near] - data[1][near], -shift, atol=1e-9)
+
+
+def test_without_a_timing_model_the_times_stay(tmp_path):
+    truth = planet_params()
+    noise = np.sqrt(t14(truth) / CADENCE) * truth.rp ** 2 / 10
+    data = curve(truth, epochs=20, noise=noise, seed=7)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    result = emls.subtract_planet_transit(*data[1:])
+
+    assert emls.ttv_model["name"] == "none"
+    assert not np.any(emls.barycentre_shifts)
+    assert np.array_equal(result[0], data[1])
+
+
+def test_the_shift_can_be_switched_off(tmp_path):
+    truth, shifts, data = strong_ttv_fixture()
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV,
+                    moon_windows_follow_ttv=False)
+
+    result = emls.subtract_planet_transit(*data[1:])
+
+    assert not np.any(emls.barycentre_shifts)
+    assert np.array_equal(result[0], data[1])
+    assert np.max(np.abs(np.array(emls.planet_mid_times()) - np.array(emls.bary_t0s))) > 20 * MINUTE
+
+
+def test_the_planet_columns_follow_the_shifted_epochs(tmp_path):
+    """The depth, mid-time and shape columns the joint fit uses are centred on the planet in the shifted
+    frame (the mid-time column was once left on the unshifted times, and the joint fit then took 16 % of
+    a moon on KOI-94.01 with a 60-min TTV)."""
+    truth, shifts, data = strong_ttv_fixture()
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+    time = emls.subtract_planet_transit(*data[1:])[0]
+
+    depth = np.abs(emls.planet_depth_derivative(time))
+    t0_column, epoch_index = emls.planet_t0_derivative(time)
+    shape = np.abs(emls.planet_shape_derivatives(time)).sum(axis=1)
+    for index, t0 in enumerate(emls.bary_t0s):
+        near = np.abs(time - t0) < 1
+        for column in (depth[near], np.abs(t0_column[near]), shape[near]):
+            centre = np.sum(time[near] * column) / np.sum(column)
+            assert abs(centre - t0) < 5 * MINUTE  # the bug put them up to 30 min off
+        assert np.all(epoch_index[near & (np.abs(t0_column) > 0)] == index)
