@@ -746,6 +746,7 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
         clipped at T14 / 4 like the prior centres.
         """
         self.epoch_offsets = None
+        self.prepass_timing = None
         if not self.moon_windows_follow_ttv or flux_err is None:
             return
         pre = copy.copy(self)
@@ -761,6 +762,7 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
             logging.info("Timing pre-pass failed (%s); the windows stay on the linear ephemeris", error)
             return
         model = pre.ttv_model
+        self.prepass_timing = self.prepass_timing_summary(pre)
         if model is None or model["name"] == "none":
             logging.info("Timing pre-pass: no timing model, the windows stay on the linear ephemeris")
             return
@@ -771,8 +773,31 @@ class PlanetModel(TransitFits, TimingPrior, PlanetDerivatives, PlanetFigures):
         offsets = np.clip(self.evaluate_timing_model(fitted, np.asarray(self.bary_t0s, dtype=float), numbers),
                           -limit, limit)
         self.epoch_offsets = {int(n): float(o) for n, o in zip(numbers, offsets)}
+        self.prepass_timing["offsets_t0s"] = [float(t0) for t0 in self.bary_t0s]
+        self.prepass_timing["offsets_minutes"] = [float(o) * 1440 for o in offsets]
+        self.prepass_timing["offsets_clipped"] = bool(np.any(np.abs(offsets) >= limit))
         logging.info("Timing pre-pass: %s timing model, detrending masks and data windows follow the epochs by up to "
                      "%.1f min", model["name"], np.max(np.abs(offsets)) * 1440)
+
+    @staticmethod
+    def prepass_timing_summary(pre):
+        """Timing of the planet measured by the pre-pass (`measure_epoch_offsets`), for the report.
+
+        The timing model written as ttv_timing_model is fitted by the main planet stage after the windows
+        follow the pre-pass offsets, so it holds only the residual timing; this keeps the variation of the
+        planet itself: the pre-pass model, its epochs and their measured times and precisions (minutes).
+        offsets_minutes, the shifts applied to the windows at offsets_t0s (clipped at T14 / 4), is set when a
+        model is found.
+        """
+        measured = getattr(pre, "ttv_measured", None)
+        precisions = getattr(pre, "ttv_precisions", None)
+        return {"model": pre.ttv_model,
+                "t0s": [float(t0) for t0 in pre.bary_t0s],
+                "measured_minutes": None if measured is None
+                else [None if value is None else float(value) * 1440 for value in measured],
+                "precision_minutes": None if precisions is None
+                else [None if value is None else float(value) * 1440 for value in precisions],
+                "offsets_t0s": None, "offsets_minutes": None, "offsets_clipped": None}
 
     def planet_mid_times(self):
         """Planet mid-transit times in the frame of the moon stage: the fitted times minus the

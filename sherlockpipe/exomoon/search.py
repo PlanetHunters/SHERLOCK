@@ -265,6 +265,7 @@ class ExoMoonLeastSquares(MoonOrbits, ExposureHandling, PlanetModel, JointPlanet
         self.ttv_prior_centres = self.ttv_prior_sigmas = None
         self.moon_windows_follow_ttv = bool(moon_windows_follow_ttv)
         self.epoch_offsets = None
+        self.prepass_timing = None
         self.barycentre_shifts = None
         for name, value in (("planet_t0_err", planet_t0_err), ("planet_period_err", planet_period_err)):
             if value is not None and not (np.isfinite(value) and value >= 0):

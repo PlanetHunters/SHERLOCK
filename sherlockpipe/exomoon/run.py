@@ -685,6 +685,7 @@ def _run(object_dir, candidate, output_dir, mask, planet_mass, min_moon_radius, 
         "ttv_prior_from_data": emls.ttv_prior_from_data,
         "moon_windows_follow_ttv": emls.moon_windows_follow_ttv,
         "ttv_timing_model": emls.ttv_model,
+        "ttv_prepass": emls.prepass_timing,
         "ttv_excess_minutes": None if emls.ttv_excess_used is None else emls.ttv_excess_used * 1440,
         "epoch_timing": None if emls.ttv_precisions is None else [
             {"t0": float(t0),

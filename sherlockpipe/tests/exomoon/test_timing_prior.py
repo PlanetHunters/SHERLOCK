@@ -234,3 +234,36 @@ def test_the_planet_columns_follow_the_shifted_epochs(tmp_path):
             centre = np.sum(time[near] * column) / np.sum(column)
             assert abs(centre - t0) < 5 * MINUTE  # the bug put them up to 30 min off
         assert np.all(epoch_index[near & (np.abs(t0_column) > 0)] == index)
+
+
+def test_the_pre_pass_keeps_the_timing_of_the_planet_itself(tmp_path):
+    """ttv_timing_model is fitted after the windows follow the pre-pass offsets, so it only holds the
+    residual timing; the pre-pass summary keeps the measured variation of the planet (2026-11-18)."""
+    truth, shifts, data = strong_ttv_fixture()
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    emls.measure_epoch_offsets(*data[1:])
+
+    timing = emls.prepass_timing
+    assert timing["model"]["name"] == "sinusoid"
+    assert timing["model"]["period"] == pytest.approx(7.3 * PERIOD, rel=0.05)
+    assert len(timing["t0s"]) == len(timing["measured_minutes"]) == len(timing["precision_minutes"])
+    measured = np.array(timing["measured_minutes"], dtype=float)
+    assert np.nanmax(np.abs(measured)) > 20  # the 30-min variation, in minutes
+    assert len(timing["offsets_minutes"]) == len(timing["offsets_t0s"]) == len(emls.bary_t0s)
+    assert np.allclose(np.array(timing["offsets_minutes"]) / 1440, [emls.epoch_offsets[n] for n in
+                       sorted(emls.epoch_offsets)])
+    assert timing["offsets_clipped"] is False
+
+
+def test_the_pre_pass_reports_no_timing_model(tmp_path):
+    truth = planet_params()
+    noise = np.sqrt(t14(truth) / CADENCE) * truth.rp ** 2 / 10
+    data = curve(truth, epochs=20, noise=noise, seed=7)
+    emls = emls_for(tmp_path, data, t14(truth), skip_fold_fit=True, ttv_prior_width=TINY_MOON_TTV)
+
+    emls.measure_epoch_offsets(*data[1:])
+
+    assert emls.epoch_offsets is None
+    assert emls.prepass_timing["model"]["name"] == "none"
+    assert emls.prepass_timing["offsets_minutes"] is None

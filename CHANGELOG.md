@@ -98,6 +98,9 @@
 
 ### Added
 
+- EMLS result.json: `ttv_prepass` keeps the planet timing measured by the timing pre-pass (model, measured
+  mid-times and precisions, window offsets and whether they were clipped at T14 / 4). `ttv_timing_model` is
+  fitted after the windows follow those offsets, so it only holds the residual timing.
 - EMLS synthetic-planet tool: `--point-exposures` integrates the injected planet over each point's own exposure,
   measured from the point spacing as EMLS does, so the false-alarm test runs on mixed 1-min + 30-min curves.
 - Run sheet: a one-page landscape image for every curve a Run searches (the PDCSAP flux and each detrend,
