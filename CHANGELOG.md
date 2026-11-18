@@ -17,6 +17,13 @@
   Gaussian process baseline). Posteriors that pile up against the edge of their priors are reported. The allesfitter
   files stay in the fit directory. The module `bayesian_fit.fit_report` (`FitReport`) is replaced by
   `bayesian_fit.fit_landscape_report` and `bayesian_fit.fit_results`.
+- The system stability run writes `stability_report.pdf` next to `stability_megno.csv`: a landscape document with the
+  stability map of two swept dimensions (the eccentricities of two bodies when both are swept, otherwise the two most
+  decisive ones; the other dimensions are marginalised and the cells whose orbits cross are hatched), the verdict,
+  the MEGNO distribution, the survival of the scenarios, what drives the stability (the share of regular, chaotic and
+  unstable scenarios at every value of every swept dimension), more maps and representative scenarios. It is built on
+  the table of scenarios, so it does not depend on how the space was parametrized (grid, free parameters, a fit).
+  MEGNO < 2.5 is regular, up to 5 chaotic and 5 or more unstable. A failure writing it never breaks the run.
 - Stability: `stability_megno.csv` has the new columns `megno_min`, `megno_max`, `megno_std` (spread between
   repetitions) and `seed`. `--free_params` accepts `omega_big` for the longitude of the ascending node.
 - Update WATSON integration to `dearwatson==2.1.2`: the vetting report is a compact landscape PDF (verdict and

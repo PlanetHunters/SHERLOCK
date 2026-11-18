@@ -43,6 +43,25 @@ The input configuration file (when used) typically includes:
 - Output preferences for stability metrics
 - Integration method settings
 
+Stability report
+----------------
+
+The run writes ``stability_report.pdf`` next to ``stability_megno.csv`` (in ``stability`` or ``stability_<properties>``).
+It is a landscape document built on the table of scenarios, so it does not depend on how the space was
+parametrized (a grid in a properties file, ``--free_params``, or the posterior of a fit):
+
+1. the stability map of two swept dimensions: the eccentricities of two bodies when both are swept (the typical
+   case), otherwise the two most decisive dimensions. The other dimensions are marginalised (the median MEGNO is
+   shown) and the cells where the orbits cross are hatched. With the verdict, the MEGNO distribution and the survival
+   of the scenarios;
+2. what drives the stability: for every swept dimension, the share of regular (MEGNO < 2.5), chaotic (up to 5) and
+   unstable (5 or more, or lost) scenarios at each value, and a sensitivity ranking;
+3. more maps for the other pairs of dimensions;
+4. the most regular, a middle and the least stable scenario drawn from their parameters, and how the run was made.
+
+Crossing orbits are only a hint: a resonance can keep two planets apart in a configuration whose orbits cross, so
+those scenarios are simulated and counted like the others. A failure writing the report never breaks the run.
+
 API Reference
 ------------
 

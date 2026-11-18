@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import shutil
 import sys
 
@@ -186,5 +187,26 @@ def run_stability(args):
         logger.info("Body %.0f: %s", key, json.dumps(body.__dict__))
     ecc_max = getattr(args, "ecc_max", 0.5)
     seed = getattr(args, "seed", None)
+    if seed is None:
+        seed = random.SystemRandom().randrange(2 ** 31)
     stability_calculator.run(stability_dir, star_mass_low, star_mass_up, star_mass_bins, planets_params, args.cpus,
                              free_params, ecc_max, seed)
+    save_stability_report(stability_dir, args, seed, free_params)
+
+
+def save_stability_report(stability_dir, args, seed, free_params):
+    """
+    Writes ``stability_report.pdf`` from ``stability_megno.csv``. It is a convenience output, so whatever goes wrong
+    (even the import of the report module) is logged and never breaks the run, which has already written its results.
+    """
+    try:
+        from sherlockpipe.system_stability.stability_report import RunInfo, write_stability_report_guarded
+        info = RunInfo(object_id=None if getattr(args, "object_dir", None) is None
+                       else Path(args.object_dir).name, years=getattr(args, "years", None),
+                       dt=getattr(args, "dt", None), repetitions=getattr(args, "repetitions", None),
+                       cpus=getattr(args, "cpus", None), seed=seed, properties_file=getattr(args, "properties", None),
+                       free_params=free_params)
+        write_stability_report_guarded(stability_dir + "/stability_megno.csv", stability_dir + "/stability_report.pdf",
+                                       info)
+    except (Exception, SystemExit):
+        logging.exception("The stability report could not be written")
