@@ -42,14 +42,12 @@ autosummary_mock_imports = [
     'pandoramoon',
     'cupy',
     'cupy.cuda',
-    'spock',
     'apscheduler',
     'apscheduler.executors.pool',
 ]
 autodoc_mock_imports = [
     'pandoramoon',
     'cupy',
-    'spock',
 ]
 #autosummary_imported_members = True
 

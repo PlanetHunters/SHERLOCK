@@ -13,7 +13,7 @@ from sherlockpipe.tests.stability.fixtures import TWO_PLANETS_YAML, write_yaml
 def make_args(object_dir, properties=None, **kw):
     args = dict(object_dir=object_dir, properties=properties, candidate=None, cpus=1, max_ecc=0.1, ecc_max=0.5,
                 period_bins=1, ecc_bins=1, inc_bins=1, omega_bins=1, omega_big_bins=1, mass_bins=1, star_mass_bins=1,
-                years=20, repetitions=1, dt=0.05, free_params=None)
+                years=20, repetitions=1, dt=0.05, free_params=None, seed=None)
     args.update(kw)
     return types.SimpleNamespace(**args)
 
@@ -36,6 +36,23 @@ class RunFromPropertiesTest(unittest.TestCase):
             self.assertIn(column, frame.columns)
         self.assertTrue(frame.megno.is_monotonic_increasing)
 
+    def test_the_longitude_of_the_ascending_node_of_the_file_reaches_the_results(self):
+        run_stability(make_args(self.tmp.name, self.yaml))
+        frame = self.result()
+        self.assertEqual(set(frame.long_asc_node), {"0,0"})
+        self.assertEqual(set(frame.arg_periastron), {"60,200"})
+
+    def test_the_seed_of_every_scenario_is_stored_and_unique(self):
+        run_stability(make_args(self.tmp.name, self.yaml, seed=11))
+        frame = self.result()
+        self.assertEqual(frame.seed.nunique(), len(frame))
+
+    def test_free_eccentricity_follows_ecc_max(self):
+        run_stability(make_args(self.tmp.name, self.yaml, free_params="eccentricity", ecc_max=0.2))
+        frame = self.result()
+        eccs = {float(e) for value in frame.eccentricities for e in value.split(",")}
+        self.assertLessEqual(max(eccs), 0.2 + 1e-9)
+
     def test_the_log_is_written_next_to_the_results(self):
         run_stability(make_args(self.tmp.name, self.yaml))
         self.assertTrue(os.path.exists(f"{self.tmp.name}/stability_two/stability.log"))
@@ -48,7 +65,6 @@ class RunFromPropertiesTest(unittest.TestCase):
 
 
 class RunFromCandidatesTest(unittest.TestCase):
-    @unittest.expectedFailure  # period and radius are pandas Series, not numbers
     def test_candidates_without_a_fit_are_simulated_with_default_errors(self):
         with tempfile.TemporaryDirectory() as tmp:
             pd.DataFrame({"M_star": [0.82], "M_star_lerr": [0.04], "M_star_uerr": [0.04]}).to_csv(f"{tmp}/params_star.csv", index=False)
@@ -57,6 +73,7 @@ class RunFromCandidatesTest(unittest.TestCase):
             frame = pd.read_csv(f"{tmp}/stability/stability_megno.csv")
         self.assertGreater(len(frame), 1)
         self.assertTrue(all("," in value for value in frame.periods))
+        self.assertTrue(all(isinstance(float(p), float) for value in frame.periods for p in value.split(",")))
 
 
 if __name__ == "__main__":

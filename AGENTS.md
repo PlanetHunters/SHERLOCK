@@ -71,7 +71,7 @@ sherlockpipe/
 ├── ois/                     # Objects of Interest manager
 ├── bayesian_fit/            # Transit fitting (alexfitter)
 ├── vetting/                 # Vetting (dearwatson)
-├── system_stability/        # Rebound/SPOCK stability checks
+├── system_stability/        # Rebound (MEGNO) stability checks
 ├── observation_plan/        # Ground-based observation planning
 ├── single_transits/         # Single transit search tools
 ├── search_zones/            # Habitable zone definitions
@@ -122,7 +122,7 @@ No `console_scripts` in `setup.py`. Entry is via `python -m` module execution or
 | `python3 -m sherlockpipe.fit --properties my_properties.yaml` | Run Bayesian fitting (alexfitter). |
 | `python3 -m sherlockpipe.fit --candidate N` | Simplified fit from results directory. |
 | `python3 -m sherlockpipe.validate --candidate N` | Statistical validation with TRICERATOPS. |
-| `python3 -m sherlockpipe.stability --bodies 1,2,4` | System stability with Rebound/SPOCK. |
+| `python3 -m sherlockpipe.stability --bodies 1,2,4` | System stability with Rebound (MEGNO). |
 | `python3 -m sherlockpipe.plan --candidate N --observatories obs.csv` | Observation planning. |
 
 ### Library Entrypoint

@@ -56,7 +56,6 @@ class TestsEntrypoints(unittest.TestCase):
         args.star_mass_bins = 1
         args.period_bins = 1
         args.free_params = None
-        args.use_spock = False
         args.years = 50
         args.dt = 0.001
         args.repetitions = 1

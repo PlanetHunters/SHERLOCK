@@ -18,15 +18,14 @@ def stability_args_parse(args=None):
     ap = ArgumentParser(description='Validation of system stability')
     ap.add_argument('--object_dir', help="If the object directory is not your current one you need to provide the "
                                          "ABSOLUTE path", required=False)
-    ap.add_argument('--max_ecc', type=float, default=0.1,
-                    help="Upper limit for the eccentricity grid.",
-                    required=False)
     ap.add_argument('--candidate', type=str, default=None, help="The candidate signal to be used.", required=False)
     ap.add_argument('--properties', help="The YAML file to be used as input.", required=False)
     ap.add_argument('--cpus', type=int, default=4, help="The number of CPU cores to be used.", required=False)
     ap.add_argument('--period_bins', type=int, default=1, help="The number of period bins to use.", required=False)
     ap.add_argument('--ecc_bins', type=int, default=1, help="The number of eccentricity bins to use.", required=False)
-    ap.add_argument('--ecc_max', type=int, default=0.5, help="The maximum eccentricity to explore.", required=False)
+    ap.add_argument('--ecc_max', '--max_ecc', dest='ecc_max', type=float, default=0.5,
+                    help="The maximum eccentricity to explore (when it is a free parameter or the candidates have no "
+                         "fitted eccentricity).", required=False)
     ap.add_argument('--inc_bins', type=int, default=1, help="The number of inclination bins to use.", required=False)
     ap.add_argument('--omega_bins', type=int, default=1, help="The number of argument of periastron bins to use.",
                     required=False)
@@ -42,7 +41,12 @@ def stability_args_parse(args=None):
     ap.add_argument('--dt', type=float, default=0.05, help="The fraction of the shortest orbit to use for each integration step.",
                     required=False)
     ap.add_argument('--free_params', type=str, default=None, help="The parameters to be entirely sampled, separated by "
-                                                                  "commas. E.g. 'eccentricity,omega'", required=False)
+                                                                  "commas: eccentricity (0 to ecc_max), omega and "
+                                                                  "omega_big (0 to 360 degrees). E.g. "
+                                                                  "'eccentricity,omega'", required=False)
+    ap.add_argument('--seed', type=int, default=None, help="Seed of the random angles (those set to 'rand'). A random "
+                                                           "one is used, and logged, when it is not set.",
+                    required=False)
     return ap.parse_args(args)
 
 

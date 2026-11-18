@@ -209,7 +209,7 @@ you will run the validation for one of the Sherlock candidates.
 ### Stability
 SHERLOCK PIPEline also implements a module to execute a system stability computation by the usage
 of 
-[Rebound](https://github.com/hannorein/rebound) and [SPOCK](https://github.com/dtamayo/spock). By calling:
+[Rebound](https://github.com/hannorein/rebound) (MEGNO). By calling:
 
 ```python3 -m sherlockpipe.stability --bodies 1,2,4```
 

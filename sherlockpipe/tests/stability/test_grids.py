@@ -55,19 +55,16 @@ class GridValuesTest(unittest.TestCase):
         self.assertEqual(column(scenarios([make_planet(omega=60, omega_big=15)]), "omega", 0), [60])
 
 
-class KnownFailuresTest(unittest.TestCase):
-    """Bugs of the grid, to be fixed (and these tests turned into normal ones)."""
+class FixedBugsTest(unittest.TestCase):
+    """Bugs of the grid that were fixed."""
 
-    @unittest.expectedFailure
     def test_longitude_of_ascending_node_uses_its_own_values(self):
         results = scenarios([make_planet(omega=60, omega_big=0)])
         self.assertEqual(column(results, "omega_big", 0), [0])
 
-    @unittest.expectedFailure
     def test_a_fixed_longitude_of_ascending_node_is_kept(self):
         self.assertEqual(column(scenarios([make_planet(omega=60, omega_big=15)]), "omega_big", 0), [15])
 
-    @unittest.expectedFailure
     def test_scenario_indexes_are_unique(self):
         planet = make_planet(omega=60, omega_bins=2, omega_low_err=10, omega_up_err=10,
                              omega_big=0, omega_big_bins=3, omega_big_low_err=10, omega_big_up_err=10)
@@ -75,10 +72,47 @@ class KnownFailuresTest(unittest.TestCase):
         self.assertEqual(len(results), 6)
         self.assertEqual(len({r["index"] for r in results}), 6)
 
-    @unittest.expectedFailure
     def test_free_omega_gives_the_requested_number_of_values(self):
         values = distinct(scenarios([make_planet(omega_bins=7)], free_params=["omega"]), "omega", 0)
         self.assertEqual(len(values), 7)
+
+
+class NewBehaviourTest(unittest.TestCase):
+    def test_free_omega_big_is_separate_from_free_omega(self):
+        planet = make_planet(omega=60, omega_big=15, omega_bins=4, omega_big_bins=3)
+        results = scenarios([planet], free_params=["omega_big"])
+        self.assertEqual(len(results), 3)
+        self.assertEqual(distinct(results, "omega", 0), [60])
+        self.assertEqual(sorted(distinct(results, "omega_big", 0)), [0.0, 120.0, 240.0])
+
+    def test_free_omega_does_not_touch_omega_big(self):
+        results = scenarios([make_planet(omega=60, omega_big=15, omega_bins=4)], free_params=["omega"])
+        self.assertEqual(distinct(results, "omega_big", 0), [15])
+        self.assertEqual(sorted(distinct(results, "omega", 0)), [0.0, 90.0, 180.0, 270.0])
+
+    def test_free_eccentricity_uses_the_given_maximum(self):
+        calculator = RecordingCalculator()
+        inputs = calculator.build_simulation_inputs([0.82], [make_planet(ecc_bins=4)], ["eccentricity"], ecc_max=0.3)
+        self.assertEqual([round(i.ecc_arr[0], 2) for i in inputs], [0.0, 0.1, 0.2, 0.3])
+
+    def test_rand_with_many_bins_stays_a_single_random_entry(self):
+        results = scenarios([make_planet(omega="rand", omega_low_err=20, omega_up_err=20, omega_bins=5)])
+        self.assertEqual(column(results, "omega", 0), ["rand"])
+
+    def test_every_scenario_has_its_own_seed_and_the_same_base_seed_gives_the_same_seeds(self):
+        planets = [make_planet(eccentricity=0.1, ecc_low_err=0.1, ecc_up_err=0.2, ecc_bins=4)]
+        first = RecordingCalculator.build_simulation_inputs([0.82], planets, seed=7)
+        again = RecordingCalculator.build_simulation_inputs([0.82], planets, seed=7)
+        other = RecordingCalculator.build_simulation_inputs([0.82], planets, seed=8)
+        self.assertEqual([i.seed for i in first], [i.seed for i in again])
+        self.assertEqual(len({i.seed for i in first}), 4)
+        self.assertNotEqual([i.seed for i in first], [i.seed for i in other])
+
+    def test_an_unspecified_mass_and_radius_is_reported(self):
+        planet = make_planet(mass=None, mass_low_err=None, mass_up_err=None)
+        planet.radius = None
+        with self.assertRaises(ValueError):
+            RecordingCalculator.prepare_planet_params([planet])
 
 
 if __name__ == "__main__":

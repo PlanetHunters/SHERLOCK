@@ -105,11 +105,11 @@ def run_stability(args):
                     arg_periastron_low_err = 20.0
                     arg_periastron_up_err = 20.0
             else:
-                candidate_row = candidates.iloc[[candidate_selection - 1]]
-                period = candidate_row["period"]
-                period_low_err = candidate_row["per_err"]
-                period_up_err = candidate_row["per_err"]
-                radius = candidate_row["rad_p"]
+                candidate_row = candidates.iloc[candidate_selection - 1]
+                period = float(candidate_row["period"])
+                period_low_err = float(candidate_row["per_err"])
+                period_up_err = float(candidate_row["per_err"])
+                radius = float(candidate_row["rad_p"])
                 radius_low_err = 0.1 * radius
                 radius_up_err = 0.1 * radius
                 eccentricity = args.ecc_max / 2
@@ -131,7 +131,7 @@ def run_stability(args):
                             period_bins=args.period_bins,
                             ecc_bins=args.ecc_bins, inc_bins=args.inc_bins, omega_bins=args.omega_bins,
                             omega_big='rand', omega_big_low_err=20.0, omega_big_up_err=20.0,
-                            omega_big_bins=args.omega_bins))
+                            omega_big_bins=getattr(args, "omega_big_bins", 1)))
 
     else:
         user_properties = common.load_from_yaml(args.properties)
@@ -184,4 +184,7 @@ def run_stability(args):
     logger.info("Star mass bins: %.0f", star_mass_bins)
     for key, body in enumerate(planets_params):
         logger.info("Body %.0f: %s", key, json.dumps(body.__dict__))
-    stability_calculator.run(stability_dir, star_mass_low, star_mass_up, star_mass_bins, planets_params, args.cpus, free_params)
+    ecc_max = getattr(args, "ecc_max", 0.5)
+    seed = getattr(args, "seed", None)
+    stability_calculator.run(stability_dir, star_mass_low, star_mass_up, star_mass_bins, planets_params, args.cpus,
+                             free_params, ecc_max, seed)

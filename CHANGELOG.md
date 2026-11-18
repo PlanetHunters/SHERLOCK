@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Fixed
+
+- Stability: the longitude of the ascending node used the values of the argument of periastron (a fixed `OM: 0` was
+  simulated with the angles of `O`), `--free_params omega` also swept it, scenario indexes repeated, a free angle
+  returned a different number of values than the bins requested (or failed for more than 360 bins), the candidates
+  path crashed because the period and the radius were pandas Series, `--ecc_max` was an integer option and the
+  free eccentricity ignored it, `--max_ecc` did nothing (it is now an alias of `--ecc_max`) and the argument bins of
+  the longitude of the ascending node were filled from the argument of periastron.
+- Stability: the random angles (`rand`) were drawn from the global generator, shared by the forked workers and not
+  reproducible. Every scenario has now its own seed (`seed` column; `--seed` sets the base one, a random one is
+  logged otherwise) and so does every repetition, which also seeds the MEGNO variational vector.
+- Stability: the MEGNO was read at about 5 times (1, 4, 17, 72 and 300 years for a 300 years run) and the time of
+  loss was the checkpoint that followed it. It is read 20 times per decade from 10 orbits of the innermost planet
+  (`checkpoints_per_decade`) and the time of loss is the time the simulation really reached (a 500 scenarios run
+  went from 5 to 66 distinct loss times).
+
+### Removed
+
+- The SPOCK stability calculator, which was never used (it was not wired into `run_stability`, `spock` was not
+  installed and it used `DataFrame.append`), and `StabilityCalculator.plot_simulation`, which could not run.
+
 ### Changed
 
 - The Bayesian fit report (`<object id>_fit.pdf`) is a landscape document instead of two portrait pages of tables and a
@@ -12,6 +33,8 @@
   Gaussian process baseline). Posteriors that pile up against the edge of their priors are reported. The allesfitter
   files stay in the fit directory. The module `bayesian_fit.fit_report` (`FitReport`) is replaced by
   `bayesian_fit.fit_landscape_report` and `bayesian_fit.fit_results`.
+- Stability: `stability_megno.csv` has the new columns `megno_min`, `megno_max`, `megno_std` (spread between
+  repetitions) and `seed`. `--free_params` accepts `omega_big` for the longitude of the ascending node.
 - Update WATSON integration to `dearwatson==2.1.2`: the vetting report is a compact landscape PDF (verdict and
   signal, WATSON-NET and TRICERATOPS, source offset, centroids and optical ghost with the per-sector pixel maps,
   every single transit as a thumbnail, and detailed sheets only for the flagged transits) instead of 80+ portrait

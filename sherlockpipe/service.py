@@ -127,13 +127,12 @@ def run_script(input_dir, output_dir, working_dir, cpus, pa):
                     mass_bins = None if 'MASS_BINS' not in properties else properties['MASS_BINS']
                     star_mass_bins = None if 'STAR_MASS_BINS' not in properties else properties['STAR_MASS_BINS']
                     years = None if 'YEARS' not in properties else properties['YEARS']
-                    spock = None if 'SPOCK' not in properties else properties['SPOCK']
                     free_params = None if 'CANDIDATE' not in properties else properties['CANDIDATE']
                     args = stability_args_parse({'object_dir': path_str, 'max_ecc': max_ecc,
                                                   'period_bins': period_bins, 'ecc_bins': ecc_bins,
                                                   'inc_bins': inc_bins, 'omega_bins': omega_bins,
                                                   'mass_bins': mass_bins, 'star_mass_bins': star_mass_bins,
-                                                  'years': years, 'spock': spock,
+                                                  'years': years,
                                                   'free_params': free_params})
                     run_stability(args)
     finally:

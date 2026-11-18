@@ -1,10 +1,10 @@
+import itertools
 import json
 import logging
 import multiprocessing
 import random
 from typing import List, Dict
 
-import matplotlib.pyplot as plt
 from abc import ABC, abstractmethod
 from multiprocessing import Pool
 import numpy as np
@@ -121,7 +121,8 @@ class SimulationInput:
     Used as input for the simulations done for each scenario
     """
 
-    def __init__(self, star_mass, mass_arr, planet_periods, ecc_arr, inc_arr, omega_arr, omega_big_arr, index):
+    def __init__(self, star_mass, mass_arr, planet_periods, ecc_arr, inc_arr, omega_arr, omega_big_arr, index,
+                 seed=0):
         """
         Initialize a simulation scenario with sampled parameters.
 
@@ -143,6 +144,9 @@ class SimulationInput:
             Array of planet longitudes of ascending node in degrees.
         index : int
             Scenario identifier.
+        seed : int, optional
+            Seed of the random angles (the ones set to 'rand'). Each repetition of the scenario derives its own
+            stream from it, so the same seed reproduces the same simulations.
         """
         self.star_mass = star_mass
         self.mass_arr = mass_arr
@@ -152,6 +156,7 @@ class SimulationInput:
         self.omega_arr = omega_arr
         self.omega_big_arr = omega_big_arr
         self.index = index
+        self.seed = seed
 
 
 class NumpyEncoder(json.JSONEncoder):
@@ -223,7 +228,7 @@ class StabilityCalculator(ABC):
         :return: the planet inputs with the filled masses
         """
         for planet_param in planet_params:
-            if planet_param.radius is None and (planet_param.mass_low_err is None or planet_param.mass_low_err is None):
+            if planet_param.radius is None and (planet_param.mass_low_err is None or planet_param.mass_up_err is None):
                 raise ValueError("There is one body without either radius or mass information: " +
                                  json.dumps(planet_param.__dict__))
             if planet_param.radius is not None and planet_param.mass is None:
@@ -233,13 +238,16 @@ class StabilityCalculator(ABC):
                 planet_param.mass_up_err = mass_up_err
         return planet_params
 
-    def init_rebound_simulation(self, simulation_input):
+    def init_rebound_simulation(self, simulation_input, repetition=0):
         """
         Initializes the simulation for rebound-based algorithms
 
         :param simulation_input: the input data for the simulation scenario
+        :param repetition: the repetition of the scenario. The angles set to 'rand' are drawn from a generator seeded
+            with the scenario seed and the repetition, so they are reproducible and different between repetitions.
         :return: the rebound initialized simulation scenario
         """
+        rng = np.random.default_rng([int(simulation_input.seed), int(repetition)])
         sim = rebound.Simulation()
         sim.units = ('Yr', 'AU', 'Msun')
         sim.integrator = "whfast"
@@ -253,11 +261,11 @@ class StabilityCalculator(ABC):
             inc = np.deg2rad(simulation_input.inc_arr[planet_key])
             omega = simulation_input.omega_arr[planet_key]
             if omega == 'rand':
-                omega = random.uniform(0, 360)
+                omega = rng.uniform(0, 360)
             omega = np.deg2rad(omega)
             omega_big = simulation_input.omega_big_arr[planet_key]
             if omega_big == 'rand':
-                omega_big = random.uniform(0, 360)
+                omega_big = rng.uniform(0, 360)
             omega_big = np.deg2rad(omega_big)
             sim.add(m=LcbuilderHelper.convert_from_to(mass, u.M_earth, u.M_sun) / simulation_input.star_mass,
                     P=LcbuilderHelper.convert_from_to(period, u.day, u.year), e=ecc, omega=omega, Omega=omega_big, inc=inc)
@@ -266,8 +274,108 @@ class StabilityCalculator(ABC):
         sim.move_to_com()
         return sim
 
+    @staticmethod
+    def checkpoints(years, shortest_period_years, per_decade=20):
+        """
+        The times (in years) at which the simulation is paused to read its chaos indicator, spaced logarithmically
+        from 10 orbits of the innermost planet to the end of the simulation, with ``per_decade`` points per decade.
+        The finer the checkpoints, the closer the recorded loss time is to the real one.
+
+        :param years: the total integration time
+        :param shortest_period_years: the shortest orbital period of the system
+        :param per_decade: the checkpoints per decade of time
+        :return: the checkpoint times, the last one being ``years``
+        """
+        first = min(10 * shortest_period_years, years)
+        if first >= years:
+            return np.array([float(years)])
+        count = max(2, int(np.ceil(per_decade * np.log10(years / first))) + 1)
+        return np.logspace(np.log10(first), np.log10(years), count)
+
+    @staticmethod
+    def range_grid(value, low_err, up_err, bins, minimum=None, maximum=None):
+        """
+        The values of one dimension: the nominal value when it is fixed, otherwise ``bins`` equally spaced values
+        between ``value - low_err`` and ``value + up_err`` (clamped to ``minimum`` and ``maximum``).
+        """
+        if bins == 1 or low_err == up_err == 0:
+            return [value]
+        low, up = value - low_err, value + up_err
+        if minimum is not None:
+            low = max(low, minimum)
+        if maximum is not None:
+            up = min(up, maximum)
+        return np.linspace(low, up, bins).tolist()
+
+    @staticmethod
+    def angle_grid(value, low_err, up_err, bins, free):
+        """
+        The values of an angle dimension. ``'rand'`` stays a single entry: the angle is drawn at random (and
+        reproducibly) in every repetition. A free angle takes ``bins`` equally spaced values around the circle.
+        """
+        if free:
+            return np.linspace(0, 360, bins, endpoint=False).tolist()
+        if isinstance(value, str) or bins == 1 or low_err == up_err == 0:
+            return [value]
+        return np.linspace(value - low_err, value + up_err, bins).tolist()
+
+    @staticmethod
+    def build_simulation_inputs(star_masses, planet_params: List[PlanetInput], free_params=None, ecc_max=0.5,
+                                seed=0):
+        """
+        Builds every scenario of the parameter space: the cartesian product of the star masses and, for every
+        planet, of its periods, masses, inclinations, eccentricities, arguments of periastron and longitudes of the
+        ascending node. A dimension is fixed (one value), a grid between its errors, or free when named in
+        ``free_params`` (``eccentricity``: 0 to ``ecc_max``; ``omega`` and ``omega_big``: the full circle).
+
+        :param star_masses: the star masses to simulate
+        :param planet_params: the planets, with their masses already filled
+        :param free_params: the dimensions to sample entirely
+        :param ecc_max: the highest eccentricity of a free eccentricity
+        :param seed: base seed of the random angles
+        :return: the list of scenarios, each with a unique index and its own seed
+        """
+        free_params = [] if free_params is None else free_params
+        per_planet = {key: [] for key in ("period", "mass", "ecc", "inc", "omega", "omega_big")}
+        for planet in planet_params:
+            per_planet["period"].append(StabilityCalculator.range_grid(
+                planet.period, planet.period_low_err, planet.period_up_err, planet.period_bins))
+            per_planet["mass"].append(StabilityCalculator.range_grid(
+                planet.mass, planet.mass_low_err, planet.mass_up_err, planet.mass_bins))
+            if "eccentricity" in free_params:
+                per_planet["ecc"].append(np.linspace(0, ecc_max, planet.ecc_bins).tolist())
+            else:
+                per_planet["ecc"].append(StabilityCalculator.range_grid(
+                    planet.eccentricity, planet.ecc_low_err, planet.ecc_up_err, planet.ecc_bins, 0, 1))
+            per_planet["inc"].append(StabilityCalculator.range_grid(
+                planet.inclination, planet.inc_low_err, planet.inc_up_err, planet.inc_bins))
+            per_planet["omega"].append(StabilityCalculator.angle_grid(
+                planet.omega, planet.omega_low_err, planet.omega_up_err, planet.omega_bins, "omega" in free_params))
+            per_planet["omega_big"].append(StabilityCalculator.angle_grid(
+                planet.omega_big, planet.omega_big_low_err, planet.omega_big_up_err, planet.omega_big_bins,
+                "omega_big" in free_params))
+        combos = {key: list(itertools.product(*grids)) for key, grids in per_planet.items()}
+        logging.info("Preparing system values for all scenarios")
+        logging.info("%.0f star mass scenarios.", len(star_masses))
+        for key, label in (("mass", "bodies mass"), ("period", "period"), ("inc", "inclination"),
+                           ("ecc", "eccentricity"), ("omega", "arg of periastron"),
+                           ("omega_big", "long of asc node")):
+            logging.info("%.0f %s scenarios.", len(combos[key]), label)
+        scenarios_num = len(star_masses) * int(np.prod([len(c) for c in combos.values()]))
+        logging.info("%s = %.0f total scenarios.", " x ".join(
+            [str(len(star_masses))] + [str(len(c)) for c in combos.values()]), scenarios_num)
+        simulation_inputs = []
+        for star_mass, periods, masses, incs, eccs, omegas, omega_bigs in itertools.product(
+                star_masses, combos["period"], combos["mass"], combos["inc"], combos["ecc"], combos["omega"],
+                combos["omega_big"]):
+            index = len(simulation_inputs)
+            simulation_inputs.append(SimulationInput(
+                star_mass, list(masses), list(periods), list(eccs), list(incs), list(omegas), list(omega_bigs),
+                index, seed=int((int(seed) * 1_000_003 + index) % 2 ** 31)))
+        return simulation_inputs
+
     def run(self, results_dir, star_mass_low, star_mass_up, star_mass_bins, planet_params: List[PlanetInput],
-            cpus=multiprocessing.cpu_count() - 1, free_params=None):
+            cpus=multiprocessing.cpu_count() - 1, free_params=None, ecc_max=0.5, seed=None):
         """
         Creates possible scenarios of stellar masses, planet masses and planet eccentricities. Afterwards a stability
         analysis is run for each of the scenarios and the results are stored in a file.
@@ -278,108 +386,17 @@ class StabilityCalculator(ABC):
         :param star_mass_bins: the number of star masses to sample
         :param List[PlanetInput] planet_params: the planet inputs containing the planets parameters
         :param cpus: the number of cpus to be used
-        :param free_params: the parameters to be sampled entirely
+        :param free_params: the parameters to be sampled entirely: 'eccentricity', 'omega' and 'omega_big'
+        :param ecc_max: the highest eccentricity of a free eccentricity
+        :param seed: the base seed of the random angles. A random one is drawn (and logged) when it is None
         """
-        if free_params is None:
-            free_params = []
+        if seed is None:
+            seed = random.SystemRandom().randrange(2 ** 31)
+        logging.info("Seed of the random angles: %s", seed)
         planet_params = StabilityCalculator.prepare_planet_params(planet_params)
         star_masses = StabilityCalculator.prepare_star_masses(star_mass_low, star_mass_up, star_mass_bins)
-        planet_masses = []
-        planet_period = []
-        planet_ecc = []
-        planet_inc = []
-        planet_omega = []
-        planet_omega_big = []
-        for planet_param in planet_params:
-            if planet_param.period_bins == 1 or planet_param.period_low_err == planet_param.period_up_err == 0:
-                period_grid = np.full(1, planet_param.period)
-            else:
-                period_grid = np.linspace(planet_param.period - planet_param.period_low_err,
-                                        planet_param.period + planet_param.period_up_err,
-                                        planet_param.period_bins)
-            planet_period.append(period_grid)
-            if planet_param.mass_bins == 1 or planet_param.mass_low_err == planet_param.mass_up_err == 0:
-                mass_grid = np.full(1, planet_param.mass)
-            else:
-                mass_grid = np.linspace(planet_param.mass - planet_param.mass_low_err,
-                                        planet_param.mass + planet_param.mass_up_err,
-                                        planet_param.mass_bins)
-            planet_masses.append(mass_grid)
-            if "eccentricity" in free_params:
-                ecc_grid = np.linspace(0, 0.5, planet_param.ecc_bins)
-            elif planet_param.ecc_bins == 1 or planet_param.ecc_low_err == planet_param.ecc_up_err == 0:
-                ecc_grid = np.full(1, planet_param.eccentricity)
-            else:
-                low_ecc = planet_param.eccentricity - planet_param.ecc_low_err
-                low_ecc = low_ecc if low_ecc > 0 else 0
-                up_ecc = planet_param.eccentricity + planet_param.ecc_up_err
-                up_ecc = up_ecc if up_ecc < 1 else 1
-                ecc_grid = np.linspace(low_ecc, up_ecc, planet_param.ecc_bins)
-            planet_ecc.append(ecc_grid)
-            if planet_param.inc_bins == 1 or planet_param.inc_low_err == planet_param.inc_up_err == 0:
-                inc_grid = np.full(1, planet_param.inclination)
-            else:
-                inc_grid = np.linspace(planet_param.inclination - planet_param.inc_low_err,
-                                       planet_param.inclination + planet_param.inc_up_err,
-                                       planet_param.inc_bins)
-            planet_inc.append(inc_grid)
-            if "omega" in free_params:
-                # using arange instead of linspace because 0 and 360 are the same, so we exclude 360
-                omega_grid = np.arange(0, 360, 360 // planet_param.omega_bins)
-            elif planet_param.omega_bins == 1 or planet_param.omega_low_err == planet_param.omega_up_err == 0:
-                omega_grid = np.full(1, planet_param.omega)
-            else:
-                omega_grid = np.linspace(planet_param.omega - planet_param.omega_low_err,
-                                         planet_param.omega + planet_param.omega_up_err,
-                                         planet_param.omega_bins)
-            planet_omega.append(omega_grid)
-            if "omega" in free_params:
-                # using arange instead of linspace because 0 and 360 are the same, so we exclude 360
-                omega_big_grid = np.arange(0, 360, 360 // planet_param.omega_big_bins)
-            elif planet_param.omega_big_bins == 1 or planet_param.omega_big_low_err == planet_param.omega_big_up_err == 0:
-                omega_big_grid = np.full(1, planet_param.omega_big)
-            else:
-                omega_big_grid = np.linspace(planet_param.omega_big - planet_param.omega_big_low_err,
-                                         planet_param.omega_big + planet_param.omega_big_up_err,
-                                         planet_param.omega_big_bins)
-            planet_omega_big.append(omega_big_grid)
-        period_grid = np.array(np.meshgrid(*np.array(planet_period, dtype=object))).T.reshape(-1, len(planet_period))
-        masses_grid = np.array(np.meshgrid(*np.array(planet_masses, dtype=object))).T.reshape(-1, len(planet_masses))
-        ecc_grid = np.array(np.meshgrid(*np.array(planet_ecc, dtype=object))).T.reshape(-1, len(planet_ecc))
-        inc_grid = np.array(np.meshgrid(*np.array(planet_inc, dtype=object))).T.reshape(-1, len(planet_inc))
-        omega_grid = np.array(np.meshgrid(*np.array(planet_omega, dtype=object))).T.reshape(-1, len(planet_omega))
-        omega_big_grid = np.array(np.meshgrid(*np.array(planet_omega, dtype=object))).T.reshape(-1, len(planet_omega))
-        simulation_inputs = []
-        i = 0
-        star_masses_scenario_num = len(star_masses)
-        masses_scenario_num = len(masses_grid)
-        period_scenario_num = len(period_grid)
-        inc_scenario_num = len(inc_grid)
-        ecc_scenario_num = len(ecc_grid)
-        omega_scenario_num = len(omega_grid)
-        omega_big_scenario_num = len(omega_big_grid)
-        scenarios_num = star_masses_scenario_num * masses_scenario_num * period_scenario_num * inc_scenario_num * \
-                        ecc_scenario_num * omega_scenario_num * omega_big_scenario_num
-        logging.info("Preparing system values for all scenarios")
-        logging.info("%.0f star mass scenarios.", len(star_masses))
-        logging.info("%.0f bodies mass scenarios.", len(masses_grid))
-        logging.info("%.0f period scenarios.", len(period_grid))
-        logging.info("%.0f inclination scenarios.", len(inc_grid))
-        logging.info("%.0f eccentricity scenarios.", len(ecc_grid))
-        logging.info("%.0f arg of periastron scenarios.", len(omega_grid))
-        logging.info("%.0f long of asc node scenarios.", len(omega_big_grid))
-        logging.info("%.0f x %.0f x %.0f x %.0f x %.0f x %.0f x %.0f = %.0f total scenarios.", star_masses_scenario_num,
-                     masses_scenario_num, period_scenario_num, inc_scenario_num, ecc_scenario_num, omega_scenario_num, omega_big_scenario_num,
-                     scenarios_num)
-        for star_mass in star_masses:
-            for period_key, period_arr in enumerate(period_grid):
-                for mass_key, mass_arr in enumerate(masses_grid):
-                    for inc_key, inc_arr in enumerate(inc_grid):
-                        for ecc_key, ecc_arr in enumerate(ecc_grid):
-                            for omega_key, omega_arr in enumerate(omega_grid):
-                                for omega_big_key, omega_big_arr in enumerate(omega_big_grid):
-                                    simulation_inputs.append(SimulationInput(star_mass, mass_arr, period_arr, ecc_arr, inc_arr, omega_arr, omega_big_arr, i))
-                                i = i + 1
+        simulation_inputs = StabilityCalculator.build_simulation_inputs(star_masses, planet_params, free_params,
+                                                                        ecc_max, seed)
         logging.info("Finished preparing scenarios")
         with Pool(processes=cpus) as pool:
             simulation_results = pool.map(self.log_and_run_simulation, simulation_inputs)
@@ -415,53 +432,3 @@ class StabilityCalculator(ABC):
         :param str results_dir: the output directory where results will be written into
         """
         pass
-
-    def plot_simulation(self, simulation_input_df, save_dir, scenario_name, xlim=None, ylim=None):
-        """
-        Generate an orbit plot for a single simulation scenario row.
-
-        Reads planet parameters from a DataFrame row, initializes a rebound
-        simulation, integrates forward, and saves an orbit plot image.
-
-        Parameters
-        ----------
-        simulation_input_df : pandas.Series
-            Series with keys 'eccentricities', 'inclinations', 'arg_periastron',
-            'periods', 'masses', and 'star_mass'.
-        save_dir : str
-            Directory where the plot image will be saved.
-        scenario_name : str
-            Name used to construct the output filename.
-        xlim : tuple, optional
-            X-axis limits for the orbit plot.
-        ylim : tuple, optional
-            Y-axis limits for the orbit plot.
-        """
-        eccs = simulation_input_df["eccentricities"].split(",")
-        eccs = [float(i) for i in eccs]
-        incs = simulation_input_df["inclinations"].split(",")
-        incs = [float(i) - 90 for i in incs]
-        omegas = simulation_input_df["arg_periastron"].split(",")
-        omegas = [float(i) for i in omegas]
-        periods = simulation_input_df["periods"].split(",")
-        periods = [float(i) for i in periods]
-        masses = simulation_input_df["masses"].split(",")
-        masses = [float(i) for i in masses]
-        star_mass = simulation_input_df["star_mass"]
-        sim = StabilityCalculator.init_rebound_simulation(
-            SimulationInput(star_mass, masses, periods, eccs, incs, omegas, 1))
-        filenames = []
-        for i in range(1):
-            sim.integrate(sim.t + i / 100 * 2 * np.pi)
-            fig, ax = rebound.OrbitPlot(sim, color=True, unitlabel="[AU]", xlim=xlim, ylim=ylim)
-            filename = save_dir + "scenario_" + scenario_name + "_" + str(i) + ".png"
-            plt.savefig(filename)
-            filenames.append(filename)
-            plt.close(fig)
-        # with imageio.get_writer(save_dir + scenario_name + '.gif', mode='I') as writer:
-        #     for filename in filenames:
-        #         image = imageio.imread(filename)
-        #         writer.append_data(image)
-        # # Remove files
-        # for filename in set(filenames):
-        #     os.remove(filename)
