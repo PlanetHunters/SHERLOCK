@@ -205,11 +205,12 @@ def transit_times(results: FitResults, planet):
 
 def transit_chi2(results: FitResults, planet, times, t14):
     """The reduced chi square of every transit window (3 durations), with the noise taken from the residuals."""
-    sigma = np.std(results.residuals)
+    sigma = np.nanstd(results.residuals)   # the residuals have gaps (NaN) where the baseline could not be predicted
     out = []
     for x in times:
-        s = np.abs(results.time - x) < 1.5 * t14
-        out.append(float(np.mean((results.residuals[s] / sigma) ** 2)) if s.sum() > 5 else np.nan)
+        r = results.residuals[np.abs(results.time - x) < 1.5 * t14]
+        r = r[np.isfinite(r)]
+        out.append(float(np.mean((r / sigma) ** 2)) if len(r) > 5 and sigma > 0 else np.nan)
     return np.array(out)
 
 
@@ -259,6 +260,19 @@ def _head(fig, results, title, subtitle, page):
 
 def _new_figure():
     return Figure(figsize=PAGE_SIZE)
+
+
+def _checks_block(fig, checks, x, y_top, spacing, width=.45):
+    """The checks of a verdict as rows: a colour dot (green ok, orange warning, red failure, grey information), what it
+    is and what was found."""
+    fig.text(x, y_top + .028, "CHECKS", fontsize=6.5, color=MUTED, fontweight="bold")
+    fig.add_artist(Line2D([x, x + width], [y_top + .022, y_top + .022], color=GRID, lw=.6))
+    for i, check in enumerate(checks):
+        y = y_top - i * spacing
+        fig.patches.append(Circle((x + .006, y + .006), .0052, color=STATUS_COLOURS[check.status], transform=fig.transFigure))
+        fig.text(x + .02, y, check.label, fontsize=7.2, fontweight="bold")
+        detail = check.detail if len(check.detail) <= 58 else check.detail[:55] + "..."
+        fig.text(x + .165, y, detail, fontsize=7.0, color=INK)
 
 
 def _unavailable(ax, text="not available"):
@@ -388,7 +402,7 @@ def page_summary(results: FitResults, planet, page):
     flux = results.detrended - (results.model - own)   # the other planets are removed
     phase = ((results.time - epoch + period / 2) % period - period / 2) * 24
     sel = np.abs(phase) < half
-    a, ar = _axes(fig, .055, .45, .40, .33), _axes(fig, .055, .35, .40, .08)
+    a, ar = _axes(fig, .055, .515, .40, .27), _axes(fig, .055, .425, .40, .075)
     a.scatter(phase[sel][::6], flux[sel][::6], s=.8, color=MUTED, alpha=.12, lw=0, rasterized=True)
     bx, by, be = binned(phase[sel], flux[sel], -half, half, 44)
     a.errorbar(bx, by, be, fmt="o", ms=2.4, color=INK, lw=.6, zorder=3)
@@ -413,17 +427,21 @@ def page_summary(results: FitResults, planet, page):
     ar.set_ylabel("res. (ppt)")
     ar.set_xlabel("hours from mid-transit")
     ar.grid(color=GRID, lw=.4)
-    _key_parameters(fig, results, planet, .52, .735, .0405)
-    fig.text(.03, .30, "LIMB DARKENING AND NOISE", fontsize=6.5, color=MUTED, fontweight="bold")
-    fig.add_artist(Line2D([.03, .48], [.295, .295], color=GRID, lw=.6))
+    _key_parameters(fig, results, planet, .52, .735, .0475)
+    _checks_block(fig, checks, .03, .345, .0315)
+    fig.text(.52, .255, "LIMB DARKENING AND NOISE", fontsize=6.5, color=MUTED, fontweight="bold")
+    fig.add_artist(Line2D([.52, .97], [.25, .25], color=GRID, lw=.6))
     shared = [("q1", "host_ldc_q1_lc"), ("q2", "host_ldc_q2_lc"), ("ln σ (white noise)", "ln_err_flux_lc"),
               ("GP ln σ", "baseline_gp_matern32_lnsigma_flux_lc"), ("GP ln ρ", "baseline_gp_matern32_lnrho_flux_lc")]
-    for j, (label, key) in enumerate([s for s in shared if s[1] in results.samples]):
+    for j, (label, key) in enumerate([s_ for s_ in shared if s_[1] in results.samples]):
         q = percentiles(results.samples[key])
-        fig.text(.03, .265 - j * .027, label, fontsize=7.2)
-        fig.text(.19, .265 - j * .027, f"{q[2]:.3f}  +{q[3] - q[2]:.3f} / −{q[2] - q[1]:.3f}", fontsize=7.2, fontweight="bold")
-    fig.text(.03, .10, "Bands are drawn from equally weighted samples of the nested sampling run. An orange frame marks a posterior with at least "
-                       f"{EDGE_MASS * 100:.0f} % of its samples in the outer {EDGE_FRACTION * 100:.0f} % of its prior range.", fontsize=6.5, color=MUTED)
+        x, y = .52 + (j % 2) * .235, .22 - (j // 2) * .03
+        fig.text(x, y, label, fontsize=7.2)
+        fig.text(x + (.1 if j % 2 == 0 else .055), y, f"{q[2]:.3f}  +{q[3] - q[2]:.3f} / −{q[2] - q[1]:.3f}", fontsize=7.0, fontweight="bold")
+    for k, line in enumerate(["Bands come from equally weighted samples of the sampling. An orange frame marks a posterior",
+                              f"with at least {EDGE_MASS * 100:.0f} % of its samples in the outer {EDGE_FRACTION * 100:.0f} % of its prior range (it may be cut by",
+                              "the prior). The grey band is the stellar density that the mass and radius of the star give."]):
+        fig.text(.52, .105 - k * .017, line, fontsize=6.3, color=MUTED)
     return fig
 
 
@@ -432,7 +450,7 @@ def _variant_panels(fig, results, planet):
     odd, even = results.variants.get("odd"), results.variants.get("even")
     specs = [("Rp / R★", "rr", None), ("(R★+Rp) / a", "rsuma", None), ("cos i", "cosi", None)]
     for i, (label, parameter, _) in enumerate(specs):
-        ax = _axes(fig, .06 + i * .16, .60, .13, .27)
+        ax = _axes(fig, .06 + i * .175, .60, .135, .27)
         main = results.table.set_index("#name")
         name = f"{planet}_{parameter}"
         if name not in main.index or odd is None or even is None:
@@ -460,43 +478,69 @@ def page_consistency(results: FitResults, planet, page):
     _head(fig, results, f"Consistency · {planet}", "Odd against even fits, and every transit against the posterior model", page)
     _variant_panels(fig, results, planet)
     check = odd_even_check(results, planet)
-    fig.text(.06, .53, f"ODD / EVEN: {check.detail}", fontsize=7.8, fontweight="bold", color=STATUS_COLOURS[check.status])
+    box = _axes(fig, .03, .53, .52, .04)
+    box.axis("off")
+    box.text(0, .75, f"ODD / EVEN: {check.detail}", fontsize=7.8, fontweight="bold", color=STATUS_COLOURS[check.status], va="center")
     if "odd" in results.variants:
-        fig.text(.06, .505, "Each fit uses twice the period: its (R★+Rp)/a and cos i priors are scaled by 2^(−2/3), and the odd and even", fontsize=7, color=MUTED)
-        fig.text(.06, .485, "values of those two are shown multiplied by 2^(2/3) to compare them with the main fit.", fontsize=7, color=MUTED)
+        box.text(0, .0, "Each fit uses twice the period: the (R★+Rp)/a and cos i priors are scaled by 2^(−2/3), and the odd and even values of those two "
+                        "are shown times 2^(2/3).", fontsize=6.4, color=MUTED, va="center")
     times, t14, total = transit_times(results, planet)
     chi2 = transit_chi2(results, planet, times, t14)
     bad = int(np.nansum(chi2 > CHI2_TRANSIT_WARN))
-    fig.text(.52, .90, f"EVERY TRANSIT WITH DATA · {len(times)} of {total} · fitted model in red, χ² per point in the corner",
+    # chi square of every transit
+    a = _axes(fig, .60, .60, .20, .27)
+    if len(times):
+        colours = [BAD if c > CHI2_TRANSIT_WARN else BLUE for c in chi2]
+        a.scatter(times, chi2, c=colours, s=9, zorder=3)
+        a.axhline(1.0, color=INK, lw=.6, ls=":")
+        a.axhline(CHI2_TRANSIT_WARN, color=WARN, lw=.6, ls="--")
+        a.set_xlabel("time of the transit (BTJD)")
+        a.set_ylabel("χ² per point")
+        a.grid(color=GRID, lw=.4)
+    else:
+        _unavailable(a, "no transit has data")
+    _title(a, "Fit quality per transit", f"{bad} of {len(times)} > {CHI2_TRANSIT_WARN}")
+    a = _axes(fig, .85, .60, .12, .27)
+    a.axis("off")
+    a.text(0, .95, "TRANSITS", fontsize=6.5, color=MUTED, fontweight="bold")
+    for k, (label, value) in enumerate([("with data", f"{len(times)}"), ("listed", f"{total}"), ("duration", f"{t14 * 24:.2f} h"),
+                                        ("above χ² %.1f" % CHI2_TRANSIT_WARN, f"{bad}")]):
+        a.text(0, .78 - k * .17, label, fontsize=7.0, color=MUTED)
+        a.text(1, .78 - k * .17, value, fontsize=7.6, fontweight="bold", ha="right")
+    # every transit, in a grid that fills the page
+    shown = times[:MAX_TRANSITS]
+    n = max(len(shown), 1)
+    cols = 12 if n > 24 else (8 if n > 8 else 4)
+    rows = int(np.ceil(n / cols))
+    fig.text(.03, .49, f"EVERY TRANSIT WITH DATA · {len(times)} of {total} · the posterior model in red, χ² per point in the corner (red above {CHI2_TRANSIT_WARN})",
              fontsize=6.5, color=MUTED, fontweight="bold")
-    fig.text(.52, .875, f"{bad} of {len(times)} above χ² {CHI2_TRANSIT_WARN}", fontsize=7, color=WARN if bad else MUTED)
+    fig.add_artist(Line2D([.03, .97], [.484, .484], color=GRID, lw=.6))
+    top, bottom = .465, .06
+    cell_h = min((top - bottom) / rows, .165)
+    cell_w = .94 / cols
     own = _planet_model_curve(results, planet, results.time)
     flux = results.detrended - (results.model - own)
-    cols = 8
-    for i, x in enumerate(times[:MAX_TRANSITS]):
-        ax = _axes(fig, .52 + (i % cols) * .0585, .79 - (i // cols) * .09, .052, .07)
-        s = np.abs(results.time - x) < 2.5 * t14
-        hours = (results.time[s] - x) * 24
-        ax.plot(hours, flux[s], ".", ms=.6, color=MUTED, alpha=.4)
+    for i, x in enumerate(shown):
+        ax = _axes(fig, .03 + (i % cols) * cell_w + .004, top - (i // cols + 1) * cell_h + .012, cell_w - .008, cell_h - .026)
+        s_ = np.abs(results.time - x) < 2.5 * t14
+        hours = (results.time[s_] - x) * 24
+        ax.plot(hours, flux[s_], ".", ms=.7, color=MUTED, alpha=.4)
         if hours.size > 8:
-            bx, by, _ = binned(hours, flux[s], hours.min(), hours.max(), 12, 3)
-            ax.plot(bx, by, "-", color=INK, lw=.6)
-        ax.plot(hours, own[s], color=BAD, lw=.8)
-        depth = max(1 - own[s].min(), 1e-4)
+            bx, by, _ = binned(hours, flux[s_], hours.min(), hours.max(), 12, 3)
+            ax.plot(bx, by, "-", color=INK, lw=.7)
+        ax.plot(hours, own[s_], color=BAD, lw=.9)
+        depth = max(1 - own[s_].min(), 1e-4)
         ax.set_ylim(1 - 4 * depth, 1 + 3 * depth)
         ax.set_xticks([])
         ax.set_yticks([])
         c = chi2[i]
+        ax.set_title(f"#{i}", loc="left", fontsize=5.5, pad=1, color=MUTED)
         if np.isfinite(c):
-            ax.text(.97, .05, f"{c:.1f}", transform=ax.transAxes, fontsize=5, ha="right", color=BAD if c > CHI2_TRANSIT_WARN else MUTED)
+            ax.text(.97, .05, f"{c:.1f}", transform=ax.transAxes, fontsize=5.6, ha="right", color=BAD if c > CHI2_TRANSIT_WARN else MUTED)
     if len(times) > MAX_TRANSITS:
-        fig.text(.97, .012, f"First {MAX_TRANSITS} of {len(times)} transits shown", fontsize=6.5, color=MUTED, ha="right")
-    fig.text(.06, .40, "THE ALLESFITTER FILES STAY", fontsize=6.5, color=MUTED, fontweight="bold")
-    fig.add_artist(Line2D([.06, .48], [.395, .395], color=GRID, lw=.6))
-    for j, text in enumerate(["· results/ns_corner.pdf, ns_trace.pdf and ns_fit_*.pdf of allesfitter are kept as they are,",
-                              "  with the odd/ and even/ folders, the logs and the tables (ns_table.csv, ns_derived_table.csv).",
-                              "· The odd and even fits are summarised here instead of in three folders to open."]):
-        fig.text(.06, .365 - j * .028, text, fontsize=7.2)
+        fig.text(.97, .025, f"First {MAX_TRANSITS} of {len(times)} transits shown", fontsize=6.5, color=MUTED, ha="right")
+    fig.text(.03, .025, "The allesfitter files (results/ns_corner.pdf, ns_trace.pdf, ns_fit_*.pdf, the odd/ and even/ folders and the tables) stay as they are.",
+             fontsize=6.3, color=MUTED)
     return fig
 
 
@@ -557,26 +601,43 @@ def page_corner(results: FitResults, planet, page):
     stack = np.vstack([np.asarray(c[1], float) for c in columns])
     corr = np.corrcoef(stack)
     pairs = sorted(((abs(corr[i, j]), columns[i][0], columns[j][0], corr[i, j]) for i in range(n) for j in range(i)), reverse=True)[:5]
-    fig.text(.66, .86, "STRONGEST CORRELATIONS", fontsize=6.5, color=MUTED, fontweight="bold")
-    fig.add_artist(Line2D([.66, .97], [.855, .855], color=GRID, lw=.6))
+    fig.text(.60, .86, "STRONGEST CORRELATIONS", fontsize=6.5, color=MUTED, fontweight="bold")
+    fig.add_artist(Line2D([.60, .97], [.855, .855], color=GRID, lw=.6))
     for k, (_, a_, b_, c_) in enumerate(pairs):
-        fig.text(.66, .83 - k * .027, f"{a_}  ×  {b_}", fontsize=7.2)
-        fig.text(.90, .83 - k * .027, f"{c_:+.2f}", fontsize=7.2, fontweight="bold", color=WARN if abs(c_) > .8 else INK)
+        fig.text(.60, .83 - k * .027, f"{a_}  ×  {b_}", fontsize=7.2)
+        fig.text(.93, .83 - k * .027, f"{c_:+.2f}", fontsize=7.2, fontweight="bold", color=WARN if abs(c_) > .8 else INK)
     density = results.derived_of(planet, "host_density")
     if density is not None and results.star_density is not None:
         q = percentiles(density)
-        fig.text(.66, .66, "STELLAR DENSITY", fontsize=6.5, color=MUTED, fontweight="bold")
-        fig.add_artist(Line2D([.66, .97], [.655, .655], color=GRID, lw=.6))
-        fig.text(.66, .63, "from the orbit", fontsize=7.2)
-        fig.text(.80, .63, f"{q[2]:.2f} +{q[3] - q[2]:.2f} / −{q[2] - q[1]:.2f}", fontsize=7.2, fontweight="bold")
-        fig.text(.66, .604, "from the star", fontsize=7.2)
-        fig.text(.80, .604, f"{results.star_density[0]:.2f} ± {results.star_density[1]:.2f}" if np.isfinite(results.star_density[1]) else f"{results.star_density[0]:.2f}", fontsize=7.2, fontweight="bold")
+        fig.text(.60, .68, "STELLAR DENSITY [g/cm³]", fontsize=6.5, color=MUTED, fontweight="bold")
+        fig.add_artist(Line2D([.60, .97], [.675, .675], color=GRID, lw=.6))
+        fig.text(.60, .648, "from the orbit", fontsize=7.2)
+        fig.text(.75, .648, f"{q[2]:.2f} +{q[3] - q[2]:.2f} / −{q[2] - q[1]:.2f}", fontsize=7.2, fontweight="bold")
+        fig.text(.60, .622, "from the star", fontsize=7.2)
+        star = results.star_density
+        fig.text(.75, .622, f"{star[0]:.2f} ± {star[1]:.2f}" if np.isfinite(star[1]) else f"{star[0]:.2f}", fontsize=7.2, fontweight="bold")
         combined = results.combined_density
         if combined is not None:
             qc = percentiles(combined)
-            fig.text(.66, .578, "combined (all orbits)", fontsize=7.2)
-            fig.text(.80, .578, f"{qc[2]:.2f} +{qc[3] - qc[2]:.2f} / −{qc[2] - qc[1]:.2f}", fontsize=7.2, fontweight="bold")
-        fig.text(.66, .545, "The fit uses the density of the star as a prior on the orbit.", fontsize=6.8, color=MUTED)
+            fig.text(.60, .596, "combined (all orbits)", fontsize=7.2)
+            fig.text(.75, .596, f"{qc[2]:.2f} +{qc[3] - qc[2]:.2f} / −{qc[2] - qc[1]:.2f}", fontsize=7.2, fontweight="bold")
+        fig.text(.60, .568, "The fit uses the density of the star as a prior on the orbit.", fontsize=6.5, color=MUTED)
+    fig.text(.60, .52, "DERIVED PARAMETERS", fontsize=6.5, color=MUTED, fontweight="bold")
+    fig.add_artist(Line2D([.60, .97], [.515, .515], color=GRID, lw=.6))
+    derived_rows = [("Planet radius [R⊕]", "R_companion_(R_earth)", "{:.2f}"), ("Depth [ppt]", "depth_tr_undil_lc", "{:.3f}"),
+                    ("Impact parameter b", "b_tra", "{:.2f}"), ("a / R★", "a/R_star", "{:.2f}"), ("Inclination [°]", "i", "{:.2f}"),
+                    ("Total duration [h]", "T_tra_tot", "{:.3f}"), ("Full duration [h]", "T_tra_full", "{:.3f}"),
+                    ("Semi-major axis [AU]", "a_(AU)", "{:.4f}"), ("Planet radius [R_jup]", "R_companion_(R_jup)", "{:.3f}")]
+    shown = 0
+    for label, key, fmt in derived_rows:
+        samples = results.derived_of(planet, key)
+        if samples is None:
+            continue
+        q = percentiles(samples)
+        y = .488 - shown * .027
+        fig.text(.60, y, label, fontsize=7.2)
+        fig.text(.76, y, fmt.format(q[2]) + f"  +{fmt.format(q[3] - q[2])} / −{fmt.format(q[2] - q[1])}", fontsize=7.2, fontweight="bold")
+        shown += 1
     return fig
 
 
@@ -585,26 +646,26 @@ def page_convergence(results: FitResults, page):
     _head(fig, results, "Did the sampling converge and is the noise understood?",
           "Nested sampling diagnostics · residuals of the posterior median model, without the Gaussian process baseline", page)
     w = results.weights
-    a = _axes(fig, .06, .60, .20, .27)
+    a = _axes(fig, .06, .55, .20, .33)
     a.plot(np.arange(len(results.logz_curve)), results.logz_curve, color=BLUE, lw=1.2)
     a.set_xlabel("iteration")
     a.set_ylabel("ln Z")
     a.grid(color=GRID, lw=.4)
     a.set_ylim(results.logz - 60, results.logz + 5)
     _title(a, "Evidence", f"{results.logz:.2f} ± {results.logzerr:.2f}")
-    a = _axes(fig, .335, .60, .20, .27)
+    a = _axes(fig, .335, .55, .20, .33)
     a.scatter(-results.logvol, results.logl - results.logl.max(), c=w / w.max(), s=2, cmap="viridis_r", lw=0, rasterized=True)
     a.set_xlabel("−ln X (prior volume)")
     a.set_ylabel("ln L − max")
     a.set_ylim(-80, 3)
     a.grid(color=GRID, lw=.4)
     _title(a, "Likelihood vs volume", "colour: posterior weight")
-    a = _axes(fig, .61, .60, .16, .27)
+    a = _axes(fig, .61, .55, .16, .33)
     a.hist(w * 1e3, bins=40, color=BLUE)
     a.set_xlabel("weight × 1000")
     a.set_ylabel("samples")
     _title(a, "Weights", f"ESS {results.ess:.0f}")
-    a = _axes(fig, .82, .60, .15, .27)
+    a = _axes(fig, .82, .55, .15, .33)
     a.axis("off")
     checks = convergence_checks(results)
     facts = [("Effective samples", f"{results.ess:.0f}", checks[0].status), ("Iterations", f"{results.niter}", "ok"),
@@ -617,14 +678,14 @@ def page_convergence(results: FitResults, page):
     _title(a, "Checks")
     residuals = results.residuals[np.isfinite(results.residuals)]
     sigma = np.std(residuals)
-    a = _axes(fig, .06, .17, .20, .27)
+    a = _axes(fig, .06, .08, .20, .33)
     a.hist(residuals / sigma, bins=np.linspace(-5, 5, 61), density=True, color=BLUE, alpha=.8)
     x = np.linspace(-5, 5, 200)
     a.plot(x, np.exp(-x ** 2 / 2) / np.sqrt(2 * np.pi), color=BAD, lw=1)
     a.set_xlabel("residual / σ")
     a.grid(color=GRID, lw=.4)
     _title(a, "Residual distribution", f"σ = {sigma * 1e6:.0f} ppm")
-    a = _axes(fig, .335, .17, .20, .27)
+    a = _axes(fig, .335, .08, .20, .33)
     sizes = np.unique(np.logspace(0, 2.6, 18).astype(int))
     rms = []
     for k in sizes:
@@ -638,7 +699,7 @@ def page_convergence(results: FitResults, page):
     a.legend(frameon=False, fontsize=6.5)
     beta = red_noise_beta(residuals)
     _title(a, "Red noise", "β = n/a" if not np.isfinite(beta) else f"β ≈ {beta:.2f}")
-    a = _axes(fig, .61, .17, .16, .27)
+    a = _axes(fig, .61, .08, .16, .33)
     lags = np.arange(1, 200)
     centred = residuals - residuals.mean()
     acf = np.array([np.mean(centred[:-lag] * centred[lag:]) for lag in lags]) / np.var(centred)
@@ -648,7 +709,7 @@ def page_convergence(results: FitResults, page):
     a.set_ylabel("autocorrelation")
     a.grid(color=GRID, lw=.4)
     _title(a, "Residual autocorrelation")
-    a = _axes(fig, .82, .17, .15, .27)
+    a = _axes(fig, .82, .08, .15, .33)
     a.axis("off")
     a.text(0, .95, "NOISE MODEL", fontsize=6.5, color=MUTED, fontweight="bold")
     samples = results.samples

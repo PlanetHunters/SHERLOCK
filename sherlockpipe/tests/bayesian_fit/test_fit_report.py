@@ -159,6 +159,15 @@ class TransitsTest(unittest.TestCase):
             setattr(r, key, getattr(r, key)[keep])
         self.assertLess(len(flr.transit_times(r, "SOI_1")[0]), full)
 
+    def test_gaps_in_the_residuals_do_not_turn_the_chi2_into_nan(self):
+        r = make_fit_results()
+        r.residuals = r.residuals.copy()
+        r.residuals[::50] = np.nan
+        times, t14, _ = flr.transit_times(r, "SOI_1")
+        chi2 = flr.transit_chi2(r, "SOI_1", times, t14)
+        self.assertTrue(np.isfinite(chi2).all())
+        self.assertTrue(0.5 < np.median(chi2) < 1.6)
+
     def test_chi2_is_close_to_one_for_white_residuals(self):
         r = make_fit_results()
         times, t14, _ = flr.transit_times(r, "SOI_1")
