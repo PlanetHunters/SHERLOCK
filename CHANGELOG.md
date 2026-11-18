@@ -236,6 +236,8 @@
 
 ### Fixed
 
+- The target info report was not written in a real search: Sherlock passes the window lengths as a numpy array and
+  `self.window_lengths or ...` raised `ValueError` (the guard kept the search alive, but the PDF was missing).
 - Observation plan: the observation window could start after it ended (Calar Alto, 4 December 2026: 17:53 to 06:06)
   because the evening twilight nearest to the mid-time can be the next evening; the night is now the one that
   holds the first observable sample. `plan_event` returned None when it failed, which stopped the whole plan with

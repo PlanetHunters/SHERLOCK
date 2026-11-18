@@ -258,6 +258,16 @@ class TestReportDocument(unittest.TestCase):
         self.assertIsNotNone(path)
         self.assertGreater(os.path.getsize(path), 1000)
 
+    def test_window_lengths_given_as_a_numpy_array_like_sherlock_does(self):
+        _synthetic_execution(self.directory)
+        report = TargetInfoReport(self.directory, "TIC1_all", window_lengths=np.array([0.0, 0.19, 0.56]))
+        self.assertIsNotNone(report.create())
+
+    def test_an_empty_numpy_array_falls_back_to_the_window_lengths_of_the_runs(self):
+        _synthetic_execution(self.directory)
+        report = TargetInfoReport(self.directory, "TIC1_all", window_lengths=np.array([]))
+        self.assertIsNotNone(report.create())
+
     def test_report_is_not_written_without_the_light_curves(self):
         self.assertIsNone(TargetInfoReport(self.directory, "TIC1_all").create())
 

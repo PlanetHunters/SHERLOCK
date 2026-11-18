@@ -540,7 +540,9 @@ class TargetInfoReport:
         self.pre = self._read("lc_predetrends.csv")
         self.star = self._read("params_star.csv")
         self.parsed_log = self._log()
-        windows = self.window_lengths or window_lengths_from_runs(self.object_dir, self.object_id)
+        # Sherlock passes the window lengths as a numpy array, whose truth value is ambiguous
+        windows = self.window_lengths if self.window_lengths is not None and len(self.window_lengths) > 0 \
+            else window_lengths_from_runs(self.object_dir, self.object_id)
         if self.sherlock_target is not None:
             self.config = config_from_sherlock_target(self.sherlock_target, windows)
         else:
