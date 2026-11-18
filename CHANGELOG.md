@@ -265,9 +265,12 @@
 
 - The target info report was not written in a real search: Sherlock passes the window lengths as a numpy array and
   `self.window_lengths or ...` raised `ValueError` (the guard kept the search alive, but the PDF was missing).
-- The odd and even fits kept the priors of `rsuma` ((R*+Rp)/a) and `cosi` of the main fit while fitting twice the
-  period, which scales both by 2^(-2/3). Both fits ended against the edge of their priors and could not be compared.
-  The priors are now scaled (`Fitter.odd_even_params_text`).
+- The odd and even fits doubled the period of each candidate while keeping the stellar density prior of the star, which
+  made `a/R*` grow by 2^(2/3) and the transit duration 26 % longer than the data allows (1.56 h against 1.26 h in the
+  main fit of TIC 224298134), and their priors on `rsuma` and `cosi` of the main fit left both fits against the edge of
+  them. They now fit the same period and priors as the main fit, on the light curve without the points around the
+  transits of the other parity (`Fitter.odd_even_curve`): the odd fit keeps the 1st, 3rd, 5th... transit and the even
+  fit the 2nd, 4th....
 - Stability: the longitude of the ascending node used the values of the argument of periastron (a fixed `OM: 0` was
   simulated with the angles of `O`), `--free_params omega` also swept it, scenario indexes repeated, a free angle
   returned a different number of values than the bins requested (or failed for more than 360 bins), the candidates

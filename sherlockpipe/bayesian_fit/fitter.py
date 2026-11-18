@@ -16,8 +16,6 @@ from lcbuilder.helper import LcbuilderHelper
 from sherlockpipe.loading.tool_with_candidate import ToolWithCandidate
 
 
-# the same star, twice the period (odd and even fits): a/R* grows by 2^(2/3)
-ODD_EVEN_ORBIT_SCALE = 0.5 ** (2 / 3)
 
 resources_dir = path.join(path.dirname(__file__))
 resources_dir = str(Path(resources_dir).parent.absolute())
@@ -98,6 +96,8 @@ class Fitter(ToolWithCandidate):
         self.odd_even_dir = odd_even_dir
         self.odd_even_tolerance = odd_even_tolerance
         self._noise_distribution_params = None
+
+    ODD_EVEN_VARIANTS = ("odd", "even")
 
     def mask_non_fit_candidates(self, time, flux, flux_err, candidate_df, fit_candidate_df):
         """
@@ -225,19 +225,23 @@ class Fitter(ToolWithCandidate):
         distribution_params = self._noise_distribution_params \
             if self._noise_distribution_params is not None else DistributionParams()
         distribution = 'normal' if self._noise_distribution_params is not None else 'uniform'
-        for variant_name, epoch_shift in [("odd", 0), ("even", 1.0)]:
+        main_lc = pd.read_csv(self.odd_even_dir + "/main/lc.csv")
+        fit_width = Fitter.select_fit_width(fit_candidate_df)
+        for variant_name in self.ODD_EVEN_VARIANTS:
             variant_dir = self.odd_even_dir + "/" + variant_name
             os.mkdir(variant_dir)
-            shutil.copyfile(self.odd_even_dir + "/main/lc.csv", variant_dir + "/lc.csv")
+            variant_lc = Fitter.odd_even_curve(main_lc, fit_candidate_df, variant_name, fit_width)
+            logging.info("%s transits fit: %.0f of %.0f points are kept", variant_name, len(variant_lc), len(main_lc))
+            variant_lc.to_csv(variant_dir + "/lc.csv", index=False)
             sherlock_star_file = self.object_dir + "/params_star.csv"
             if os.path.exists(sherlock_star_file) and os.path.isfile(sherlock_star_file):
                 shutil.copyfile(sherlock_star_file, variant_dir + "/params_star.csv")
             self.overwrite_settings(variant_dir + "/settings.csv", cpus, fit_candidate_df,
                                     self.odd_even_tolerance, "multi")
+            # the same parameters and priors as the main fit: only the data changes
             params_text = self.fill_candidates_params(fit_candidate_df, star_df, fit_orbit, self.detrend,
                                                        distribution=distribution,
                                                        distribution_params=distribution_params)
-            params_text = Fitter.odd_even_params_text(params_text, fit_candidate_df, variant_name)
             with open(variant_dir + "/params.csv", 'w') as f:
                 f.write(params_text)
                 f.truncate()
@@ -263,61 +267,28 @@ class Fitter(ToolWithCandidate):
                         logging.exception(str(e))
 
     @staticmethod
-    def odd_even_params_text(params_text, fit_candidate_df, variant_name):
+    def odd_even_curve(lc, fit_candidate_df, variant_name, fit_width):
         """
-        Turns the parameters of the main fit into the ones of the odd or the even transits fit: each candidate is
-        fitted with twice its period, the epoch of the even fit is shifted one period and the priors of the epoch and
-        the period are centered on the new values.
+        The light curve of the fit of the odd or the even transits: the points around the transits of the other parity
+        are removed, so the fit keeps the period, the priors and the stellar density of the main one. The odd fit keeps
+        the first, the third, the fifth... transit of each candidate (counted from its epoch) and the even fit the
+        second, the fourth...
 
-        :param params_text: the allesfitter parameters of the main fit
-        :param fit_candidate_df: the fitted candidates
+        :param lc: the light curve of the main fit, with a ``time`` column
+        :param fit_candidate_df: the fitted candidates, with ``period`` and ``t0``
         :param variant_name: 'odd' or 'even'
-        :return: the allesfitter parameters of the variant
+        :param fit_width: the window (days) that the fit uses around every transit
+        :return: the light curve without the points around the transits of the other parity
         """
-        epoch_shift = 0 if variant_name == "odd" else 1.0
+        time = lc["time"].to_numpy()
+        excluded = 1 if variant_name == "odd" else 0
+        keep = np.ones(len(lc), dtype=bool)
         for _, candidate_row in fit_candidate_df.iterrows():
-            orig_period = candidate_row["period"]
-            per_err = candidate_row["per_err"]
-            orig_t0 = candidate_row["t0"]
-            name = str(candidate_row["name"])
-            new_period = orig_period * 2
-            new_t0 = orig_t0 + orig_period * epoch_shift
-            params_text = re.sub(
-                r'\b' + re.escape(name) + r'_epoch,([^\n,]+),([^\n,]+),uniform ([^\n ]+) ([^\n ]+),([^\n,]+),([^\n,]+)',
-                name + '_epoch,' + str(new_t0) + r',\2,uniform '
-                + str(new_t0 - 0.02) + ' ' + str(new_t0 + 0.02) + r',\5,\6',
-                params_text
-            )
-            params_text = re.sub(
-                r'\b' + re.escape(name) + r'_period,([^\n,]+),([^\n,]+),uniform ([^\n ]+) ([^\n ]+),([^\n,]+),([^\n,]+)',
-                name + '_period,' + str(new_period) + r',\2,uniform '
-                + str(new_period - 2 * per_err) + ' ' + str(new_period + 2 * per_err) + r',\5,\6',
-                params_text
-            )
-            # The same star with twice the period has a semi-major axis 2^(2/3) times larger: (R*+Rp)/a and cos i
-            # (b R*/a) fall by that factor. Their priors have to follow, or the fit piles up against their edges.
-            for parameter in ("rsuma", "cosi"):
-                params_text = Fitter.scale_prior(params_text, name + "_" + parameter, ODD_EVEN_ORBIT_SCALE)
-            logging.info("%s fit of %s: P=%.4fd, T0=%.4f", variant_name, name, new_period, new_t0)
-        return params_text
-
-    @staticmethod
-    def scale_prior(params_text, parameter, factor):
-        """
-        Multiplies the value and the bounds of the uniform prior of one parameter of an allesfitter params text.
-
-        :param params_text: the allesfitter parameters
-        :param parameter: the full name of the parameter, e.g. SOI_1_rsuma
-        :param factor: the factor to multiply the value and the bounds by
-        :return: the allesfitter parameters with the scaled prior
-        """
-        pattern = r'(?m)^' + re.escape(parameter) + r',([^\n,]+),([^\n,]+),uniform ([^\n ,]+) ([^\n ,]+),'
-
-        def scaled(match):
-            value, fit, low, high = match.group(1), match.group(2), match.group(3), match.group(4)
-            return f"{parameter},{float(value) * factor!r},{fit},uniform {float(low) * factor!r} {float(high) * factor!r},"
-
-        return re.sub(pattern, scaled, params_text)
+            period, t0 = float(candidate_row["period"]), float(candidate_row["t0"])
+            number = np.round((time - t0) / period)
+            near = np.abs(time - (t0 + number * period)) < fit_width
+            keep &= ~(near & (number % 2 == excluded))
+        return lc[keep].reset_index(drop=True)
 
     def overwrite_settings(self, settings_file, cpus, candidate_df, tolerance, boundaries="single",
                            secondary_eclipse="True"):

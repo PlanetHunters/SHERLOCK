@@ -60,6 +60,7 @@ class VariantFit:
     kind: str
     table: pd.DataFrame
     priors: Dict[str, Prior]
+    derived: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -152,7 +153,9 @@ def read_variants(fit_dir):
         folder = Path(fit_dir).parent / kind
         table_file = folder / "results" / "ns_table.csv"
         if table_file.exists():
-            variants[kind] = VariantFit(kind, pd.read_csv(table_file), parse_priors(str(folder / "params.csv")))
+            derived_file = folder / "results" / "ns_derived_table.csv"
+            derived = pd.read_csv(derived_file) if derived_file.exists() else None
+            variants[kind] = VariantFit(kind, pd.read_csv(table_file), parse_priors(str(folder / "params.csv")), derived)
     return variants
 
 

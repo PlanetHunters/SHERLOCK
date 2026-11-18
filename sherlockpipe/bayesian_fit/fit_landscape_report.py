@@ -31,8 +31,7 @@ EDGE_FRACTION = 0.05            # the outer part of a uniform prior
 EDGE_MASS = 0.15                # a posterior with this share of its samples in that part piles up against the edge
 # limits of a prior that are physical, so a posterior against them says nothing about the prior
 NATURAL_EDGES = {"sbratio_lc": ("low", "high"), "cosi": ("low",)}
-# the same star with twice the period (odd and even fits): (R*+Rp)/a and cos i are 2^(-2/3) times those of the main fit
-VARIANT_SCALE = {"rsuma": 2 ** (2 / 3), "cosi": 2 ** (2 / 3)}
+
 ESS_OK, ESS_WARN = 1000, 300    # effective samples of the nested sampling
 RED_NOISE_WARN = 1.5            # beta factor of the residuals
 DENSITY_TENSION_WARN = 3.0      # sigmas between the density of the star and the one of the orbit
@@ -173,6 +172,72 @@ def variant_edge(variant, planet, parameter):
         (value[0] > high - 0.03 * (high - low) and "high" not in natural)
 
 
+
+@dataclass
+class ComparisonRow:
+    """One parameter of the main fit against the odd and the even fits."""
+    label: str
+    fmt: str
+    main: Optional[tuple]
+    odd: Optional[tuple]
+    even: Optional[tuple]
+    sigma: Optional[float]
+
+    @property
+    def status(self):
+        """ok below 2 sigma between the odd and the even fit, warn up to 3 and fail above; info when it cannot be told."""
+        if self.sigma is None:
+            return "info"
+        return "ok" if self.sigma < 2 else ("warn" if self.sigma < ODD_EVEN_WARN else "fail")
+
+
+# label, key of the derived samples of the main fit, how to find the row in a derived table, format
+COMPARISON = [
+    ("Rp / R★", None, None, "{:.4f}"),
+    ("Depth [ppt]", "depth_tr_undil_lc", lambda p, n: p.startswith(f"Transit depth (undil.) {n};"), "{:.3f}"),
+    ("Rp [R⊕]", "R_companion_(R_earth)", lambda p, n: p.startswith(f"Companion radius {n};") and "R_{\\oplus}" in p, "{:.2f}"),
+    ("Impact parameter b", "b_tra", lambda p, n: p.startswith(f"Impact parameter {n};") and "occultation" not in p, "{:.2f}"),
+    ("Total duration [h]", "T_tra_tot", lambda p, n: p.startswith(f"Total transit duration {n};"), "{:.3f}"),
+    ("a / R★", "a/R_star", lambda p, n: p.startswith(f"Semi-major axis {n} over host radius"), "{:.2f}"),
+    ("Stellar density [g/cm³]", "host_density", lambda p, n: p.startswith(f"Host density from orbit {n};"), "{:.2f}"),
+]
+
+
+def _derived_value(derived, finder, planet):
+    """(value, symmetric error) of a row of a derived table found by ``finder``, or None."""
+    if derived is None or finder is None or "#property" not in derived:
+        return None
+    for _, row in derived.iterrows():
+        if finder(str(row["#property"]), planet):
+            return float(row["value"]), _symmetric_error(row)
+    return None
+
+
+def comparison_rows(results: FitResults, planet) -> List[ComparisonRow]:
+    """The main fit, the odd fit and the even fit side by side, and how far apart the odd and the even ones are."""
+    rows = []
+    odd, even = results.variants.get("odd"), results.variants.get("even")
+    for label, sample_key, finder, fmt in COMPARISON:
+        if sample_key is None:   # the radius ratio is a fitted parameter
+            samples = results.samples.get(f"{planet}_rr")
+            main = None if samples is None else _median_error(samples)
+            values = [None if v is None else variant_value(v, planet, "rr") for v in (odd, even)]
+        else:
+            samples = results.derived_of(planet, sample_key)
+            main = None if samples is None else _median_error(samples)
+            values = [None if v is None else _derived_value(v.derived, finder, planet) for v in (odd, even)]
+        if main is None and all(v is None for v in values):
+            continue
+        a, b = values
+        sigma = None if a is None or b is None or np.hypot(a[1], b[1]) <= 0 else abs(a[0] - b[0]) / np.hypot(a[1], b[1])
+        rows.append(ComparisonRow(label, fmt, main, a, b, sigma))
+    return rows
+
+
+def _median_error(samples):
+    q = percentiles(samples)
+    return float(q[2]), float((q[3] - q[1]) / 2)
+
 def odd_even_check(results: FitResults, planet) -> Check:
     if "odd" not in results.variants or "even" not in results.variants:
         return Check("info", "Odd / even", "the odd and even fits were not run")
@@ -180,11 +245,12 @@ def odd_even_check(results: FitResults, planet) -> Check:
     pegged = [p for p in ("rr", "rsuma", "cosi") for v in (odd, even) if variant_edge(v, planet, p)]
     if pegged:
         return Check("warn", "Odd / even", "cannot be judged: their posteriors sit at the edge of the priors")
-    a, b = variant_value(odd, planet, "rr"), variant_value(even, planet, "rr")
-    if a is None or b is None:
-        return Check("info", "Odd / even", "no radius ratio in the odd and even fits")
-    sigma = abs(a[0] - b[0]) / np.hypot(a[1], b[1])
-    return Check("ok" if sigma < ODD_EVEN_WARN else "warn", "Odd / even", f"Rp/R★ differs by {sigma:.1f} σ")
+    rows = {r.label: r for r in comparison_rows(results, planet)}
+    for label, name in (("Depth [ppt]", "depth"), ("Rp / R★", "Rp/R★")):
+        row = rows.get(label)
+        if row is not None and row.sigma is not None:
+            return Check("ok" if row.sigma < ODD_EVEN_WARN else "warn", "Odd / even", f"{name} differs by {row.sigma:.1f} σ")
+    return Check("info", "Odd / even", "no radius ratio or depth in the odd and even fits")
 
 
 def planet_depth_samples(results, planet):
@@ -445,83 +511,105 @@ def page_summary(results: FitResults, planet, page):
     return fig
 
 
+def _comparison_table(fig, results, planet, x, y_top, width):
+    """The main, odd and even fits side by side, with the difference between the odd and the even in sigmas."""
+    rows = comparison_rows(results, planet)
+    odd_even = "odd" in results.variants and "even" in results.variants
+    cols = [x, x + .27 * width, x + .47 * width, x + .67 * width, x + .86 * width]
+    fig.text(x, y_top + .042, "ODD AND EVEN FITS AGAINST THE MAIN FIT", fontsize=6.5, color=MUTED, fontweight="bold")
+    fig.add_artist(Line2D([x, x + width], [y_top + .036, y_top + .036], color=GRID, lw=.6))
+    for label, cx, colour in (("parameter", cols[0], MUTED), ("all", cols[1] + .06 * width, INK), ("odd", cols[2] + .06 * width, BAD),
+                              ("even", cols[3] + .06 * width, BLUE), ("odd − even", cols[4], MUTED)):
+        fig.text(cx, y_top + .012, label, fontsize=6.4, color=colour, fontweight="bold")
+    if not rows:
+        fig.text(x, y_top - .03, "no parameters to compare", fontsize=7.2, color=MUTED)
+        return
+    for i, row in enumerate(rows):
+        y = y_top - .02 - i * .036
+        fig.text(cols[0], y, row.label, fontsize=7.2)
+        for entry, cx, colour in ((row.main, cols[1], INK), (row.odd, cols[2], BAD), (row.even, cols[3], BLUE)):
+            if entry is None:
+                fig.text(cx + .06 * width, y, "–", fontsize=7.2, color=MUTED)
+            else:
+                fig.text(cx, y, row.fmt.format(entry[0]) + " ± " + row.fmt.format(entry[1]), fontsize=7.0, color=colour, fontweight="bold")
+        if row.sigma is not None:
+            fig.text(cols[4], y, f"{row.sigma:.1f} σ", fontsize=7.2, fontweight="bold")
+            fig.patches.append(Circle((cols[4] + .085 * width, y + .006), .0052, color=STATUS_COLOURS[row.status], transform=fig.transFigure))
+    if not odd_even:
+        fig.text(x, y_top - .02 - len(rows) * .036 - .01, "The odd and even fits were not run.", fontsize=7, color=MUTED)
+
+
 def _variant_panels(fig, results, planet):
-    """Odd and even against the main fit, for the radius ratio, the depth and the impact parameter."""
-    odd, even = results.variants.get("odd"), results.variants.get("even")
-    specs = [("Rp / R★", "rr", None), ("(R★+Rp) / a", "rsuma", None), ("cos i", "cosi", None)]
-    for i, (label, parameter, _) in enumerate(specs):
-        ax = _axes(fig, .06 + i * .175, .60, .135, .27)
-        main = results.table.set_index("#name")
-        name = f"{planet}_{parameter}"
-        if name not in main.index or odd is None or even is None:
-            _unavailable(ax, "not run" if odd is None else "not fitted")
+    """Odd and even against the main fit for the depth, the radius ratio and the impact parameter."""
+    rows = {r.label: r for r in comparison_rows(results, planet)}
+    panels = [("Depth [ppt]", "Depth [ppt]"), ("Rp / R★", "Rp / R★"), ("Impact parameter b", "Impact parameter b")]
+    for i, (key, title) in enumerate(panels):
+        ax = _axes(fig, .56 + i * .145, .60, .115, .26)
+        row = rows.get(key)
+        if row is None or row.odd is None or row.even is None:
+            _unavailable(ax, "not run" if "odd" not in results.variants else "not fitted")
             continue
-        entries = [("all", float(main.loc[name, "median"]), _symmetric_error(main.loc[name]), INK, False)]
-        scale = VARIANT_SCALE.get(parameter, 1.0)
-        for kind, variant, colour in (("odd", odd, BAD), ("even", even, BLUE)):
-            value = variant_value(variant, planet, parameter)
-            if value is not None:
-                entries.append((kind, value[0] * scale, value[1] * scale, colour, variant_edge(variant, planet, parameter)))
-        for x, (kind, median, error, colour, edge) in enumerate(entries):
-            ax.errorbar(x, median, error, fmt="o", color=colour, capsize=3, ms=4)
-            if edge:
-                ax.text(x, median, " edge", fontsize=6, color=WARN, va="bottom")
-        ax.set_xticks(range(len(entries)))
-        ax.set_xticklabels([e[0] for e in entries])
-        ax.set_xlim(-.5, len(entries) - .5)
+        for x, (entry, colour, name) in enumerate(((row.main, INK, "all"), (row.odd, BAD, "odd"), (row.even, BLUE, "even"))):
+            if entry is not None:
+                ax.errorbar(x, entry[0], entry[1], fmt="o", color=colour, capsize=3, ms=4)
+        ax.set_xticks(range(3))
+        ax.set_xticklabels(["all", "odd", "even"])
+        ax.set_xlim(-.5, 2.5)
         ax.grid(axis="y", color=GRID, lw=.4)
-        _title(ax, label)
+        _title(ax, title)
+        if row.sigma is not None:
+            ax.set_xlabel(f"odd − even: {row.sigma:.1f} σ", fontsize=6.3, color=MUTED, labelpad=2)
 
 
 def page_consistency(results: FitResults, planet, page):
     fig = _new_figure()
     _head(fig, results, f"Consistency · {planet}", "Odd against even fits, and every transit against the posterior model", page)
+    _comparison_table(fig, results, planet, .03, .83, .48)
     _variant_panels(fig, results, planet)
     check = odd_even_check(results, planet)
-    box = _axes(fig, .03, .53, .52, .04)
-    box.axis("off")
-    box.text(0, .75, f"ODD / EVEN: {check.detail}", fontsize=7.8, fontweight="bold", color=STATUS_COLOURS[check.status], va="center")
-    if "odd" in results.variants:
-        box.text(0, .0, "Each fit uses twice the period: the (R★+Rp)/a and cos i priors are scaled by 2^(−2/3), and the odd and even values of those two "
-                        "are shown times 2^(2/3).", fontsize=6.4, color=MUTED, va="center")
     times, t14, total = transit_times(results, planet)
     chi2 = transit_chi2(results, planet, times, t14)
     bad = int(np.nansum(chi2 > CHI2_TRANSIT_WARN))
+    # the verdict of the odd / even test
+    box = _axes(fig, .03, .50, .94, .05)
+    box.axis("off")
+    box.text(0, .78, f"ODD / EVEN: {check.detail}", fontsize=8.2, fontweight="bold", color=STATUS_COLOURS[check.status], va="center")
+    if "odd" in results.variants:
+        box.text(0, .18, "The odd fit keeps the 1st, 3rd, 5th... transit and the even fit the 2nd, 4th...; both use the period and the priors of the main fit. "
+                         "Dots: green below 2 σ between odd and even, orange up to 3 σ, red above.", fontsize=6.4, color=MUTED, va="center")
     # chi square of every transit
-    a = _axes(fig, .60, .60, .20, .27)
+    a = _axes(fig, .06, .335, .30, .13)
     if len(times):
-        colours = [BAD if c > CHI2_TRANSIT_WARN else BLUE for c in chi2]
-        a.scatter(times, chi2, c=colours, s=9, zorder=3)
+        a.scatter(times, chi2, c=[BAD if c > CHI2_TRANSIT_WARN else BLUE for c in chi2], s=9, zorder=3)
         a.axhline(1.0, color=INK, lw=.6, ls=":")
         a.axhline(CHI2_TRANSIT_WARN, color=WARN, lw=.6, ls="--")
-        a.set_xlabel("time of the transit (BTJD)")
-        a.set_ylabel("χ² per point")
+        a.set_xlabel("time of the transit (BTJD)", fontsize=6.5)
+        a.set_ylabel("χ² per point", fontsize=6.5)
         a.grid(color=GRID, lw=.4)
     else:
         _unavailable(a, "no transit has data")
     _title(a, "Fit quality per transit", f"{bad} of {len(times)} > {CHI2_TRANSIT_WARN}")
-    a = _axes(fig, .85, .60, .12, .27)
+    a = _axes(fig, .42, .335, .13, .13)
     a.axis("off")
-    a.text(0, .95, "TRANSITS", fontsize=6.5, color=MUTED, fontweight="bold")
-    for k, (label, value) in enumerate([("with data", f"{len(times)}"), ("listed", f"{total}"), ("duration", f"{t14 * 24:.2f} h"),
+    for k, (label, value) in enumerate([("transits with data", f"{len(times)}"), ("listed", f"{total}"), ("duration", f"{t14 * 24:.2f} h"),
                                         ("above χ² %.1f" % CHI2_TRANSIT_WARN, f"{bad}")]):
-        a.text(0, .78 - k * .17, label, fontsize=7.0, color=MUTED)
-        a.text(1, .78 - k * .17, value, fontsize=7.6, fontweight="bold", ha="right")
-    # every transit, in a grid that fills the page
+        a.text(0, .9 - k * .25, label, fontsize=7.0, color=MUTED)
+        a.text(1, .9 - k * .25, value, fontsize=7.6, fontweight="bold", ha="right")
+    # every transit, in a grid that fills the rest of the page
     shown = times[:MAX_TRANSITS]
     n = max(len(shown), 1)
-    cols = 12 if n > 24 else (8 if n > 8 else 4)
-    rows = int(np.ceil(n / cols))
-    fig.text(.03, .49, f"EVERY TRANSIT WITH DATA · {len(times)} of {total} · the posterior model in red, χ² per point in the corner (red above {CHI2_TRANSIT_WARN})",
+    cols = min(16, max(4, int(np.ceil(n / 2)))) if n > 8 else max(4, n)
+    rows_n = int(np.ceil(n / cols))
+    fig.text(.03, .275, f"EVERY TRANSIT WITH DATA · {len(times)} of {total} · the posterior model in red, χ² per point in the corner (red above {CHI2_TRANSIT_WARN})",
              fontsize=6.5, color=MUTED, fontweight="bold")
-    fig.add_artist(Line2D([.03, .97], [.484, .484], color=GRID, lw=.6))
-    top, bottom = .465, .06
-    cell_h = min((top - bottom) / rows, .165)
+    fig.add_artist(Line2D([.03, .97], [.269, .269], color=GRID, lw=.6))
+    top, bottom = .255, .045
+    cell_h = min((top - bottom) / rows_n, .13)
     cell_w = .94 / cols
     own = _planet_model_curve(results, planet, results.time)
     flux = results.detrended - (results.model - own)
     for i, x in enumerate(shown):
-        ax = _axes(fig, .03 + (i % cols) * cell_w + .004, top - (i // cols + 1) * cell_h + .012, cell_w - .008, cell_h - .026)
+        ax = _axes(fig, .03 + (i % cols) * cell_w + .003, top - (i // cols + 1) * cell_h + .012, cell_w - .006, cell_h - .024)
         s_ = np.abs(results.time - x) < 2.5 * t14
         hours = (results.time[s_] - x) * 24
         ax.plot(hours, flux[s_], ".", ms=.7, color=MUTED, alpha=.4)
@@ -534,13 +622,13 @@ def page_consistency(results: FitResults, planet, page):
         ax.set_xticks([])
         ax.set_yticks([])
         c = chi2[i]
-        ax.set_title(f"#{i}", loc="left", fontsize=5.5, pad=1, color=MUTED)
+        ax.set_title(f"#{i}", loc="left", fontsize=5.2, pad=1, color=MUTED)
         if np.isfinite(c):
-            ax.text(.97, .05, f"{c:.1f}", transform=ax.transAxes, fontsize=5.6, ha="right", color=BAD if c > CHI2_TRANSIT_WARN else MUTED)
+            ax.text(.97, .05, f"{c:.1f}", transform=ax.transAxes, fontsize=5.4, ha="right", color=BAD if c > CHI2_TRANSIT_WARN else MUTED)
     if len(times) > MAX_TRANSITS:
-        fig.text(.97, .025, f"First {MAX_TRANSITS} of {len(times)} transits shown", fontsize=6.5, color=MUTED, ha="right")
-    fig.text(.03, .025, "The allesfitter files (results/ns_corner.pdf, ns_trace.pdf, ns_fit_*.pdf, the odd/ and even/ folders and the tables) stay as they are.",
-             fontsize=6.3, color=MUTED)
+        fig.text(.97, .015, f"First {MAX_TRANSITS} of {len(times)} transits shown", fontsize=6.3, color=MUTED, ha="right")
+    fig.text(.03, .015, "The allesfitter files (results/ns_corner.pdf, ns_trace.pdf, ns_fit_*.pdf, the odd/ and even/ folders and the tables) stay as they are.",
+             fontsize=6.2, color=MUTED)
     return fig
 
 
