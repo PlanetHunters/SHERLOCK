@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 from lcbuilder.star.HabitabilityCalculator import HabitabilityCalculator
 
-from sherlockpipe.bayesian_fit.fit_report import FitReport
 from sherlockpipe.bayesian_fit.fitter import Fitter
 from sherlockpipe.loading import common
 
@@ -19,7 +18,8 @@ def run_fit(args):
 
     Reads search results from the object directory, configures the allesfitter fit,
     runs it via :class:`~sherlockpipe.bayesian_fit.fitter.Fitter`, and generates
-    a PDF fit report via :class:`~sherlockpipe.bayesian_fit.fit_report.FitReport`.
+    a landscape PDF fit report via :func:`~sherlockpipe.bayesian_fit.fit_landscape_report.write_fit_report_guarded`
+    (the allesfitter files stay in the fit directory).
 
     Parameters
     ----------
@@ -126,12 +126,16 @@ def run_fit(args):
                     odd_even_tolerance=args.odd_even_tolerance if args.odd_even_tolerance is not None
                     else args.tolerance)
     fitter.fit(selected_candidates_df, only_fit_candidate_df, star_df, cpus, fitting_dir, args.tolerance, args.fit_orbit)
-    FitReport(fitting_dir,
-              star_df['obj_id'].iloc[0],
-              star_df['ra'].iloc[0],
-              star_df['dec'].iloc[0],
-              star_df['v'].iloc[0],
-              star_df['j'].iloc[0],
-              star_df['h'].iloc[0],
-              star_df['k'].iloc[0],
-              selected_candidates_df).create_report()
+    save_fit_report(fitting_dir, star_df, selected_candidates_df)
+
+
+def save_fit_report(fitting_dir, star_df, candidates_df):
+    """
+    Writes ``<object id>_fit.pdf`` in the fit directory. It is a convenience output, so whatever goes wrong (even the
+    import of the report module) is logged and never breaks the fit, which has already written its results.
+    """
+    try:
+        from sherlockpipe.bayesian_fit.fit_landscape_report import write_fit_report_guarded
+        write_fit_report_guarded(fitting_dir, star_df['obj_id'].iloc[0], star_df.iloc[0], candidates_df)
+    except (Exception, SystemExit):
+        logging.exception("The fit report could not be written")

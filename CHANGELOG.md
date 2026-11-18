@@ -4,6 +4,14 @@
 
 ### Changed
 
+- The Bayesian fit report (`<object id>_fit.pdf`) is a landscape document instead of two portrait pages of tables and a
+  folded curve with overlapping axes. For every fitted candidate: its summary (verdict, folded transit with the
+  posterior model, key parameters against their priors with the stellar density of the star as a reference), its
+  consistency (odd against even fits and every transit against the model) and its corner plot, which includes the
+  stellar density; plus one page, shared, on the convergence of the nested sampling and the noise (residuals without the
+  Gaussian process baseline). Posteriors that pile up against the edge of their priors are reported. The allesfitter
+  files stay in the fit directory. The module `bayesian_fit.fit_report` (`FitReport`) is replaced by
+  `bayesian_fit.fit_landscape_report` and `bayesian_fit.fit_results`.
 - Update WATSON integration to `dearwatson==2.1.2`: the vetting report is a compact landscape PDF (verdict and
   signal, WATSON-NET and TRICERATOPS, source offset, centroids and optical ghost with the per-sector pixel maps,
   every single transit as a thumbnail, and detailed sheets only for the flagged transits) instead of 80+ portrait
@@ -238,6 +246,9 @@
 
 - The target info report was not written in a real search: Sherlock passes the window lengths as a numpy array and
   `self.window_lengths or ...` raised `ValueError` (the guard kept the search alive, but the PDF was missing).
+- The odd and even fits kept the priors of `rsuma` ((R*+Rp)/a) and `cosi` of the main fit while fitting twice the
+  period, which scales both by 2^(-2/3). Both fits ended against the edge of their priors and could not be compared.
+  The priors are now scaled (`Fitter.odd_even_params_text`).
 - Observation plan: the observation window could start after it ended (Calar Alto, 4 December 2026: 17:53 to 06:06)
   because the evening twilight nearest to the mid-time can be the next evening; the night is now the one that
   holds the first observable sample. `plan_event` returned None when it failed, which stopped the whole plan with

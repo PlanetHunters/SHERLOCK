@@ -38,6 +38,25 @@ The input configuration file (when used) specifies parameters like:
 - Prior distributions
 - Data sources
 
+Fit report
+----------
+
+When the fit ends, ``<object id>_fit.pdf`` is written next to the results (in ``fit_[n]/main``). It is a landscape
+document with, for every fitted candidate (SOI), three pages, and a last page shared by all of them:
+
+1. the summary: a verdict, the folded transit with the posterior model, the key parameters against their priors
+   (including the stellar density, with the one of the star as a reference) and the limb darkening and noise;
+2. the consistency: the odd and even fits against the main one, and every transit against the posterior model;
+3. the corner plot of the radius ratio, the impact parameter, the stellar density, the duration, the depth and the
+   period;
+4. (once, at the end) whether the nested sampling converged and whether the noise, once the Gaussian process baseline
+   is removed, is white.
+
+A posterior that piles up against the edge of its prior, a stellar density that disagrees with the one of the
+orbit, or odd and even fits that sit at the edge of their priors are reported as warnings. The files of
+allesfitter (``results/ns_corner.pdf``, ``ns_trace.pdf``, ``ns_fit_*.pdf``, the tables, the ``odd`` and ``even``
+folders and the logs) are kept as they are. A failure writing the report never breaks the fit.
+
 API Reference
 ------------
 
