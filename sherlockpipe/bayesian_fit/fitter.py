@@ -16,6 +16,9 @@ from lcbuilder.helper import LcbuilderHelper
 from sherlockpipe.loading.tool_with_candidate import ToolWithCandidate
 
 
+# the same star, twice the period (odd and even fits): a/R* grows by 2^(2/3)
+ODD_EVEN_ORBIT_SCALE = 0.5 ** (2 / 3)
+
 resources_dir = path.join(path.dirname(__file__))
 resources_dir = str(Path(resources_dir).parent.absolute())
 
@@ -234,29 +237,11 @@ class Fitter(ToolWithCandidate):
             params_text = self.fill_candidates_params(fit_candidate_df, star_df, fit_orbit, self.detrend,
                                                        distribution=distribution,
                                                        distribution_params=distribution_params)
-            for _, candidate_row in fit_candidate_df.iterrows():
-                orig_period = candidate_row["period"]
-                per_err = candidate_row["per_err"]
-                orig_t0 = candidate_row["t0"]
-                name = str(candidate_row["name"])
-                new_period = orig_period * 2
-                new_t0 = orig_t0 + orig_period * epoch_shift
-                params_text = re.sub(
-                    r'\b' + re.escape(name) + r'_epoch,([^\n,]+),([^\n,]+),uniform ([^\n ]+) ([^\n ]+),([^\n,]+),([^\n,]+)',
-                    name + '_epoch,' + str(new_t0) + r',\2,uniform '
-                    + str(new_t0 - 0.02) + ' ' + str(new_t0 + 0.02) + r',\5,\6',
-                    params_text
-                )
-                params_text = re.sub(
-                    r'\b' + re.escape(name) + r'_period,([^\n,]+),([^\n,]+),uniform ([^\n ]+) ([^\n ]+),([^\n,]+),([^\n,]+)',
-                    name + '_period,' + str(new_period) + r',\2,uniform '
-                    + str(new_period - 2 * per_err) + ' ' + str(new_period + 2 * per_err) + r',\5,\6',
-                    params_text
-                )
+            params_text = Fitter.odd_even_params_text(params_text, fit_candidate_df, variant_name)
             with open(variant_dir + "/params.csv", 'w') as f:
                 f.write(params_text)
                 f.truncate()
-            logging.info("Running %s transit fit (P=%.4fd, T0=%.4f)", variant_name, new_period, new_t0)
+            logging.info("Running %s transit fit", variant_name)
             try:
                 alexfitter.show_initial_guess(variant_dir)
             except Exception as e:
@@ -276,6 +261,63 @@ class Fitter(ToolWithCandidate):
                         alexfitter.mcmc_output(variant_dir)
                     except Exception as e:
                         logging.exception(str(e))
+
+    @staticmethod
+    def odd_even_params_text(params_text, fit_candidate_df, variant_name):
+        """
+        Turns the parameters of the main fit into the ones of the odd or the even transits fit: each candidate is
+        fitted with twice its period, the epoch of the even fit is shifted one period and the priors of the epoch and
+        the period are centered on the new values.
+
+        :param params_text: the allesfitter parameters of the main fit
+        :param fit_candidate_df: the fitted candidates
+        :param variant_name: 'odd' or 'even'
+        :return: the allesfitter parameters of the variant
+        """
+        epoch_shift = 0 if variant_name == "odd" else 1.0
+        for _, candidate_row in fit_candidate_df.iterrows():
+            orig_period = candidate_row["period"]
+            per_err = candidate_row["per_err"]
+            orig_t0 = candidate_row["t0"]
+            name = str(candidate_row["name"])
+            new_period = orig_period * 2
+            new_t0 = orig_t0 + orig_period * epoch_shift
+            params_text = re.sub(
+                r'\b' + re.escape(name) + r'_epoch,([^\n,]+),([^\n,]+),uniform ([^\n ]+) ([^\n ]+),([^\n,]+),([^\n,]+)',
+                name + '_epoch,' + str(new_t0) + r',\2,uniform '
+                + str(new_t0 - 0.02) + ' ' + str(new_t0 + 0.02) + r',\5,\6',
+                params_text
+            )
+            params_text = re.sub(
+                r'\b' + re.escape(name) + r'_period,([^\n,]+),([^\n,]+),uniform ([^\n ]+) ([^\n ]+),([^\n,]+),([^\n,]+)',
+                name + '_period,' + str(new_period) + r',\2,uniform '
+                + str(new_period - 2 * per_err) + ' ' + str(new_period + 2 * per_err) + r',\5,\6',
+                params_text
+            )
+            # The same star with twice the period has a semi-major axis 2^(2/3) times larger: (R*+Rp)/a and cos i
+            # (b R*/a) fall by that factor. Their priors have to follow, or the fit piles up against their edges.
+            for parameter in ("rsuma", "cosi"):
+                params_text = Fitter.scale_prior(params_text, name + "_" + parameter, ODD_EVEN_ORBIT_SCALE)
+            logging.info("%s fit of %s: P=%.4fd, T0=%.4f", variant_name, name, new_period, new_t0)
+        return params_text
+
+    @staticmethod
+    def scale_prior(params_text, parameter, factor):
+        """
+        Multiplies the value and the bounds of the uniform prior of one parameter of an allesfitter params text.
+
+        :param params_text: the allesfitter parameters
+        :param parameter: the full name of the parameter, e.g. SOI_1_rsuma
+        :param factor: the factor to multiply the value and the bounds by
+        :return: the allesfitter parameters with the scaled prior
+        """
+        pattern = r'(?m)^' + re.escape(parameter) + r',([^\n,]+),([^\n,]+),uniform ([^\n ,]+) ([^\n ,]+),'
+
+        def scaled(match):
+            value, fit, low, high = match.group(1), match.group(2), match.group(3), match.group(4)
+            return f"{parameter},{float(value) * factor!r},{fit},uniform {float(low) * factor!r} {float(high) * factor!r},"
+
+        return re.sub(pattern, scaled, params_text)
 
     def overwrite_settings(self, settings_file, cpus, candidate_df, tolerance, boundaries="single",
                            secondary_eclipse="True"):
