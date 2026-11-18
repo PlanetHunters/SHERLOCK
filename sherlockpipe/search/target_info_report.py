@@ -348,7 +348,8 @@ def config_from_log(parsed_log, window_lengths=None):
     sigma = definitions.get("Sigma threshold for upper outliers clipping")
     return ReportConfig(setup_rows=[(label, definitions[key]) for label, key in wanted if key in definitions],
                         initial_mask=parsed_log["initial_mask"], transit_mask=parsed_log["transit_mask"],
-                        outliers_sigma_upper=float(sigma) if sigma else None, window_lengths=window_lengths,
+                        outliers_sigma_upper=float(sigma) if sigma else None,
+                        window_lengths=None if window_lengths is None else [float(w) for w in window_lengths if float(w) > 0],
                         detrend_method=definitions.get("Detrend method"))
 
 

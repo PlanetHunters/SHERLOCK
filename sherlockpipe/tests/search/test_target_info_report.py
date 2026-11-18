@@ -263,6 +263,13 @@ class TestReportDocument(unittest.TestCase):
         report = TargetInfoReport(self.directory, "TIC1_all", window_lengths=np.array([0.0, 0.19, 0.56]))
         self.assertIsNotNone(report.create())
 
+    def test_window_lengths_as_a_numpy_array_reach_the_config_taken_from_the_log(self):
+        _synthetic_execution(self.directory)
+        report = TargetInfoReport(self.directory, "TIC1_all", window_lengths=np.array([0.0, 0.19, 0.56]))
+        self.assertIsNotNone(report.create())
+        self.assertEqual([0.19, 0.56], report.config.window_lengths)
+        self.assertIsInstance(report.config.window_lengths, list)
+
     def test_an_empty_numpy_array_falls_back_to_the_window_lengths_of_the_runs(self):
         _synthetic_execution(self.directory)
         report = TargetInfoReport(self.directory, "TIC1_all", window_lengths=np.array([]))
