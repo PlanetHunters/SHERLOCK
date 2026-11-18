@@ -209,7 +209,8 @@ def run(args):
               "t0": float(t0), "epochs": len(emls.bary_t0s), "seconds": clock.time() - start,
               "sherlockpipe_version": code_version(), "exposure_time": emls.exposure_time}
     for key in ("max_snr", "fap", "fap_upper", "detected", "recovered_period", "best_snr_radius",
-                "planet_shape_check", "red_noise_factor", "planet_depth_correction", "planet_shape_corrections"):
+                "planet_shape_check", "red_noise_factor", "planet_depth_correction", "planet_shape_corrections",
+                "planet_epoch_depths", "planet_t0_shifts"):
         result[key] = getattr(emls, key, None)
     json.dump(result, open(os.path.join(case_dir, "result.json"), "w"), indent=1, default=_json)
     print("DONE", json.dumps({k: result[k] for k in ("condition", "offset_index", "max_snr", "fap_upper", "detected")},
