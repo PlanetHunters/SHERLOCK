@@ -61,7 +61,8 @@ class TestsEntrypoints(unittest.TestCase):
         args.repetitions = 1
         try:
             run_stability(args)
-            self.assertEquals(2, len(os.listdir(object_dir + '/stability_stability')))
+            self.assertEqual({'stability.log', 'stability_megno.csv', 'stability_report.pdf'},
+                             set(os.listdir(object_dir + '/stability_stability')))
         finally:
             shutil.rmtree(object_dir + '/stability_stability', ignore_errors=True)
 
