@@ -515,7 +515,7 @@ def _comparison_table(fig, results, planet, x, y_top, width):
     """The main, odd and even fits side by side, with the difference between the odd and the even in sigmas."""
     rows = comparison_rows(results, planet)
     odd_even = "odd" in results.variants and "even" in results.variants
-    cols = [x, x + .20 * width, x + .42 * width, x + .64 * width, x + .86 * width]
+    cols = [x, x + .27 * width, x + .47 * width, x + .67 * width, x + .86 * width]
     fig.text(x, y_top + .042, "ODD AND EVEN FITS AGAINST THE MAIN FIT", fontsize=6.5, color=MUTED, fontweight="bold")
     fig.add_artist(Line2D([x, x + width], [y_top + .036, y_top + .036], color=GRID, lw=.6))
     for label, cx, colour in (("parameter", cols[0], MUTED), ("all", cols[1] + .06 * width, INK), ("odd", cols[2] + .06 * width, BAD),
@@ -556,7 +556,9 @@ def _variant_panels(fig, results, planet):
         ax.set_xticklabels(["all", "odd", "even"])
         ax.set_xlim(-.5, 2.5)
         ax.grid(axis="y", color=GRID, lw=.4)
-        _title(ax, title, "" if row.sigma is None else f"{row.sigma:.1f} σ")
+        _title(ax, title)
+        if row.sigma is not None:
+            ax.set_xlabel(f"odd − even: {row.sigma:.1f} σ", fontsize=6.3, color=MUTED, labelpad=2)
 
 
 def page_consistency(results: FitResults, planet, page):
@@ -576,7 +578,7 @@ def page_consistency(results: FitResults, planet, page):
         box.text(0, .18, "The odd fit keeps the 1st, 3rd, 5th... transit and the even fit the 2nd, 4th...; both use the period and the priors of the main fit. "
                          "Dots: green below 2 σ between odd and even, orange up to 3 σ, red above.", fontsize=6.4, color=MUTED, va="center")
     # chi square of every transit
-    a = _axes(fig, .06, .31, .30, .15)
+    a = _axes(fig, .06, .335, .30, .13)
     if len(times):
         a.scatter(times, chi2, c=[BAD if c > CHI2_TRANSIT_WARN else BLUE for c in chi2], s=9, zorder=3)
         a.axhline(1.0, color=INK, lw=.6, ls=":")
@@ -587,7 +589,7 @@ def page_consistency(results: FitResults, planet, page):
     else:
         _unavailable(a, "no transit has data")
     _title(a, "Fit quality per transit", f"{bad} of {len(times)} > {CHI2_TRANSIT_WARN}")
-    a = _axes(fig, .42, .31, .13, .15)
+    a = _axes(fig, .42, .335, .13, .13)
     a.axis("off")
     for k, (label, value) in enumerate([("transits with data", f"{len(times)}"), ("listed", f"{total}"), ("duration", f"{t14 * 24:.2f} h"),
                                         ("above χ² %.1f" % CHI2_TRANSIT_WARN, f"{bad}")]):
