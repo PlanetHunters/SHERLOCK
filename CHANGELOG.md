@@ -98,6 +98,8 @@
 
 ### Added
 
+- EMLS synthetic-planet tool: `--point-exposures` integrates the injected planet over each point's own exposure,
+  measured from the point spacing as EMLS does, so the false-alarm test runs on mixed 1-min + 30-min curves.
 - Run sheet: a one-page landscape image for every curve a Run searches (the PDCSAP flux and each detrend,
   `Run_<n>_PDCSAP-FLUX_<id>.png` and `Run_<n>_<ws|ks>=<value>_<id>.png`) and for the selected signal
   (`Run_<n>_SELECTED_<curve>_<id>.png`), with the file names the old Run plots had. Each page has the folded transit
