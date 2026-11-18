@@ -97,6 +97,8 @@ class Fitter(ToolWithCandidate):
         self.odd_even_tolerance = odd_even_tolerance
         self._noise_distribution_params = None
 
+    ODD_EVEN_VARIANTS = ("odd", "even")
+
     def mask_non_fit_candidates(self, time, flux, flux_err, candidate_df, fit_candidate_df):
         """
         Masks all the candidates found in previous runs in the SHERLOCK search.
@@ -225,7 +227,7 @@ class Fitter(ToolWithCandidate):
         distribution = 'normal' if self._noise_distribution_params is not None else 'uniform'
         main_lc = pd.read_csv(self.odd_even_dir + "/main/lc.csv")
         fit_width = Fitter.select_fit_width(fit_candidate_df)
-        for variant_name in ("odd", "even"):
+        for variant_name in self.ODD_EVEN_VARIANTS:
             variant_dir = self.odd_even_dir + "/" + variant_name
             os.mkdir(variant_dir)
             variant_lc = Fitter.odd_even_curve(main_lc, fit_candidate_df, variant_name, fit_width)
