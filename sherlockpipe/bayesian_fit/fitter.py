@@ -13,11 +13,10 @@ from os import path
 import matplotlib.pyplot as plt
 from lcbuilder.helper import LcbuilderHelper
 
+from sherlockpipe.bayesian_fit.fit_results import ODD_EVEN_ORBIT_SCALE
 from sherlockpipe.loading.tool_with_candidate import ToolWithCandidate
 
 
-# the same star, twice the period (odd and even fits): a/R* grows by 2^(2/3)
-ODD_EVEN_ORBIT_SCALE = 0.5 ** (2 / 3)
 
 resources_dir = path.join(path.dirname(__file__))
 resources_dir = str(Path(resources_dir).parent.absolute())

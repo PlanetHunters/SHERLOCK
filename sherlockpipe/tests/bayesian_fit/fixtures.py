@@ -97,7 +97,19 @@ def make_fit_results(planets=("SOI_1",), variants=True, pegged=False, n_samples=
             vpriors = {f"{p}_rr": Prior("uniform", rr_prior) for p in planets}
             vpriors.update({f"{p}_rsuma": Prior("uniform", (0.09, 0.138) if pegged else (0.0567, 0.0875)) for p in planets})
             vpriors.update({f"{p}_cosi": Prior("uniform", (0.0, 0.06) if pegged else (0.0, 0.0378)) for p in planets})
-            variant_fits[kind] = VariantFit(kind, pd.DataFrame(rows), vpriors)
+            drows = []
+            for planet in planets:
+                scale = 2 ** (2 / 3)
+                for prop, value, err in ((f"Transit depth (undil.) {planet}; $\\delta$ (ppt)", 0.65 + 40 * shift, 0.04),
+                                         (f"Companion radius {planet}; $R_\\mathrm{{{planet}}}$ ($\\mathrm{{R_{{\\oplus}}}}$)", 1.21 + shift * 50, 0.05),
+                                         (f"Companion radius {planet}; $R_\\mathrm{{{planet}}}$ ($\\mathrm{{R_{{jup}}}}$)", 0.108, 0.005),
+                                         (f"Impact parameter {planet}; $b_\\mathrm{{tra}}$", 0.37, 0.12),
+                                         (f"Impact parameter occultation {planet}; $b_\\mathrm{{occ}}$", 0.37, 0.12),
+                                         (f"Total transit duration {planet}; $T$ (h)", 1.21, 0.04),
+                                         (f"Semi-major axis {planet} over host radius; $a/R$", 9.03 * scale, 0.3),
+                                         (f"Host density from orbit {planet}; $\\rho$ (cgs)", 6.2, 0.6)):
+                    drows.append({"#property": prop, "value": value, "lower_error": err, "upper_error": err, "source": "derived"})
+            variant_fits[kind] = VariantFit(kind, pd.DataFrame(rows), vpriors, pd.DataFrame(drows))
     weights = np.full(n_samples, 1.0 / n_samples)
     return FitResults(
         object_id="TIC 1", ra=185.3, dec=57.7, magnitudes={"v": 12.8}, planets=list(planets), masked=list(masked),

@@ -17,6 +17,8 @@ import numpy as np
 import pandas as pd
 
 SOLAR_DENSITY_CGS = 1.41
+# the same star, twice the period (odd and even fits): a/R*, 1/rsuma and 1/cos i grow by 2^(2/3)
+ODD_EVEN_ORBIT_SCALE = 0.5 ** (2 / 3)
 RESAMPLED_SAMPLES = 20000
 
 
@@ -60,6 +62,7 @@ class VariantFit:
     kind: str
     table: pd.DataFrame
     priors: Dict[str, Prior]
+    derived: Optional[pd.DataFrame] = None
 
 
 @dataclass
@@ -152,7 +155,9 @@ def read_variants(fit_dir):
         folder = Path(fit_dir).parent / kind
         table_file = folder / "results" / "ns_table.csv"
         if table_file.exists():
-            variants[kind] = VariantFit(kind, pd.read_csv(table_file), parse_priors(str(folder / "params.csv")))
+            derived_file = folder / "results" / "ns_derived_table.csv"
+            derived = pd.read_csv(derived_file) if derived_file.exists() else None
+            variants[kind] = VariantFit(kind, pd.read_csv(table_file), parse_priors(str(folder / "params.csv")), derived)
     return variants
 
 

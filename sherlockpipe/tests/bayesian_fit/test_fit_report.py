@@ -143,6 +143,74 @@ class OddEvenTest(unittest.TestCase):
         self.assertEqual(flr.odd_even_check(make_fit_results(variants=False), "SOI_1").status, "info")
 
 
+class ComparisonTableTest(unittest.TestCase):
+    def rows(self, **kw):
+        return {r.label: r for r in flr.comparison_rows(make_fit_results(**kw), "SOI_1")}
+
+    def test_every_parameter_has_the_main_odd_and_even_values(self):
+        rows = self.rows()
+        for label in ("Rp / R★", "Depth [ppt]", "Rp [R⊕]", "Impact parameter b", "Total duration [h]", "a / R★", "Stellar density [g/cm³]"):
+            self.assertIn(label, rows)
+            row = rows[label]
+            self.assertTrue(all(v is not None for v in (row.main, row.odd, row.even)), label)
+
+    def test_a_over_r_star_of_the_odd_and_even_fits_is_scaled_back_to_the_main_fit(self):
+        row = self.rows()["a / R★"]
+        self.assertAlmostEqual(row.odd[0], 9.03, delta=.01)   # 9.03 * 2^(2/3) from the fit, times 2^(-2/3)
+
+    def test_the_difference_is_in_sigmas_between_the_odd_and_the_even_values(self):
+        row = self.rows()["Depth [ppt]"]
+        self.assertAlmostEqual(row.sigma, abs(row.odd[0] - row.even[0]) / np.hypot(row.odd[1], row.even[1]), places=6)
+
+    def test_the_status_follows_two_and_three_sigmas(self):
+        base = dict(label="x", fmt="{}", main=(1, 1), odd=(1, 1), even=(1, 1))
+        for sigma, status in ((.5, "ok"), (2.5, "warn"), (3.5, "fail"), (None, "info")):
+            self.assertEqual(flr.ComparisonRow(sigma=sigma, **base).status, status)
+
+    def test_without_the_odd_and_even_fits_only_the_main_column_is_filled(self):
+        rows = self.rows(variants=False)
+        self.assertIsNotNone(rows["Depth [ppt]"].main)
+        self.assertIsNone(rows["Depth [ppt]"].odd)
+        self.assertIsNone(rows["Depth [ppt]"].sigma)
+
+    def test_the_odd_even_check_uses_the_depth_when_it_is_there(self):
+        r = make_fit_results()
+        check = flr.odd_even_check(r, "SOI_1")
+        self.assertIn("depth differs by", check.detail)
+        self.assertEqual(check.status, "ok")
+
+    def test_a_very_different_depth_is_a_warning(self):
+        r = make_fit_results()
+        table = r.variants["even"].derived
+        table.loc[table["#property"].str.startswith("Transit depth (undil.)"), "value"] += 1.0
+        self.assertEqual(flr.odd_even_check(r, "SOI_1").status, "warn")
+
+    def test_without_derived_tables_the_check_falls_back_to_the_radius_ratio(self):
+        r = make_fit_results()
+        for variant in r.variants.values():
+            variant.derived = None
+        self.assertIn("Rp/R★ differs by", flr.odd_even_check(r, "SOI_1").detail)
+
+    def test_the_consistency_page_has_the_table_with_every_row(self):
+        fig = flr.page_consistency(make_fit_results(), "SOI_1", 2)
+        text = " ".join(t.get_text() for t in fig.texts)
+        for label in ("ODD AND EVEN FITS AGAINST THE MAIN FIT", "Depth [ppt]", "Stellar density [g/cm³]", "odd − even"):
+            self.assertIn(label, text)
+
+    def test_the_loader_keeps_the_derived_table_of_the_odd_and_even_fits(self):
+        from sherlockpipe.bayesian_fit.fit_results import read_variants
+        source = make_fit_results(n_samples=1200, n_time=2000)
+        with tempfile.TemporaryDirectory() as tmp:
+            fit_dir = f"{tmp}/fit_[1]/main"
+            write_fit_directory(fit_dir, source)
+            for kind in ("odd", "even"):
+                source.variants[kind].derived.to_csv(f"{tmp}/fit_[1]/{kind}/results/ns_derived_table.csv", index=False)
+            variants = read_variants(fit_dir)
+        self.assertEqual(sorted(variants), ["even", "odd"])
+        self.assertIsNotNone(variants["odd"].derived)
+        self.assertGreater(len(variants["odd"].derived), 5)
+
+
 class TransitsTest(unittest.TestCase):
     def test_only_the_transits_with_data_are_listed(self):
         r = make_fit_results()
