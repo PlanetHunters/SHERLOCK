@@ -17,8 +17,6 @@ import numpy as np
 import pandas as pd
 
 SOLAR_DENSITY_CGS = 1.41
-# the same star, twice the period (odd and even fits): a/R*, 1/rsuma and 1/cos i grow by 2^(2/3)
-ODD_EVEN_ORBIT_SCALE = 0.5 ** (2 / 3)
 RESAMPLED_SAMPLES = 20000
 
 

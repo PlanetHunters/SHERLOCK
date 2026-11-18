@@ -22,7 +22,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, FancyBboxPatch, Rectangle
 
-from sherlockpipe.bayesian_fit.fit_results import FitResults, ODD_EVEN_ORBIT_SCALE, model_curve
+from sherlockpipe.bayesian_fit.fit_results import FitResults, model_curve
 
 INK, MUTED, GRID = "#1f2933", "#6b7785", "#e3e7ec"
 OK, WARN, BAD, BLUE, ORANGE, INFO = "#2f8f5b", "#d9a21b", "#c0392b", "#2a6f97", "#e08a2b", "#9aa5b1"
@@ -31,8 +31,7 @@ EDGE_FRACTION = 0.05            # the outer part of a uniform prior
 EDGE_MASS = 0.15                # a posterior with this share of its samples in that part piles up against the edge
 # limits of a prior that are physical, so a posterior against them says nothing about the prior
 NATURAL_EDGES = {"sbratio_lc": ("low", "high"), "cosi": ("low",)}
-# the same star with twice the period (odd and even fits): (R*+Rp)/a and cos i are 2^(-2/3) times those of the main fit
-VARIANT_SCALE = {"rsuma": 2 ** (2 / 3), "cosi": 2 ** (2 / 3)}
+
 ESS_OK, ESS_WARN = 1000, 300    # effective samples of the nested sampling
 RED_NOISE_WARN = 1.5            # beta factor of the residuals
 DENSITY_TENSION_WARN = 3.0      # sigmas between the density of the star and the one of the orbit
@@ -192,16 +191,15 @@ class ComparisonRow:
         return "ok" if self.sigma < 2 else ("warn" if self.sigma < ODD_EVEN_WARN else "fail")
 
 
-# label, key of the derived samples of the main fit, how to find the row in a derived table, format, scale of the odd and
-# even values to compare them with the main fit (the doubled period makes a/R* 2^(2/3) times larger)
+# label, key of the derived samples of the main fit, how to find the row in a derived table, format
 COMPARISON = [
-    ("Rp / R★", None, None, "{:.4f}", 1.0),
-    ("Depth [ppt]", "depth_tr_undil_lc", lambda p, n: p.startswith(f"Transit depth (undil.) {n};"), "{:.3f}", 1.0),
-    ("Rp [R⊕]", "R_companion_(R_earth)", lambda p, n: p.startswith(f"Companion radius {n};") and "R_{\\oplus}" in p, "{:.2f}", 1.0),
-    ("Impact parameter b", "b_tra", lambda p, n: p.startswith(f"Impact parameter {n};") and "occultation" not in p, "{:.2f}", 1.0),
-    ("Total duration [h]", "T_tra_tot", lambda p, n: p.startswith(f"Total transit duration {n};"), "{:.3f}", 1.0),
-    ("a / R★", "a/R_star", lambda p, n: p.startswith(f"Semi-major axis {n} over host radius"), "{:.2f}", ODD_EVEN_ORBIT_SCALE),
-    ("Stellar density [g/cm³]", "host_density", lambda p, n: p.startswith(f"Host density from orbit {n};"), "{:.2f}", 1.0),
+    ("Rp / R★", None, None, "{:.4f}"),
+    ("Depth [ppt]", "depth_tr_undil_lc", lambda p, n: p.startswith(f"Transit depth (undil.) {n};"), "{:.3f}"),
+    ("Rp [R⊕]", "R_companion_(R_earth)", lambda p, n: p.startswith(f"Companion radius {n};") and "R_{\\oplus}" in p, "{:.2f}"),
+    ("Impact parameter b", "b_tra", lambda p, n: p.startswith(f"Impact parameter {n};") and "occultation" not in p, "{:.2f}"),
+    ("Total duration [h]", "T_tra_tot", lambda p, n: p.startswith(f"Total transit duration {n};"), "{:.3f}"),
+    ("a / R★", "a/R_star", lambda p, n: p.startswith(f"Semi-major axis {n} over host radius"), "{:.2f}"),
+    ("Stellar density [g/cm³]", "host_density", lambda p, n: p.startswith(f"Host density from orbit {n};"), "{:.2f}"),
 ]
 
 
@@ -219,7 +217,7 @@ def comparison_rows(results: FitResults, planet) -> List[ComparisonRow]:
     """The main fit, the odd fit and the even fit side by side, and how far apart the odd and the even ones are."""
     rows = []
     odd, even = results.variants.get("odd"), results.variants.get("even")
-    for label, sample_key, finder, fmt, scale in COMPARISON:
+    for label, sample_key, finder, fmt in COMPARISON:
         if sample_key is None:   # the radius ratio is a fitted parameter
             samples = results.samples.get(f"{planet}_rr")
             main = None if samples is None else _median_error(samples)
@@ -230,7 +228,7 @@ def comparison_rows(results: FitResults, planet) -> List[ComparisonRow]:
             values = [None if v is None else _derived_value(v.derived, finder, planet) for v in (odd, even)]
         if main is None and all(v is None for v in values):
             continue
-        a, b = (None if v is None else (v[0] * scale, v[1] * scale) for v in values)
+        a, b = values
         sigma = None if a is None or b is None or np.hypot(a[1], b[1]) <= 0 else abs(a[0] - b[0]) / np.hypot(a[1], b[1])
         rows.append(ComparisonRow(label, fmt, main, a, b, sigma))
     return rows
@@ -575,8 +573,8 @@ def page_consistency(results: FitResults, planet, page):
     box.axis("off")
     box.text(0, .78, f"ODD / EVEN: {check.detail}", fontsize=8.2, fontweight="bold", color=STATUS_COLOURS[check.status], va="center")
     if "odd" in results.variants:
-        box.text(0, .18, "Each fit uses twice the period, so (R★+Rp)/a, cos i and a/R★ are scaled by 2^(−2/3) in the priors and by 2^(2/3) here, to compare "
-                         "them with the main fit. Dots: green below 2 σ, orange up to 3 σ, red above.", fontsize=6.4, color=MUTED, va="center")
+        box.text(0, .18, "The odd fit keeps the 1st, 3rd, 5th... transit and the even fit the 2nd, 4th...; both use the period and the priors of the main fit. "
+                         "Dots: green below 2 σ between odd and even, orange up to 3 σ, red above.", fontsize=6.4, color=MUTED, va="center")
     # chi square of every transit
     a = _axes(fig, .06, .31, .30, .15)
     if len(times):

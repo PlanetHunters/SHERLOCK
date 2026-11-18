@@ -1,76 +1,78 @@
-"""The parameters of the odd and the even transit fits."""
+"""The light curves of the odd and the even transit fits."""
 import unittest
 
-from sherlockpipe.bayesian_fit.fitter import Fitter
-from sherlockpipe.tests.bayesian_fit.fixtures import candidates_df, main_params_text, prior
+import numpy as np
+import pandas as pd
 
-SCALE = 0.5 ** (2 / 3)  # the same star with twice the period: a/R* grows by 2^(2/3)
+from sherlockpipe.bayesian_fit.fitter import Fitter
+from sherlockpipe.tests.bayesian_fit.fixtures import candidates_df, main_params_text
+
+PERIOD, T0, WIDTH = 1.5, 100.0, 0.2
+
+
+def curve(n_transits=8, per_transit=40, width=0.15):
+    """The points around ``n_transits`` transits of a 1.5 d planet (epoch 100), and nothing in between."""
+    rng = np.random.default_rng(1)
+    time = np.concatenate([T0 + n * PERIOD + rng.uniform(-width, width, per_transit) for n in range(n_transits)])
+    return pd.DataFrame({"time": np.sort(time), "flux": 1.0, "flux_err": 1e-3})
+
+
+def transit_numbers(lc, t0=T0, period=PERIOD):
+    return np.round((lc["time"].to_numpy() - t0) / period).astype(int)
+
+
+class OddEvenCurveTest(unittest.TestCase):
+    def setUp(self):
+        self.candidates = candidates_df((1, PERIOD, T0, 0.5))
+        self.lc = curve()
+
+    def variant(self, name, candidates=None):
+        return Fitter.odd_even_curve(self.lc, self.candidates if candidates is None else candidates, name, WIDTH)
+
+    def test_the_odd_fit_keeps_the_first_third_and_fifth_transits(self):
+        self.assertEqual(sorted(set(transit_numbers(self.variant("odd")))), [0, 2, 4, 6])
+
+    def test_the_even_fit_keeps_the_second_fourth_and_sixth_transits(self):
+        self.assertEqual(sorted(set(transit_numbers(self.variant("even")))), [1, 3, 5, 7])
+
+    def test_between_them_the_two_fits_keep_every_point_exactly_once(self):
+        odd, even = self.variant("odd"), self.variant("even")
+        self.assertEqual(len(odd) + len(even), len(self.lc))
+        self.assertEqual(set(odd["time"]).isdisjoint(set(even["time"])), True)
+
+    def test_the_points_far_from_every_transit_are_kept_by_both_fits(self):
+        lc = pd.concat([self.lc, pd.DataFrame({"time": [T0 + 0.75 + n * PERIOD for n in range(8)], "flux": 1.0, "flux_err": 1e-3})]).sort_values("time")
+        odd = Fitter.odd_even_curve(lc, self.candidates, "odd", 0.2)
+        self.assertEqual(sum(abs((odd["time"] - T0) % PERIOD - 0.75) < 1e-9), 8)
+
+    def test_the_other_columns_and_the_order_are_kept(self):
+        odd = self.variant("odd")
+        self.assertEqual(list(odd.columns), ["time", "flux", "flux_err"])
+        self.assertTrue(odd["time"].is_monotonic_increasing)
+        self.assertEqual(list(odd.index), list(range(len(odd))))
+
+    def test_every_candidate_is_split_by_its_own_ephemeris(self):
+        candidates = candidates_df((1, PERIOD, T0, 0.5), (2, 2 * PERIOD, T0, 0.4))   # its 2nd transit is the 3rd of the first one
+        both = Fitter.odd_even_curve(self.lc, candidates, "odd", WIDTH)
+        alone = Fitter.odd_even_curve(self.lc, self.candidates, "odd", WIDTH)
+        self.assertLess(len(both), len(alone))
+
+    def test_the_original_curve_is_not_modified(self):
+        before = self.lc.copy()
+        self.variant("odd")
+        pd.testing.assert_frame_equal(self.lc, before)
+
+    def test_a_curve_without_transits_of_the_excluded_parity_is_unchanged(self):
+        lc = curve(n_transits=1)
+        self.assertEqual(len(Fitter.odd_even_curve(lc, self.candidates, "odd", WIDTH)), len(lc))
 
 
 class OddEvenParamsTest(unittest.TestCase):
-    def setUp(self):
-        self.candidates = candidates_df((1, 1.4923, 1713.45, 0.49))
-        self.main = main_params_text(self.candidates)
-
-    def variant(self, name, candidates=None):
-        return Fitter.odd_even_params_text(self.main, self.candidates if candidates is None else candidates, name)
-
-    def test_the_period_is_doubled_and_its_prior_centered_on_it(self):
-        value, low, high = prior(self.variant("odd"), "SOI_1_period")
-        self.assertAlmostEqual(value, 2 * 1.4923)
-        self.assertAlmostEqual(low, 2 * 1.4923 - 2 * 4.8e-5)
-        self.assertAlmostEqual(high, 2 * 1.4923 + 2 * 4.8e-5)
-
-    def test_the_odd_epoch_is_kept_and_the_even_one_is_shifted_a_period(self):
-        self.assertAlmostEqual(prior(self.variant("odd"), "SOI_1_epoch")[0], 1713.45)
-        self.assertAlmostEqual(prior(self.variant("even"), "SOI_1_epoch")[0], 1713.45 + 1.4923)
-
-    def test_the_epoch_prior_keeps_its_width(self):
-        _, low, high = prior(self.variant("even"), "SOI_1_epoch")
-        self.assertAlmostEqual(high - low, 0.04)
-
-    def test_the_radius_ratio_prior_is_untouched(self):
-        self.assertEqual(prior(self.variant("odd"), "SOI_1_rr"), prior(self.main, "SOI_1_rr"))
-
-    def test_every_candidate_is_rewritten(self):
-        candidates = candidates_df((1, 1.4923, 1713.45, 0.49), (2, 2.8662, 1712.95, 0.58))
-        text = Fitter.odd_even_params_text(main_params_text(candidates), candidates, "odd")
-        self.assertAlmostEqual(prior(text, "SOI_2_period")[0], 2 * 2.8662)
-        self.assertAlmostEqual(prior(text, "SOI_1_period")[0], 2 * 1.4923)
-
-    def test_the_rest_of_the_text_is_unchanged(self):
-        before, after = self.main.splitlines(), self.variant("odd").splitlines()
-        changed = [b for b, a in zip(before, after) if a != b]
-        self.assertEqual(len(before), len(after))
-        self.assertTrue(all(line.split(",")[0].endswith(("_epoch", "_period", "_rsuma", "_cosi")) for line in changed))
-
-
-class OddEvenOrbitScalingTest(unittest.TestCase):
-    """With the period doubled (same star) (R*+Rp)/a and cos i fall by 2^(-2/3); the old priors kept the main ones, so
-    both odd and even fits piled up against the edge of their priors."""
-
-    def setUp(self):
-        self.candidates = candidates_df((1, 1.4923, 1713.45, 0.49))
-        self.main = main_params_text(self.candidates)
-        self.odd = Fitter.odd_even_params_text(self.main, self.candidates, "odd")
-
-    def test_the_sum_of_radii_over_a_prior_is_scaled_with_the_period(self):
-        for old, new in zip(prior(self.main, "SOI_1_rsuma"), prior(self.odd, "SOI_1_rsuma")):
-            self.assertAlmostEqual(new, old * SCALE, places=9)
-
-    def test_the_cosine_of_the_inclination_prior_is_scaled_with_the_period(self):
-        for old, new in zip(prior(self.main, "SOI_1_cosi"), prior(self.odd, "SOI_1_cosi")):
-            self.assertAlmostEqual(new, old * SCALE, places=9)
-
-    def test_the_even_fit_gets_the_same_orbit_priors(self):
-        even = Fitter.odd_even_params_text(self.main, self.candidates, "even")
-        self.assertEqual(prior(even, "SOI_1_rsuma"), prior(self.odd, "SOI_1_rsuma"))
-
-    def test_the_real_posterior_of_the_main_fit_fits_inside_the_scaled_prior(self):
-        """Main fit of TIC 224298134: (R*+Rp)/a = 0.1133 and cos i = 0.041 -> 0.0714 and 0.0258 with 2P."""
-        _, low, high = prior(self.odd, "SOI_1_rsuma")
-        self.assertTrue(low < 0.1133 * SCALE < high)
-        self.assertTrue(prior(self.odd, "SOI_1_cosi")[1] < 0.041 * SCALE < prior(self.odd, "SOI_1_cosi")[2])
+    def test_the_variants_use_the_params_of_the_main_fit(self):
+        """The fit of the odd or the even transits keeps the period, the epoch and every prior of the main fit."""
+        self.assertFalse(hasattr(Fitter, "odd_even_params_text"))
+        self.assertFalse(hasattr(Fitter, "scale_prior"))
+        self.assertIn("SOI_1_period", main_params_text(candidates_df((1, 1.4923, 1713.45, 0.49))))
 
 
 if __name__ == "__main__":

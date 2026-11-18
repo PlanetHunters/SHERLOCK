@@ -11,7 +11,6 @@ import pandas as pd
 
 from sherlockpipe.bayesian_fit import fit_landscape_report as flr
 from sherlockpipe.bayesian_fit.fit_results import Prior, load_fit_results, parse_priors, star_density_prior
-from sherlockpipe.bayesian_fit.fitter import ODD_EVEN_ORBIT_SCALE
 from sherlockpipe.tests.bayesian_fit.fixtures import FakeAlles, make_fit_results, write_fit_directory
 
 
@@ -121,10 +120,6 @@ class DensityTest(unittest.TestCase):
 
 
 class OddEvenTest(unittest.TestCase):
-    def test_the_scale_of_the_odd_even_priors_is_the_inverse_of_the_one_the_fitter_applies(self):
-        self.assertAlmostEqual(flr.VARIANT_SCALE["rsuma"] * ODD_EVEN_ORBIT_SCALE, 1.0)
-        self.assertAlmostEqual(flr.VARIANT_SCALE["cosi"] * ODD_EVEN_ORBIT_SCALE, 1.0)
-
     def test_consistent_fits_are_ok(self):
         self.assertEqual(flr.odd_even_check(make_fit_results(), "SOI_1").status, "ok")
 
@@ -154,9 +149,10 @@ class ComparisonTableTest(unittest.TestCase):
             row = rows[label]
             self.assertTrue(all(v is not None for v in (row.main, row.odd, row.even)), label)
 
-    def test_a_over_r_star_of_the_odd_and_even_fits_is_scaled_back_to_the_main_fit(self):
+    def test_the_values_of_the_odd_and_even_fits_are_compared_as_they_are(self):
         row = self.rows()["a / R★"]
-        self.assertAlmostEqual(row.odd[0], 9.03, delta=.01)   # 9.03 * 2^(2/3) from the fit, times 2^(-2/3)
+        self.assertAlmostEqual(row.odd[0], 9.03, delta=.01)
+        self.assertAlmostEqual(row.even[0], 9.03, delta=.01)
 
     def test_the_difference_is_in_sigmas_between_the_odd_and_the_even_values(self):
         row = self.rows()["Depth [ppt]"]
