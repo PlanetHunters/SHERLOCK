@@ -376,9 +376,9 @@ def page_summary(results: FitResults, planet, page):
     if duration is not None:
         tiles.append(("Duration", f"{np.median(duration):.2f} h", "" if impact is None else f"b = {np.median(impact):.2f}"))
     for i, (label, big, small) in enumerate(tiles):
-        x = .56 + i * .108
+        x = .53 + i * .115
         ax.text(x, .76, label, fontsize=6.5, color=MUTED, va="center")
-        ax.text(x, .46, big, fontsize=13, fontweight="bold", color=INK, va="center")
+        ax.text(x, .46, big, fontsize=12, fontweight="bold", color=INK, va="center")
         ax.text(x, .15, small, fontsize=6.5, color=MUTED, va="center")
     # folded transit
     period, epoch = results.median(f"{planet}_period"), results.median(f"{planet}_epoch")
@@ -452,7 +452,7 @@ def _variant_panels(fig, results, planet):
         ax.set_xticklabels([e[0] for e in entries])
         ax.set_xlim(-.5, len(entries) - .5)
         ax.grid(axis="y", color=GRID, lw=.4)
-        _title(ax, label, "odd and even scaled to the main fit" if parameter in VARIANT_SCALE else None)
+        _title(ax, label)
 
 
 def page_consistency(results: FitResults, planet, page):
@@ -462,7 +462,8 @@ def page_consistency(results: FitResults, planet, page):
     check = odd_even_check(results, planet)
     fig.text(.06, .53, f"ODD / EVEN: {check.detail}", fontsize=7.8, fontweight="bold", color=STATUS_COLOURS[check.status])
     if "odd" in results.variants:
-        fig.text(.06, .505, "Each fit uses twice the period, so its (R★+Rp)/a and cos i priors are scaled by 2^(−2/3).", fontsize=7, color=MUTED)
+        fig.text(.06, .505, "Each fit uses twice the period: its (R★+Rp)/a and cos i priors are scaled by 2^(−2/3), and the odd and even", fontsize=7, color=MUTED)
+        fig.text(.06, .485, "values of those two are shown multiplied by 2^(2/3) to compare them with the main fit.", fontsize=7, color=MUTED)
     times, t14, total = transit_times(results, planet)
     chi2 = transit_chi2(results, planet, times, t14)
     bad = int(np.nansum(chi2 > CHI2_TRANSIT_WARN))

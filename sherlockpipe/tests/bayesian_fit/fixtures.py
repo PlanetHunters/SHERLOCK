@@ -104,8 +104,8 @@ def make_fit_results(planets=("SOI_1",), variants=True, pegged=False, n_samples=
         samples=samples, derived=derived, table=pd.DataFrame(table_rows),
         derived_table=pd.DataFrame({"#property": [], "value": []}), priors=priors, time=time, flux=flux, baseline=baseline,
         model=own, residuals=noise, logz=96896.45, logzerr=0.12, niter=21034, ncall=562256, efficiency=3.5, information=13.7,
-        ess=n_samples * ess_scale, logz_curve=np.linspace(96830, 96896, 3000), logl=np.linspace(-80, 0, 3000),
-        logvol=-np.linspace(0, 33, 3000), weights=weights, star_density=(6.08, 0.59), noise=None,
+        ess=n_samples * ess_scale, logz_curve=np.linspace(96830, 96896, n_samples), logl=np.linspace(-80, 0, n_samples),
+        logvol=-np.linspace(0, 33, n_samples), weights=weights, star_density=(6.08, 0.59), noise=None,
         settings={"baseline_flux_lc": "sample_GP_Matern32", "circular": True}, variants=variant_fits)
 
 
