@@ -7,8 +7,9 @@ Run it before merging a change to how EMLS models or subtracts the planet (see R
 
 Conditions (how the injected planet differs from the model EMLS subtracts):
     match  the model EMLS subtracts: integrated over the exposure (--exposure-seconds, default
-           Kepler long cadence), since EMLS models the exposure it measures from the point
-           spacing (exposure_time="auto"); instantaneous with --instantaneous
+           Kepler long cadence, or each point's own exposure with --point-exposures for mixed
+           cadences), since EMLS models the exposure it measures from the point spacing
+           (exposure_time="auto"); instantaneous with --instantaneous
     ld     as match, with limb darkening u1 + 0.15, u2 - 0.15 (EMLS starts from the given values)
     smear  integrated over the exposure while EMLS runs with --instantaneous, as the first
            2026-11-11 results in RESULTS.md did; without --instantaneous it repeats match, so
@@ -126,8 +127,20 @@ def inject_planet(time, flux, planet, star, t0, condition, exposure_seconds=KEPL
     if condition == "ld":
         params.u = [star["ld"][0] + LD_SHIFT, star["ld"][1] - LD_SHIFT]
     smeared = condition == "smear" or model_exposure
-    kwargs = {"supersample_factor": 15, "exp_time": exposure_seconds / 86400} if smeared else {}
-    return flux * batman.TransitModel(params, time, **kwargs).light_curve(params)
+    if not smeared:
+        return flux * batman.TransitModel(params, time).light_curve(params)
+    if exposure_seconds is None:
+        # Mixed cadences: each point integrated over its own exposure, as EMLS measures it.
+        from sherlockpipe.exomoon import ExoMoonLeastSquares
+        exposures = ExoMoonLeastSquares.infer_point_exposures(time) * 86400
+    else:
+        exposures = np.full(len(time), float(exposure_seconds))
+    model = np.ones(len(time))
+    for exposure in np.unique(exposures):
+        points = exposures == exposure
+        kwargs = {"supersample_factor": 15, "exp_time": exposure / 86400} if exposure > 0 else {}
+        model[points] = batman.TransitModel(params, time[points], **kwargs).light_curve(params)
+    return flux * model
 
 
 def build_emls(out, cpus, planet, star, time, flux, flux_err, t0, null_runs, exposure_time="auto"):
@@ -176,7 +189,8 @@ def nulls(args):
 
 def run(args):
     planet, star = load_params(args.params)
-    exposure = args.exposure_seconds or star["exposure_seconds"] or KEPLER_LONG_CADENCE_SECONDS
+    exposure = None if args.point_exposures else \
+        args.exposure_seconds or star["exposure_seconds"] or KEPLER_LONG_CADENCE_SECONDS
     null_snrs = json.load(open(args.nulls))["null_snrs"]
     if not null_snrs:
         raise ValueError(f"{args.nulls} has no null_snrs")
@@ -213,6 +227,8 @@ def plan(args):
                        "--condition", condition, "--out", args.out, "--cpus", str(args.cpus)]
             if args.exposure_seconds:
                 command += ["--exposure-seconds", str(args.exposure_seconds)]
+            if args.point_exposures:
+                command += ["--point-exposures"]
             if args.instantaneous:
                 command += ["--instantaneous"]
             print(" ".join(shlex.quote(part) for part in command))
@@ -266,6 +282,9 @@ def main(argv=None):
         command.add_argument("--offsets", type=int, default=20)
         command.add_argument("--exposure-seconds", type=float, default=None,
                              help="smear exposure; default: the params exposure, else Kepler long cadence")
+        command.add_argument("--point-exposures", action="store_true",
+                             help="integrate each point over its own exposure, measured from the point spacing "
+                                  "as EMLS does (mixed cadences); overrides --exposure-seconds")
         if name == "run":
             command.add_argument("--offset-index", type=int, required=True)
             command.add_argument("--condition", choices=CONDITIONS, required=True)

@@ -72,6 +72,29 @@ def test_injection_conditions_change_the_transit_shape(tool):
         tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, "other")
 
 
+def test_point_exposures_model_each_cadence_with_its_own_exposure(tool):
+    star = {"mass": 0.74, "radius": 0.765, "ld": [0.61, 0.11], "exposure_seconds": None}
+    long_cadence = np.arange(-0.3, 0.0, 1765.5 / 86400)
+    short_cadence = np.arange(0.0, 0.3, 60.0 / 86400)
+    time = np.concatenate([long_cadence, short_cadence])
+    flux = np.ones_like(time)
+    mixed = tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, "match", exposure_seconds=None)
+    as_long = tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, "match", exposure_seconds=1765.5)
+    as_short = tool.inject_planet(time, flux, DRIVER_PLANET, star, 0.0, "match", exposure_seconds=60.0)
+    long_points = np.arange(len(long_cadence) - 1)
+    short_points = np.arange(len(long_cadence) + 2, len(time))  # points at the junction take the spacing of either cadence
+    np.testing.assert_allclose(mixed[long_points], as_long[long_points], atol=2e-6)
+    np.testing.assert_allclose(mixed[short_points], as_short[short_points], atol=2e-6)
+    assert np.max(np.abs(as_long[short_points] - as_short[short_points])) > 1e-4
+
+
+def test_plan_passes_point_exposures(tool, capsys):
+    tool.main(["plan", "--curve", "lc.csv", "--params", "p.json", "--nulls", "n.json", "--out", "OUT",
+               "--offsets", "2", "--conditions", "match", "--point-exposures"])
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert len(lines) == 2 and all("--point-exposures" in line for line in lines)
+
+
 def test_offsets_avoid_the_real_transits(tool):
     offsets = tool.synthetic_offsets(30.36, 0.25, 20)
     assert len(offsets) == 20 and offsets[0] == pytest.approx(1.5) and offsets[-1] == pytest.approx(28.86)
