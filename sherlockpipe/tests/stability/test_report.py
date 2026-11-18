@@ -188,7 +188,7 @@ class ReportTest(unittest.TestCase):
         sr.write_stability_report(self.csv, self.pdf, self.info)
         doc = pdfium.PdfDocument(self.pdf)
         text = "\n".join(doc[i].get_textpage().get_text_range() for i in range(len(doc)))
-        for expected in ("map and summary", "e (b) vs e (c)", "What drives the stability", "Representative scenarios", "seed", "7"):
+        for expected in ("map and summary", "e (b) vs e (c)", "What drives the stability", "Representative scenarios", "Seed of the random angles", "7"):
             self.assertIn(expected, text)
 
     def test_a_failing_page_becomes_a_stub_and_the_rest_survives(self):
