@@ -3,6 +3,7 @@
 import copy
 import logging
 import tempfile
+import time as clock
 import batman
 import numpy as np
 from scipy import stats
@@ -23,6 +24,33 @@ MIN_INDEPENDENT_OFFSETS = 3
 
 MIN_SCRAMBLE_EPOCHS = 8
 
+
+
+PROGRESS_STEPS = 10
+
+
+def log_progress(label, done, total, failed, snrs, start, enabled_level):
+    """Log the progress of a silenced loop of searches, about every tenth of `total`.
+
+    The null and scrambled loops disable logging below WARNING so that each search stays quiet;
+    this re-enables enabled_level (the level in force before the loop) for one line, so a long
+    run can be followed: searches done, failed, the SNR so far, the elapsed time and an estimate
+    of the time left at the current rate.
+    """
+    step = max(1, int(np.ceil(total / PROGRESS_STEPS)))
+    if done % step != 0 or done == total:
+        return
+    elapsed = clock.monotonic() - start
+    remaining = elapsed / done * (total - done)
+    silenced = logging.root.manager.disable
+    logging.disable(enabled_level)
+    try:
+        logging.info("%s: %d/%d done, %d failed, SNR median %s, largest %s, elapsed %.1f min, about %.1f min left",
+                     label, done, total, failed,
+                     "%.2f" % np.median(snrs) if snrs else "-", "%.2f" % np.max(snrs) if snrs else "-",
+                     elapsed / 60, remaining / 60)
+    finally:
+        logging.disable(silenced)
 
 class NullDistribution:
     """The null distribution from pseudo-epoch searches and the false-alarm probability.
@@ -206,12 +234,14 @@ class NullDistribution:
         rng = np.random.default_rng(self.null_seed)
         snrs, failed = [], 0
         previous_disable = logging.root.manager.disable
+        start = clock.monotonic()
         logging.disable(logging.WARNING)
         try:
-            for _ in range(self.null_runs):
+            for run in range(1, self.null_runs + 1):
                 curve = self.null_curve(before_trim, rng, trim_half_window, valid_offsets)
                 if curve is None:
                     failed += 1
+                    log_progress("Null searches", run, self.null_runs, failed, snrs, start, previous_disable)
                     continue
                 try:
                     snr = self.null_statistic(before_trim, *curve)
@@ -221,6 +251,7 @@ class NullDistribution:
                     snrs.append(float(snr))
                 else:
                     failed += 1
+                log_progress("Null searches", run, self.null_runs, failed, snrs, start, previous_disable)
                 if self.null_can_stop(snrs, observed_snr):
                     self.null_stopped_early = True
                     break
@@ -362,9 +393,10 @@ class NullDistribution:
         rng = np.random.default_rng(self.null_seed + 1)
         snrs = []
         previous_disable = logging.root.manager.disable
+        start = clock.monotonic()
         logging.disable(logging.WARNING)
         try:
-            for _ in range(self.scramble_runs):
+            for run in range(1, self.scramble_runs + 1):
                 order = rng.permutation(len(epochs))
                 while np.all(order == np.arange(len(epochs))):
                     order = rng.permutation(len(epochs))
@@ -378,6 +410,8 @@ class NullDistribution:
                     snr = np.nan
                 if np.isfinite(snr):
                     snrs.append(float(snr))
+                log_progress("Scrambled nulls", run, self.scramble_runs, run - len(snrs), snrs, start,
+                             previous_disable)
                 if self.null_can_stop(snrs, observed_snr, self.scramble_runs):
                     self.scramble_stopped_early = True
                     break
